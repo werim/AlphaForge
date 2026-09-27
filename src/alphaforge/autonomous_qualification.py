@@ -1107,6 +1107,15 @@ class AutonomousQualificationHarness:
                         AS guided_avg_stop_distance_pct,
                     MAX(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
                         AS guided_max_stop_distance_pct,
+                    MIN(CAST(json_extract(o.metrics_json,'$.planned_stop_distance_pct') AS REAL))
+                        AS guided_min_planned_stop_distance_pct,
+                    MAX(CAST(json_extract(o.metrics_json,'$.planned_stop_distance_pct') AS REAL))
+                        AS guided_max_planned_stop_distance_pct,
+                    SUM(CASE
+                        WHEN UPPER(COALESCE(
+                            json_extract(o.metrics_json,'$.stop_distance_basis'),''
+                        ))='EXPECTED_FILL'
+                        THEN 1 ELSE 0 END) AS guided_expected_fill_basis_decisions,
                     AVG(CAST(json_extract(o.metrics_json,'$.candidate_rr') AS REAL))
                         AS guided_avg_candidate_rr,
                     AVG(CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL))

@@ -32,6 +32,9 @@ from alphaforge.execution import (
     build_execution_cost_semantics,
     execution_context_is_unavailable,
     weighted_average_fill_price,
+    adverse_expected_fill_price,
+    build_stop_risk_metrics,
+    evaluate_stop_risk_policy,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
@@ -1191,7 +1194,11 @@ class RuntimeOrchestrator:
                     "entry_source", "stop_source", "target_source", "setup_timeframe",
                     "execution_timeframe", "structural_stop", "structural_target",
                     "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
-                    "min_signal_score", "min_raw_rr", "min_effective_rr",
+                    "planned_stop_distance_pct", "executable_stop_distance_pct",
+                    "stop_distance_basis", "stop_risk_evidence_status",
+                    "stop_risk_missing_fields", "stop_too_wide_softened",
+                    "stop_too_wide_extreme", "stop_too_wide_soft_eligible",
+                    "risk_scale", "min_signal_score", "min_raw_rr", "min_effective_rr",
                     "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
@@ -1258,6 +1265,12 @@ class RuntimeOrchestrator:
                     "geometry_source": payload.get("geometry_source"),
                     "all_failed_gates": payload.get("all_failed_gates"),
                     "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                    "planned_stop_distance_pct": payload.get("planned_stop_distance_pct"),
+                    "executable_stop_distance_pct": payload.get("executable_stop_distance_pct"),
+                    "stop_distance_basis": payload.get("stop_distance_basis"),
+                    "stop_risk_evidence_status": payload.get("stop_risk_evidence_status"),
+                    "risk_scale": payload.get("risk_scale"),
+                    "stop_too_wide_softened": payload.get("stop_too_wide_softened"),
                     "reject_execution_basis": payload.get("reject_execution_basis"),
                     "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
                     "execution_ctx": execution_ctx,
@@ -1708,10 +1721,14 @@ class RuntimeOrchestrator:
                 slippage_pct = max(float(raw_slippage), 0.0)
             except (TypeError, ValueError):
                 return None, None
-        side = str(market_ctx.get("side") or "LONG").strip().upper()
-        if side not in {"LONG", "SHORT"}:
+        try:
+            fill = adverse_expected_fill_price(
+                entry=entry,
+                side=market_ctx.get("side"),
+                slippage_pct=slippage_pct,
+            )
+        except ValueError:
             return None, None
-        fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)
         return round(fill, 8), slippage_pct
 
     def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
@@ -2399,12 +2416,26 @@ class RuntimeOrchestrator:
             market_ctx["execution_ctx"] = execution_ctx
             market_ctx["execution_safety"] = execution_safety
 
+        # Stop levels remain structural market evidence.  Stop-risk viability,
+        # however, is decision-time execution evidence and therefore uses the
+        # same expected fill that already governs executable RR.
+        stop_risk = build_stop_risk_metrics(
+            planned_entry=market_ctx.get("entry"),
+            expected_fill=rr_metrics.get("expected_fill"),
+            stop=market_ctx.get("sl"),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
+        stop_risk.update(
+            min_stop_pct=float(self.config.min_sl_pct),
+            max_stop_pct=float(self.config.max_sl_pct),
+        )
+        market_ctx.update(stop_risk)
+
         # Guided MTF structural geometry is market evidence, not a target to be
-        # widened until it passes policy.  Reject a sub-minimum structural stop
+        # widened until it passes policy. Reject a sub-minimum executable stop
         # before AIBrain scoring so the causal geometry failure remains the
-        # authoritative primary reason instead of being hidden by downstream
-        # score/expectancy effects.  Wide-stop softening still depends on score
-        # and effective RR, so that policy deliberately remains downstream.
+        # authoritative primary reason. Wide-stop softening requires score and
+        # effective RR, so that policy deliberately remains downstream.
         mtf_for_geometry = (
             market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
         )
@@ -2420,61 +2451,55 @@ class RuntimeOrchestrator:
             and isinstance(generation_for_geometry.get("candidate"), Mapping)
         )
         if guided_geometry:
-            try:
-                planned_entry = float(market_ctx.get("entry"))
-                planned_stop = float(market_ctx.get("sl"))
-            except (TypeError, ValueError):
-                planned_entry = planned_stop = float("nan")
-            if (
-                math.isfinite(planned_entry)
-                and planned_entry > 0.0
-                and math.isfinite(planned_stop)
+            executable_stop_pct = stop_risk.get("executable_stop_distance_pct")
+            if stop_risk.get("stop_risk_evidence_status") == "UNAVAILABLE_BLOCKING":
+                reject_reason = "UNKNOWN_EXECUTION_CONTEXT"
+            elif (
+                executable_stop_pct is not None
+                and float(executable_stop_pct) < float(self.config.min_sl_pct)
             ):
-                stop_distance_pct = abs(planned_entry - planned_stop) / planned_entry * 100.0
-                market_ctx.update(
-                    stop_distance_pct=stop_distance_pct,
-                    min_stop_pct=float(self.config.min_sl_pct),
-                    max_stop_pct=float(self.config.max_sl_pct),
+                reject_reason = "STOP_TOO_TIGHT"
+            else:
+                reject_reason = None
+            if reject_reason is not None:
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": [reject_reason],
+                    "confidence": 0.0,
+                    "score": None,
+                    "rr": raw_rr,
+                    "candidate_rr": rr_metrics["candidate_rr"],
+                    "expected_fill": rr_metrics["expected_fill"],
+                    "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                    "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
+                    "effective_rr": effective_rr,
+                    "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
+                    "explanation": "guided_executable_stop_risk_gate",
+                    "execution_ctx": execution_ctx,
+                    "execution_safety": execution_safety,
+                    "spread_pct": execution_ctx.get("spread_pct"),
+                    "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                    "latency_ms": execution_ctx.get("latency_ms"),
+                    "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                    "liquidity_score": execution_ctx.get("liquidity_score"),
+                    "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                    "volatility_regime": execution_ctx.get("volatility_regime"),
+                    **stop_risk,
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
                 )
-                if stop_distance_pct < float(self.config.min_sl_pct):
-                    reject_reason = "STOP_TOO_TIGHT"
-                    reject_payload = {
-                        "signal_id": signal_id,
-                        "symbol": selection.symbol,
-                        "mode": self.config.execution_mode.value,
-                        "phase": "final",
-                        "decision": "REJECTED",
-                        "reason": reject_reason,
-                        "reject_reason": reject_reason,
-                        "primary_reject_reason": reject_reason,
-                        "reject_reasons": [reject_reason],
-                        "confidence": 0.0,
-                        "score": None,
-                        "rr": raw_rr,
-                        "candidate_rr": rr_metrics["candidate_rr"],
-                        "expected_fill": rr_metrics["expected_fill"],
-                        "executable_raw_rr": rr_metrics["executable_raw_rr"],
-                        "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
-                        "effective_rr": effective_rr,
-                        "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
-                        "explanation": "guided_geometry_viability_gate",
-                        "execution_ctx": execution_ctx,
-                        "execution_safety": execution_safety,
-                        "spread_pct": execution_ctx.get("spread_pct"),
-                        "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
-                        "latency_ms": execution_ctx.get("latency_ms"),
-                        "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
-                        "liquidity_score": execution_ctx.get("liquidity_score"),
-                        "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
-                        "volatility_regime": execution_ctx.get("volatility_regime"),
-                    }
-                    await self._persist_reject({**market_ctx, **reject_payload})
-                    await self._emit_lifecycle_event(
-                        LifecycleState.SIGNAL_REJECTED.value,
-                        selection.symbol,
-                        {**market_ctx, **reject_payload},
-                    )
-                    return
+                return
 
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
@@ -2610,6 +2635,74 @@ class RuntimeOrchestrator:
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
+            return
+
+        stop_policy = evaluate_stop_risk_policy(
+            stop_risk,
+            score=getattr(score_ctx, "total_score", None),
+            effective_rr=effective_rr,
+            config=self._canonical_filter_config(),
+        )
+        stop_policy_evidence = {
+            key: stop_policy.get(key)
+            for key in (
+                "planned_stop_distance_pct",
+                "executable_stop_distance_pct",
+                "stop_distance_pct",
+                "stop_distance_basis",
+                "stop_risk_evidence_status",
+                "stop_risk_missing_fields",
+                "min_stop_pct",
+                "max_stop_pct",
+                "stop_too_wide_softened",
+                "stop_too_wide_extreme",
+                "stop_too_wide_soft_eligible",
+                "risk_scale",
+            )
+            if key in stop_policy
+        }
+        market_ctx.update(stop_policy_evidence)
+        if not bool(stop_policy.get("accepted")):
+            reject_reason = str(
+                stop_policy.get("reject_reason") or "UNKNOWN_EXECUTION_CONTEXT"
+            )
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": reject_reason,
+                "reject_reason": reject_reason,
+                "primary_reject_reason": reject_reason,
+                "reject_reasons": [reject_reason],
+                "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "candidate_rr": rr_metrics["candidate_rr"],
+                "expected_fill": rr_metrics["expected_fill"],
+                "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
+                "effective_rr": effective_rr,
+                "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
+                "explanation": "canonical_executable_stop_risk_gate",
+                "execution_ctx": execution_ctx,
+                "execution_safety": execution_safety,
+                "spread_pct": execution_ctx.get("spread_pct"),
+                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                "latency_ms": execution_ctx.get("latency_ms"),
+                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                "liquidity_score": execution_ctx.get("liquidity_score"),
+                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                "volatility_regime": execution_ctx.get("volatility_regime"),
+                **stop_policy_evidence,
+            }
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**market_ctx, **reject_payload},
+            )
             return
 
         if execution_safety is not None and not bool(execution_safety.get("accepted")):
@@ -2784,7 +2877,16 @@ class RuntimeOrchestrator:
             "executable_raw_rr": rr_metrics["executable_raw_rr"],
             "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
+            "planned_stop_distance_pct": market_ctx.get("planned_stop_distance_pct"),
+            "executable_stop_distance_pct": market_ctx.get("executable_stop_distance_pct"),
             "stop_distance_pct": market_ctx.get("stop_distance_pct"),
+            "stop_distance_basis": market_ctx.get("stop_distance_basis"),
+            "stop_risk_evidence_status": market_ctx.get("stop_risk_evidence_status"),
+            "stop_risk_missing_fields": market_ctx.get("stop_risk_missing_fields"),
+            "stop_too_wide_softened": market_ctx.get("stop_too_wide_softened", False),
+            "stop_too_wide_extreme": market_ctx.get("stop_too_wide_extreme"),
+            "stop_too_wide_soft_eligible": market_ctx.get("stop_too_wide_soft_eligible"),
+            "risk_scale": market_ctx.get("risk_scale", 1.0),
             "min_stop_pct": float(self.config.min_sl_pct),
             "max_stop_pct": float(self.config.max_sl_pct),
             "min_effective_rr": float(self.config.min_effective_rr),
@@ -3707,14 +3809,42 @@ class RuntimeOrchestrator:
         if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
             add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
 
-        entry = number(payload.get("entry", payload.get("entry_price")))
-        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
-        if entry is not None and entry > 0 and stop is not None:
-            stop_distance_pct = abs(entry - stop) / entry * 100.0
-            if stop_distance_pct < float(self.config.min_sl_pct):
-                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
-            if stop_distance_pct > float(self.config.max_sl_pct):
-                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+        stop_metrics = build_stop_risk_metrics(
+            planned_entry=payload.get("entry", payload.get("entry_price")),
+            expected_fill=payload.get("expected_fill"),
+            stop=payload.get("sl", payload.get("stop_loss", payload.get("stop"))),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
+        stop_policy = evaluate_stop_risk_policy(
+            stop_metrics,
+            score=payload.get("score"),
+            effective_rr=payload.get("effective_rr"),
+            config=self._canonical_filter_config(),
+            bypass_wide_reject=(
+                "STOP_TOO_WIDE" in {
+                    str(value).upper()
+                    for value in (payload.get("bypassed_reject_reasons") or [])
+                }
+            ),
+        )
+        stop_reason = str(stop_policy.get("reject_reason") or "").upper()
+        stop_observed = stop_policy.get("executable_stop_distance_pct")
+        if stop_reason == "STOP_TOO_TIGHT":
+            add(
+                "STOP_TOO_TIGHT",
+                stop_observed,
+                float(self.config.min_sl_pct),
+                "<",
+                "EXECUTABLE_STOP_RISK",
+            )
+        elif stop_reason == "STOP_TOO_WIDE":
+            add(
+                "STOP_TOO_WIDE",
+                stop_observed,
+                float(self.config.max_sl_pct),
+                ">",
+                "EXECUTABLE_STOP_RISK",
+            )
 
         spread = number(payload.get("spread_pct", execution.get("spread_pct")))
         if spread is not None and spread > float(self.config.max_spread_pct):
@@ -3835,14 +3965,14 @@ class RuntimeOrchestrator:
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
         })
-        try:
-            entry_value = float(result.get("entry"))
-            stop_value = float(result.get("sl"))
-            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
-        except (TypeError, ValueError):
-            stop_distance_pct = None
+        stop_metrics = build_stop_risk_metrics(
+            planned_entry=result.get("entry", result.get("entry_price")),
+            expected_fill=result.get("expected_fill"),
+            stop=result.get("sl", result.get("stop_loss", result.get("stop"))),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
         result.update({
-            "stop_distance_pct": stop_distance_pct,
+            **stop_metrics,
             "min_signal_score": float(self.config.min_signal_score),
             "min_raw_rr": float(self.config.min_rr),
             "min_effective_rr": float(self.config.min_effective_rr),
@@ -3981,7 +4111,13 @@ class RuntimeOrchestrator:
                                        "entry_slippage_embedded_in_fill": bool(execution_aligned),
                                        "embedded_entry_slippage_cost": embedded_entry_slippage_cost,
                                        "fill_shift_initial_risk_ratio": fill_shift_initial_risk_ratio,
+                                       "planned_stop_distance_pct": payload.get("planned_stop_distance_pct"),
+                                       "executable_stop_distance_pct": payload.get("executable_stop_distance_pct"),
                                        "stop_distance_pct": payload.get("stop_distance_pct"),
+                                       "stop_distance_basis": payload.get("stop_distance_basis"),
+                                       "stop_risk_evidence_status": payload.get("stop_risk_evidence_status"),
+                                       "stop_too_wide_softened": payload.get("stop_too_wide_softened"),
+                                       "risk_scale": payload.get("risk_scale"),
                                        "all_failed_gates": payload.get("all_failed_gates"),
                                        "failed_gate_evidence": payload.get("failed_gate_evidence"),
                                        "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),

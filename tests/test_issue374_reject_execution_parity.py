@@ -66,6 +66,7 @@ def test_primary_reason_is_preserved_while_all_failed_gates_are_queryable(tmp_pa
         "tp": 102.0,
         "rr": 1.30,
         "candidate_rr": 1.30,
+        "expected_fill": 100.02,
         "effective_rr": 0.90,
         "score": 0.40,
         "reason": "LOW_SCORE",
@@ -82,8 +83,13 @@ def test_primary_reason_is_preserved_while_all_failed_gates_are_queryable(tmp_pa
     assert by_gate["LOW_SCORE"]["threshold"] == pytest.approx(0.50)
     assert by_gate["LOW_EFFECTIVE_RR"]["observed"] == pytest.approx(0.90)
     assert by_gate["LOW_EFFECTIVE_RR"]["threshold"] == pytest.approx(1.10)
-    assert by_gate["STOP_TOO_TIGHT"]["observed"] == pytest.approx(0.10)
+    expected_stop_pct = abs(100.02 - 99.9) / 100.02 * 100.0
+    assert by_gate["STOP_TOO_TIGHT"]["observed"] == pytest.approx(expected_stop_pct)
+    assert by_gate["STOP_TOO_TIGHT"]["source"] == "EXECUTABLE_STOP_RISK"
     assert by_gate["STOP_TOO_TIGHT"]["threshold"] == pytest.approx(0.15)
+    assert payload["planned_stop_distance_pct"] == pytest.approx(0.10)
+    assert payload["executable_stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert payload["stop_distance_basis"] == "EXPECTED_FILL"
 
 
 def test_execution_aligned_reject_uses_expected_fill_and_does_not_double_count_entry_slippage(tmp_path):

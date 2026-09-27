@@ -196,9 +196,14 @@ def test_shared_geometry_short_and_phase_b_parity_are_stable() -> None:
     quality = QualityAgent().run(quality_stage)
     assert quality.evidence["rr_difference"] == pytest.approx(0.0)
     assert quality.evidence["parity_status"] == "MATCH"
-    assert quality.evidence["quality_diagnostics"]["sl_pct"] == pytest.approx(
-        abs(geometry["entry"] - geometry["sl"]) / geometry["entry"] * 100
-    )
+    expected_fill = geometry["entry"] * (1.0 - payload["expected_slippage_pct"])
+    executable_stop_pct = abs(expected_fill - geometry["sl"]) / expected_fill * 100.0
+    planned_stop_pct = abs(geometry["entry"] - geometry["sl"]) / geometry["entry"] * 100.0
+    diagnostics = quality.evidence["quality_diagnostics"]
+    assert diagnostics["sl_pct"] == pytest.approx(executable_stop_pct)
+    assert diagnostics["executable_stop_distance_pct"] == pytest.approx(executable_stop_pct)
+    assert diagnostics["planned_stop_distance_pct"] == pytest.approx(planned_stop_pct)
+    assert diagnostics["stop_distance_basis"] == "EXPECTED_FILL"
 
 
 def _selection_candidate(symbol: str, *, volume: float, source: str = "binance") -> dict:
