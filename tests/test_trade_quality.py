@@ -7,7 +7,8 @@ def base_candidate():
 
 
 def base_market():
-    return {"regime": "TREND", "volatility_regime": "normal", "spread_pct": 0.01, "expected_slippage_pct": 0.01, "atr_pct": 1.0, "timestamp": 1_000_000}
+    # Canonical execution context uses fractional rates; 0.0002 = 2 bps.
+    return {"regime": "TREND", "volatility_regime": "normal", "spread_pct": 0.01, "expected_slippage_pct": 0.0002, "atr_pct": 1.0, "timestamp": 1_000_000}
 
 
 def test_low_score_rejected():
