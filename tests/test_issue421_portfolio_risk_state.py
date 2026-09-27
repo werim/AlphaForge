@@ -177,6 +177,7 @@ def _market(symbol: str, *, signal_id: str) -> dict[str, Any]:
         "sl": 99.0,
         "tp": 103.0,
         "rr": 3.0,
+        "expectancy": 0.2,
         "side": "LONG",
         "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0,

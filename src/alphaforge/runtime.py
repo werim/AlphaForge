@@ -20,7 +20,16 @@ from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Protocol
 
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
-from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
+from alphaforge.order import (
+    LifecycleState,
+    OrderCandidate,
+    OrderExecutionContext,
+    OrderRejection,
+    TradingMode,
+    build_order_candidate,
+    evaluate_trade_quality,
+    validate_live_order_authorization,
+)
 from alphaforge.execution import (
     PROVENANCE_ACTUAL,
     PROVENANCE_ESTIMATED,
@@ -1869,6 +1878,107 @@ class RuntimeOrchestrator:
     def _canonical_filter_config(self) -> dict[str, Any]:
         return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
 
+    def _evaluate_authoritative_trade_quality(
+        self,
+        *,
+        symbol: str,
+        market_ctx: Mapping[str, Any],
+        signal_payload: Mapping[str, Any],
+        score_ctx: Any,
+        effective_rr: float,
+    ) -> dict[str, Any]:
+        """Project RuntimeOrchestrator inputs into the shared quality authority.
+
+        Runtime-specific portfolio, reconciliation, kill-switch and mutation
+        gates remain orchestration responsibilities. Candidate-quality policy
+        (score/RR/expectancy/regime/stop/microstructure/volatility) is owned by
+        alphaforge.order.evaluate_trade_quality.
+        """
+        quality_market_ctx = dict(market_ctx)
+        execution_ctx = (
+            dict(quality_market_ctx.get("execution_ctx") or {})
+            if isinstance(quality_market_ctx.get("execution_ctx"), Mapping)
+            else {}
+        )
+        score = getattr(score_ctx, "total_score", None)
+        raw_rr, _ = self._finite_numeric(
+            ("signal.risk_reward", signal_payload.get("risk_reward")),
+            ("market.candidate_rr", quality_market_ctx.get("candidate_rr")),
+            ("market.rr", quality_market_ctx.get("rr")),
+        )
+        expectancy, _ = self._finite_numeric(
+            ("market.expectancy", quality_market_ctx.get("expectancy")),
+            ("signal.expectancy", signal_payload.get("expectancy")),
+        )
+        quality_market_ctx.update(
+            {
+                "symbol": symbol,
+                "side": signal_payload.get("side", quality_market_ctx.get("side")),
+                "entry": signal_payload.get("entry_price", quality_market_ctx.get("entry")),
+                "sl": signal_payload.get("stop_loss", quality_market_ctx.get("sl")),
+                "tp": signal_payload.get("take_profit", quality_market_ctx.get("tp")),
+                "setup_type": signal_payload.get(
+                    "setup",
+                    signal_payload.get("setup_type", quality_market_ctx.get("setup_type")),
+                ),
+                "setup_reason": signal_payload.get(
+                    "setup_reason", quality_market_ctx.get("setup_reason")
+                ),
+                "regime": signal_payload.get("regime", quality_market_ctx.get("regime")),
+                "score": score,
+                "rr": raw_rr,
+                "effective_rr": effective_rr,
+                "expectancy": expectancy,
+            }
+        )
+        for key in (
+            "spread_pct",
+            "expected_slippage_pct",
+            "funding_rate_pct",
+            "orderbook_imbalance",
+            "spoof_risk",
+            "orderbook_status",
+            "volatility_regime",
+        ):
+            if quality_market_ctx.get(key) is None and execution_ctx.get(key) is not None:
+                quality_market_ctx[key] = execution_ctx.get(key)
+
+        candidate = build_order_candidate(
+            symbol,
+            quality_market_ctx,
+            self._canonical_filter_config(),
+        )
+        if isinstance(candidate, OrderRejection):
+            return {
+                "accepted": False,
+                "reject_reason": candidate.reject_reason,
+                "diagnostics": {
+                    **dict(candidate.diagnostics or {}),
+                    "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+                    "candidate_build_reject": True,
+                },
+                "candidate": None,
+            }
+
+        config = {
+            **self._canonical_filter_config(),
+            "MODE": self.config.execution_mode.value,
+            # Runtime portfolio/cooldown/daily-loss state has its own canonical
+            # authority and must not be re-evaluated from a second stats model.
+            "RUNTIME_LIMITS_ACTIVE": False,
+        }
+        decision = evaluate_trade_quality(candidate, quality_market_ctx, {}, config)
+        diagnostics = {
+            **dict(decision.diagnostics or {}),
+            "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+        }
+        return {
+            "accepted": bool(decision.accepted),
+            "reject_reason": str(decision.reject_reason or ""),
+            "diagnostics": diagnostics,
+            "candidate": candidate,
+        }
+
     async def _scan_once(self) -> None:
         self._sync_resolved_paper_positions()
         if self._kill_switch_active():
@@ -2454,15 +2564,22 @@ class RuntimeOrchestrator:
             and isinstance(generation_for_geometry.get("candidate"), Mapping)
         )
         if guided_geometry:
-            executable_stop_pct = stop_risk.get("executable_stop_distance_pct")
+            pre_score_stop_policy = evaluate_stop_risk_policy(
+                stop_risk,
+                score=None,
+                effective_rr=effective_rr,
+                config=self._canonical_filter_config(),
+            )
+            pre_score_stop_reason = str(
+                pre_score_stop_policy.get("reject_reason") or ""
+            ).upper()
             if stop_risk.get("stop_risk_evidence_status") == "UNAVAILABLE_BLOCKING":
                 reject_reason = "UNKNOWN_EXECUTION_CONTEXT"
-            elif (
-                executable_stop_pct is not None
-                and float(executable_stop_pct) < float(self.config.min_sl_pct)
-            ):
+            elif pre_score_stop_reason == "STOP_TOO_TIGHT":
                 reject_reason = "STOP_TOO_TIGHT"
             else:
+                # Wide-stop softening depends on score and remains downstream
+                # in evaluate_trade_quality after AIBrain scoring.
                 reject_reason = None
             if reject_reason is not None:
                 reject_payload = {
@@ -2633,42 +2750,35 @@ class RuntimeOrchestrator:
             })
             return
 
-        if effective_rr < self.config.min_effective_rr:
-            reject_reason = "LOW_EFFECTIVE_RR"
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
-            await self._persist_reject({**market_ctx, **reject_payload})
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
-            return
 
-        stop_policy = evaluate_stop_risk_policy(
-            stop_risk,
-            score=getattr(score_ctx, "total_score", None),
+        quality = self._evaluate_authoritative_trade_quality(
+            symbol=selection.symbol,
+            market_ctx=market_ctx,
+            signal_payload=signal_payload,
+            score_ctx=score_ctx,
             effective_rr=effective_rr,
-            config=self._canonical_filter_config(),
         )
-        stop_policy_evidence = {
-            key: stop_policy.get(key)
-            for key in (
-                "planned_stop_distance_pct",
-                "executable_stop_distance_pct",
-                "stop_distance_pct",
-                "stop_distance_basis",
-                "stop_risk_evidence_status",
-                "stop_risk_missing_fields",
-                "min_stop_pct",
-                "max_stop_pct",
-                "stop_too_wide_softened",
-                "stop_too_wide_extreme",
-                "stop_too_wide_soft_eligible",
-                "risk_scale",
-            )
-            if key in stop_policy
-        }
-        market_ctx.update(stop_policy_evidence)
-        if not bool(stop_policy.get("accepted")):
-            reject_reason = str(
-                stop_policy.get("reject_reason") or "UNKNOWN_EXECUTION_CONTEXT"
-            )
+        quality_diagnostics = dict(quality.get("diagnostics") or {})
+        market_ctx["trade_quality"] = quality_diagnostics
+        for key in (
+            "planned_stop_distance_pct",
+            "executable_stop_distance_pct",
+            "stop_distance_pct",
+            "stop_distance_basis",
+            "stop_risk_evidence_status",
+            "stop_risk_missing_fields",
+            "min_stop_pct",
+            "max_stop_pct",
+            "stop_too_wide_softened",
+            "stop_too_wide_extreme",
+            "stop_too_wide_soft_eligible",
+            "risk_scale",
+        ):
+            if key in quality_diagnostics:
+                market_ctx[key] = quality_diagnostics.get(key)
+
+        if not bool(quality.get("accepted")):
+            reject_reason = str(quality.get("reject_reason") or "UNKNOWN")
             reject_payload = {
                 "signal_id": signal_id,
                 "symbol": selection.symbol,
@@ -2681,6 +2791,7 @@ class RuntimeOrchestrator:
                 "reject_reasons": [reject_reason],
                 "confidence": order_plan.confidence,
                 "score": getattr(score_ctx, "total_score", None),
+                "score_components": getattr(score_ctx, "components", None),
                 "rr": signal_payload.get("risk_reward"),
                 "candidate_rr": rr_metrics["candidate_rr"],
                 "expected_fill": rr_metrics["expected_fill"],
@@ -2688,9 +2799,16 @@ class RuntimeOrchestrator:
                 "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
                 "effective_rr": effective_rr,
                 "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
-                "explanation": "canonical_executable_stop_risk_gate",
+                "side": signal_payload.get("side", market_ctx.get("side")),
+                "setup_type": signal_payload.get("setup", signal_payload.get("setup_type")),
+                "entry": signal_payload.get("entry_price", market_ctx.get("entry")),
+                "sl": signal_payload.get("stop_loss", market_ctx.get("sl")),
+                "tp": signal_payload.get("take_profit", market_ctx.get("tp")),
+                "regime": signal_payload.get("regime", market_ctx.get("regime")),
+                "explanation": "shared_trade_quality_gate",
                 "execution_ctx": execution_ctx,
                 "execution_safety": execution_safety,
+                "trade_quality": quality_diagnostics,
                 "spread_pct": execution_ctx.get("spread_pct"),
                 "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
                 "latency_ms": execution_ctx.get("latency_ms"),
@@ -2698,7 +2816,6 @@ class RuntimeOrchestrator:
                 "liquidity_score": execution_ctx.get("liquidity_score"),
                 "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
                 "volatility_regime": execution_ctx.get("volatility_regime"),
-                **stop_policy_evidence,
             }
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(

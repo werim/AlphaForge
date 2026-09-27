@@ -185,6 +185,7 @@ def test_runtime_rejects_wide_stop_that_only_crosses_limit_after_expected_fill(s
         "sl": stop,
         "tp": target,
         "rr": 1.67,
+        "expectancy": 0.2,
         "side": side,
         "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0,

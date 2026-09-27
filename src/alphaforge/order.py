@@ -280,19 +280,20 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         return True
 
     _check(score_eval >= min_trade_score, "score")
-    _check(rr >= float(cfg["MIN_RR"]) and effective_rr >= float(cfg["MIN_EFFECTIVE_RR"]), "rr")
+    _check(rr >= float(cfg["MIN_RR"]), "rr")
+    _check(effective_rr >= float(cfg["MIN_EFFECTIVE_RR"]), "effective_rr")
     _check((not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
     _check(expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
     _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
     regime_ok = True
     if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
-        regime_ok = regime == "TREND"
+        regime_ok = regime in {"TREND", "TRENDING"}
     elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
-        # BREAKOUT setup/regime alignment must not be blocked because a data
-        # source labels volatility as BREAKOUT instead of normal/high.
-        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
+        # Accept both legacy and canonical MTF regime vocabulary.  Regime
+        # naming must not create a second policy authority.
+        regime_ok = regime in {"TREND", "TRENDING", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
     elif "RANGE_MEAN_REVERSION" in setup_type:
-        regime_ok = regime == "RANGE"
+        regime_ok = regime in {"RANGE", "MEAN_REVERTING"}
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
     _check((not orderbook_filter_enabled) or (not orderbook_missing), "orderbook_present")
     _check((not orderbook_filter_enabled) or (not orderbook_risky), "orderbook_quality")
@@ -331,8 +332,13 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
     elif score_eval < min_trade_score and not _bypass("LOW_SCORE"):
         reject_reason, failed_filter = "LOW_SCORE", "score"
-    elif (rr < float(cfg["MIN_RR"]) or effective_rr < float(cfg["MIN_EFFECTIVE_RR"])) and not _bypass("RR_TOO_LOW"):
+    elif rr < float(cfg["MIN_RR"]) and not _bypass("RR_TOO_LOW"):
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
+    elif effective_rr < float(cfg["MIN_EFFECTIVE_RR"]) and not _bypass("RR_TOO_LOW"):
+        # Raw structural RR and post-cost effective RR are distinct economic
+        # stages. Preserve the legacy BACKTEST RR_TOO_LOW bypass switch, but
+        # emit the canonical post-cost reason for evidence/readiness.
+        reject_reason, failed_filter = "LOW_EFFECTIVE_RR", "effective_rr"
     elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
         reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
     elif expectancy_val is not None and expectancy_val < float(cfg["MIN_EXPECTANCY"]):

@@ -96,6 +96,7 @@ def _wide_softenable_market() -> dict:
         "sl": 98.0,
         "tp": 105.0,
         "rr": 2.5,
+        "expectancy": 0.2,
         "side": "LONG",
         "notional": 10.0,
         "quantity": 0.1,
