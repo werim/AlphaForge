@@ -645,11 +645,21 @@ def test_execution_reject_metric_uses_db_canonical_count_not_process_counter(
     runtime._persist_burnin_periodic_metrics()
 
     with engine.connect() as conn:
-        execution_rejects = int(conn.execute(text("""
-            SELECT execution_rejects FROM burnin_execution_metrics
+        row = conn.execute(text("""
+            SELECT execution_rejects,status,timeout_rate,
+                   spread_baseline,slippage_baseline,latency_baseline,
+                   fill_probability_baseline,reconciliation_quality
+            FROM burnin_execution_metrics
             WHERE burnin_run_id=:bid ORDER BY id DESC LIMIT 1
-        """), {"bid": runtime._burnin_run_id}).scalar_one())
-    assert execution_rejects == 1
+        """), {"bid": runtime._burnin_run_id}).mappings().one()
+    assert int(row["execution_rejects"]) == 1
+    assert row["status"] == "INSUFFICIENT_EVIDENCE"
+    assert row["timeout_rate"] is None
+    assert row["spread_baseline"] is None
+    assert row["slippage_baseline"] is None
+    assert row["latency_baseline"] is None
+    assert row["fill_probability_baseline"] is None
+    assert row["reconciliation_quality"] == runtime._reconciliation_status
     assert _canonical_rejected_count(engine, campaign_id) == 1
 
 
