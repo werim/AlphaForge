@@ -9,7 +9,7 @@ from typing import Any, Callable, Literal, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, build_stop_distance_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
@@ -226,7 +226,13 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     expected_slippage_pct = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
     atr_pct = market_ctx.get("atr_pct", recent_stats.get("atr_pct"))
     atr_pct = float(atr_pct) if atr_pct not in (None, "") else None
-    sl_pct = abs(float(candidate.entry) - float(candidate.sl)) / float(candidate.entry) * 100 if getattr(candidate, "entry", 0) else 0.0
+    stop_distance = build_stop_distance_evidence(
+        entry=getattr(candidate, "entry", None),
+        stop=getattr(candidate, "sl", None),
+        expected_fill=market_ctx.get("expected_fill"),
+        require_expected_fill=False,
+    )
+    sl_pct = float(stop_distance.authoritative_stop_distance_pct or 0.0)
     expectancy = candidate.expectancy
     if expectancy in (None, "UNKNOWN", ""):
         bucket = market_ctx.get("expectancy_bucket", getattr(candidate, "expectancy_bucket", None))
@@ -390,7 +396,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
                 reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
 
     stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "min_raw_rr": float(cfg["MIN_RR"]), "min_score": min_trade_score, "reject_unknown_expectancy": bool(cfg["BLOCK_UNKNOWN_EXPECTANCY"]), "require_execution_context": False, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "min_raw_rr": float(cfg["MIN_RR"]), "min_score": min_trade_score, "reject_unknown_expectancy": bool(cfg["BLOCK_UNKNOWN_EXPECTANCY"]), "require_execution_context": False, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "planned_stop_distance_pct": stop_distance.planned_stop_distance_pct, "executable_stop_distance_pct": stop_distance.executable_stop_distance_pct, "stop_distance_basis": stop_distance.authority_basis, "stop_distance_evidence_status": stop_distance.evidence_status, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
     if stop_too_wide_softened:
         diagnostics.update({
             "stop_too_wide_softened": True,
