@@ -1878,6 +1878,107 @@ class RuntimeOrchestrator:
     def _canonical_filter_config(self) -> dict[str, Any]:
         return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
 
+    def _evaluate_authoritative_trade_quality(
+        self,
+        *,
+        symbol: str,
+        market_ctx: Mapping[str, Any],
+        signal_payload: Mapping[str, Any],
+        score_ctx: Any,
+        effective_rr: float,
+    ) -> dict[str, Any]:
+        """Project RuntimeOrchestrator inputs into the shared quality authority.
+
+        Runtime-specific portfolio, reconciliation, kill-switch and mutation
+        gates remain orchestration responsibilities. Candidate-quality policy
+        (score/RR/expectancy/regime/stop/microstructure/volatility) is owned by
+        alphaforge.order.evaluate_trade_quality.
+        """
+        quality_market_ctx = dict(market_ctx)
+        execution_ctx = (
+            dict(quality_market_ctx.get("execution_ctx") or {})
+            if isinstance(quality_market_ctx.get("execution_ctx"), Mapping)
+            else {}
+        )
+        score = getattr(score_ctx, "total_score", None)
+        raw_rr, _ = self._finite_numeric(
+            ("signal.risk_reward", signal_payload.get("risk_reward")),
+            ("market.candidate_rr", quality_market_ctx.get("candidate_rr")),
+            ("market.rr", quality_market_ctx.get("rr")),
+        )
+        expectancy, _ = self._finite_numeric(
+            ("market.expectancy", quality_market_ctx.get("expectancy")),
+            ("signal.expectancy", signal_payload.get("expectancy")),
+        )
+        quality_market_ctx.update(
+            {
+                "symbol": symbol,
+                "side": signal_payload.get("side", quality_market_ctx.get("side")),
+                "entry": signal_payload.get("entry_price", quality_market_ctx.get("entry")),
+                "sl": signal_payload.get("stop_loss", quality_market_ctx.get("sl")),
+                "tp": signal_payload.get("take_profit", quality_market_ctx.get("tp")),
+                "setup_type": signal_payload.get(
+                    "setup",
+                    signal_payload.get("setup_type", quality_market_ctx.get("setup_type")),
+                ),
+                "setup_reason": signal_payload.get(
+                    "setup_reason", quality_market_ctx.get("setup_reason")
+                ),
+                "regime": signal_payload.get("regime", quality_market_ctx.get("regime")),
+                "score": score,
+                "rr": raw_rr,
+                "effective_rr": effective_rr,
+                "expectancy": expectancy,
+            }
+        )
+        for key in (
+            "spread_pct",
+            "expected_slippage_pct",
+            "funding_rate_pct",
+            "orderbook_imbalance",
+            "spoof_risk",
+            "orderbook_status",
+            "volatility_regime",
+        ):
+            if quality_market_ctx.get(key) is None and execution_ctx.get(key) is not None:
+                quality_market_ctx[key] = execution_ctx.get(key)
+
+        candidate = build_order_candidate(
+            symbol,
+            quality_market_ctx,
+            self._canonical_filter_config(),
+        )
+        if isinstance(candidate, OrderRejection):
+            return {
+                "accepted": False,
+                "reject_reason": candidate.reject_reason,
+                "diagnostics": {
+                    **dict(candidate.diagnostics or {}),
+                    "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+                    "candidate_build_reject": True,
+                },
+                "candidate": None,
+            }
+
+        config = {
+            **self._canonical_filter_config(),
+            "MODE": self.config.execution_mode.value,
+            # Runtime portfolio/cooldown/daily-loss state has its own canonical
+            # authority and must not be re-evaluated from a second stats model.
+            "RUNTIME_LIMITS_ACTIVE": False,
+        }
+        decision = evaluate_trade_quality(candidate, quality_market_ctx, {}, config)
+        diagnostics = {
+            **dict(decision.diagnostics or {}),
+            "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+        }
+        return {
+            "accepted": bool(decision.accepted),
+            "reject_reason": str(decision.reject_reason or ""),
+            "diagnostics": diagnostics,
+            "candidate": candidate,
+        }
+
     async def _scan_once(self) -> None:
         self._sync_resolved_paper_positions()
         if self._kill_switch_active():
