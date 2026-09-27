@@ -2517,7 +2517,7 @@ class RuntimeOrchestrator:
                         "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
                         "volatility_regime": execution_ctx.get("volatility_regime"),
                     }
-                    await self._persist_reject({**market_ctx, **reject_payload})
+                await self._persist_reject({**market_ctx, **reject_payload})
                 await self._emit_lifecycle_event(
                     LifecycleState.SIGNAL_REJECTED.value,
                     selection.symbol,
