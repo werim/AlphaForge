@@ -2878,9 +2878,11 @@ class RuntimeOrchestrator:
         )
         inferred_equity = market_ctx.get("equity", market_ctx.get("available_balance"))
         available_balance = market_ctx.get("available_balance", inferred_equity)
+        # Accounting provenance follows account/equity evidence only.
+        # Candidate notional is sizing evidence and must not make an unknown
+        # account state look like a configured PAPER account.
         portfolio_evidence_source = (
-            "MARKET_CONTEXT" if inferred_equity is not None and candidate_notional is not None
-            else "MISSING"
+            "MARKET_CONTEXT" if inferred_equity is not None else "MISSING"
         )
         portfolio_now = time.time()
         historical_risk: dict[str, Any] = {
@@ -2933,8 +2935,6 @@ class RuntimeOrchestrator:
                 portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
             if candidate_notional is None and self.config.paper_candidate_notional is not None:
                 candidate_notional = self.config.paper_candidate_notional
-                if not attached_campaign_id:
-                    portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
                 market_ctx["notional"] = candidate_notional
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
