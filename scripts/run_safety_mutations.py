@@ -64,6 +64,10 @@ def mutations() -> list[Mutation]:
                  "model.total_penalty - model.slippage_penalty / 2.0, 0.0)",
                  "model.total_penalty, 0.0)",
                  "tests/test_execution_cost_semantics.py::test_expected_entry_movement_is_not_deducted_twice_from_effective_rr"),
+        Mutation("risk_scale_not_applied", RUNTIME,
+                 'candidate_notional = float(sizing_projection["effective_notional"])',
+                 'candidate_notional = float(sizing_projection["original_notional"])',
+                 "tests/test_issue489_risk_scale_sizing.py::test_paper_softened_wide_stop_executes_scaled_notional_and_quantity"),
     ])
     for field in ("run_id", "campaign_id", "release_id"):
         cases.append(Mutation(field + "_scope", SCOPE,
