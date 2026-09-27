@@ -88,6 +88,8 @@ def test_runtime_quality_adapter_delegates_to_canonical_trade_quality(monkeypatc
     assert result["diagnostics"]["sentinel"] == "shared-authority"
     assert result["diagnostics"]["shared_quality_authority"] == "alphaforge.order.evaluate_trade_quality"
     assert seen["config"]["MODE"] == "PAPER"
+    assert seen["config"]["SCORE_GATE_ACTIVE"] is False
+    assert seen["config"]["EXPECTANCY_GATE_ACTIVE"] is False
     assert seen["config"]["RUNTIME_LIMITS_ACTIVE"] is False
     assert seen["recent_stats"] == {}
     assert seen["candidate"].regime == "TRENDING"
@@ -196,3 +198,47 @@ def test_runtime_quality_adapter_prefers_aibrain_post_cost_expectancy(monkeypatc
     assert seen["candidate"].expectancy == 0.07
     assert seen["market_ctx"]["expectancy"] == 0.07
     assert result["diagnostics"]["expectancy_source"] == "score.expectancy_after_costs"
+
+
+
+def test_direct_trade_quality_keeps_score_and_expectancy_gates_enabled_by_default():
+    from alphaforge.order import evaluate_trade_quality
+
+    market = _market()
+    candidate = runtime_module.build_order_candidate(
+        "BTCUSDT",
+        {
+            **market,
+            "score": 0.0,
+            "expectancy": None,
+        },
+        _runtime()._canonical_filter_config(),
+    )
+    decision = evaluate_trade_quality(
+        candidate,
+        {**market, "score": 0.0, "expectancy": None},
+        {},
+        {"MODE": "PAPER"},
+    )
+    assert decision.accepted is False
+    assert decision.reject_reason in {"LOW_SCORE", "EXPECTANCY_MISSING"}
+
+
+def test_runtime_shared_quality_does_not_repeat_aibrain_score_or_expectancy_gates():
+    result = _runtime()._evaluate_authoritative_trade_quality(
+        symbol="BTCUSDT",
+        market_ctx={k: v for k, v in _market().items() if k != "expectancy"},
+        signal_payload={
+            "side": "LONG",
+            "entry_price": 100.0,
+            "stop_loss": 99.0,
+            "take_profit": 103.0,
+            "risk_reward": 3.0,
+            "setup": "TREND_CONTINUATION",
+            "setup_reason": "fixture",
+            "regime": "TRENDING",
+        },
+        score_ctx=SimpleNamespace(total_score=0.0),
+        effective_rr=2.8,
+    )
+    assert result["reject_reason"] not in {"LOW_SCORE", "EXPECTANCY_MISSING", "NEGATIVE_EXPECTANCY"}
