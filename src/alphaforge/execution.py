@@ -270,6 +270,9 @@ def build_stop_risk_metrics(
         basis = "EXPECTED_FILL"
         evidence_status = "COMPLETE"
 
+    if planned is None or stop_price is None:
+        evidence_status = EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+
     executable_pct = (
         None
         if executable is None or stop_price is None
