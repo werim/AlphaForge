@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from math import isclose
 from typing import Any, Mapping, Sequence
 
@@ -21,10 +22,19 @@ class PreSubmitInvariant:
     score: float | None
     candidate_rr: float | None
     executable_raw_rr: float | None
+    remaining_execution_penalty: float | None
     effective_rr: float | None
+    rr_basis: str
+    execution_cost_semantics: str
     threshold_provenance: tuple[tuple[str, str], ...]
     execution_evidence_status: str
     portfolio_decision: str
+    original_notional: float | None
+    risk_scale: float | None
+    effective_notional: float | None
+    stop_distance_basis: str
+    geometry_status: str
+    geometry_source: str
     lifecycle_pre_submit_terminal_state: str
 
 
@@ -48,6 +58,16 @@ def _number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _identity(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, Mapping):
+        return json.dumps(dict(value), sort_keys=True, default=str)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return json.dumps(list(value), sort_keys=True, default=str)
+    return str(value).strip()
 
 
 def _decision(value: Any) -> str:
@@ -125,10 +145,19 @@ def project_pre_submit_invariant(payload: Mapping[str, Any]) -> PreSubmitInvaria
         score=_number(payload.get("score")),
         candidate_rr=_number(payload.get("candidate_rr", payload.get("rr"))),
         executable_raw_rr=_number(payload.get("executable_raw_rr")),
+        remaining_execution_penalty=_number(payload.get("remaining_execution_penalty")),
         effective_rr=_number(payload.get("effective_rr")),
+        rr_basis=str(payload.get("rr_basis") or "").strip().upper(),
+        execution_cost_semantics=_identity(payload.get("execution_cost_semantics")),
         threshold_provenance=_threshold_provenance(payload),
         execution_evidence_status=str(evidence_status or "UNKNOWN").strip().upper(),
         portfolio_decision=_decision(portfolio_value),
+        original_notional=_number(payload.get("original_notional")),
+        risk_scale=_number(payload.get("risk_scale")),
+        effective_notional=_number(payload.get("effective_notional")),
+        stop_distance_basis=str(payload.get("stop_distance_basis") or "").strip().upper(),
+        geometry_status=str(payload.get("geometry_status") or "").strip().upper(),
+        geometry_source=str(payload.get("geometry_source") or "").strip().upper(),
         lifecycle_pre_submit_terminal_state=str(lifecycle or "").strip().upper(),
     )
 
@@ -196,6 +225,31 @@ def validate_pre_submit_semantics(
                 f"{effective_rr!r} executable_raw_rr={executable_raw_rr!r} "
                 f"remaining_execution_penalty={remaining_penalty!r} "
                 f"expected={expected_effective_rr!r}",
+            ))
+
+    if projected.risk_scale is not None and not (0.0 <= projected.risk_scale <= 1.0):
+        violations.append(SemanticInvariantViolation(
+            "RISK_SCALE_OUT_OF_RANGE",
+            f"risk_scale={projected.risk_scale!r}",
+        ))
+    if (
+        projected.original_notional is not None
+        and projected.risk_scale is not None
+        and projected.effective_notional is not None
+    ):
+        expected_notional = projected.original_notional * projected.risk_scale
+        if not isclose(
+            projected.effective_notional,
+            expected_notional,
+            rel_tol=0.0,
+            abs_tol=numeric_abs_tol,
+        ):
+            violations.append(SemanticInvariantViolation(
+                "EFFECTIVE_NOTIONAL_SCALING_MISMATCH",
+                f"original_notional={projected.original_notional!r} "
+                f"risk_scale={projected.risk_scale!r} "
+                f"effective_notional={projected.effective_notional!r} "
+                f"expected={expected_notional!r}",
             ))
 
     failed_gates = set(projected.failed_gates)
@@ -328,7 +382,11 @@ def compare_pre_submit_invariants(
     """Return every semantic mismatch; callers must fail closed on non-empty."""
 
     mismatches: list[InvariantMismatch] = []
-    numeric_fields = {"score", "candidate_rr", "executable_raw_rr", "effective_rr"}
+    numeric_fields = {
+        "score", "candidate_rr", "executable_raw_rr",
+        "remaining_execution_penalty", "effective_rr",
+        "original_notional", "risk_scale", "effective_notional",
+    }
     for field in PreSubmitInvariant.__dataclass_fields__:
         left = getattr(expected, field)
         right = getattr(observed, field)
@@ -343,8 +401,18 @@ def compare_pre_submit_invariants(
 
 def _incomplete_fields(value: PreSubmitInvariant) -> tuple[str, ...]:
     missing: list[str] = []
-    for field in ("score", "candidate_rr", "executable_raw_rr", "effective_rr"):
+    for field in (
+        "score", "candidate_rr", "executable_raw_rr",
+        "remaining_execution_penalty", "effective_rr",
+        "original_notional", "risk_scale", "effective_notional",
+    ):
         if getattr(value, field) is None:
+            missing.append(field)
+    for field in (
+        "rr_basis", "execution_cost_semantics",
+        "stop_distance_basis", "geometry_status", "geometry_source",
+    ):
+        if not getattr(value, field):
             missing.append(field)
     if not value.threshold_provenance:
         missing.append("threshold_provenance")
