@@ -82,9 +82,10 @@ def test_allow_live_orders_is_loaded_but_does_not_bypass_other_gates(monkeypatch
 def test_regime_alias_changes_actual_decision(monkeypatch):
     candidate = _candidate(setup_type="RANGE_MEAN_REVERSION", regime="TREND")
     monkeypatch.setenv("ENABLE_REGIME_FILTER", "false")
-    assert evaluate_trade_quality(candidate, {}, {}, {"MODE": "PAPER"}).accepted
+    safe_execution = {"expected_slippage_pct": 0.0}
+    assert evaluate_trade_quality(candidate, safe_execution, {}, {"MODE": "PAPER"}).accepted
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT", "true")
-    assert evaluate_trade_quality(candidate, {}, {}, {"MODE": "PAPER"}).reject_reason == "REGIME_MISMATCH"
+    assert evaluate_trade_quality(candidate, safe_execution, {}, {"MODE": "PAPER"}).reject_reason == "REGIME_MISMATCH"
 
     conflict = audit_config(env={"ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT": "true", "ENABLE_REGIME_FILTER": "false"})
     assert conflict["status"] == "FAIL"
@@ -94,7 +95,7 @@ def test_regime_alias_changes_actual_decision(monkeypatch):
 
 def test_orderbook_filter_changes_decision_without_disabling_other_gates(monkeypatch):
     candidate = _candidate()
-    risky = {"orderbook_imbalance": 0.97, "orderbook_status": "MEASURED", "spoof_risk": 0.9, "volatility_regime": "normal"}
+    risky = {"orderbook_imbalance": 0.97, "orderbook_status": "MEASURED", "spoof_risk": 0.9, "volatility_regime": "normal", "expected_slippage_pct": 0.0}
     disabled = evaluate_trade_quality(candidate, risky, {}, {"MODE": "PAPER", "ENABLE_ORDERBOOK_FILTER": False})
     enabled = evaluate_trade_quality(candidate, risky, {}, {"MODE": "PAPER", "ENABLE_ORDERBOOK_FILTER": True})
     assert disabled.accepted
@@ -119,7 +120,8 @@ def test_mode_specific_settings_do_not_leak(monkeypatch):
     assert changed.max_daily_loss_pct == baseline.max_daily_loss_pct
 
     candidate = _candidate()
-    paper = evaluate_trade_quality(candidate, {"volatility_regime": "normal"}, {}, {"MODE": "PAPER"})
+    safe_market = {"volatility_regime": "normal", "expected_slippage_pct": 0.0}
+    paper = evaluate_trade_quality(candidate, safe_market, {}, {"MODE": "PAPER"})
     monkeypatch.setenv("ALPHAFORGE_ALLOW_LIVE_ORDERS", "true")
-    still_paper = evaluate_trade_quality(candidate, {"volatility_regime": "normal"}, {}, {"MODE": "PAPER"})
+    still_paper = evaluate_trade_quality(candidate, safe_market, {}, {"MODE": "PAPER"})
     assert still_paper.accepted == paper.accepted
