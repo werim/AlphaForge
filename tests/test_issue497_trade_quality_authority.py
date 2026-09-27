@@ -158,7 +158,7 @@ def test_aibrain_exposes_raw_expectancy_used_for_scoring():
     assert score.probabilistic["raw_expectancy_source"] == "setup_regime_symbol_expectancy_stats"
 
 
-def test_runtime_quality_adapter_falls_back_to_aibrain_raw_expectancy(monkeypatch):
+def test_runtime_quality_adapter_prefers_aibrain_post_cost_expectancy(monkeypatch):
     seen = {}
 
     def fake_quality(candidate, market_ctx, recent_stats, config):
@@ -184,12 +184,15 @@ def test_runtime_quality_adapter_falls_back_to_aibrain_raw_expectancy(monkeypatc
         },
         score_ctx=SimpleNamespace(
             total_score=0.8,
-            probabilistic={"raw_expectancy": 0.15},
+            probabilistic={
+                "raw_expectancy": 0.15,
+                "expectancy_after_costs": 0.07,
+            },
         ),
         effective_rr=2.8,
     )
 
     assert result["accepted"] is True
-    assert seen["candidate"].expectancy == 0.15
-    assert seen["market_ctx"]["expectancy"] == 0.15
-    assert result["diagnostics"]["expectancy_source"] == "score.raw_expectancy"
+    assert seen["candidate"].expectancy == 0.07
+    assert seen["market_ctx"]["expectancy"] == 0.07
+    assert result["diagnostics"]["expectancy_source"] == "score.expectancy_after_costs"

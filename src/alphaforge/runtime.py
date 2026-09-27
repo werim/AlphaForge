@@ -1910,9 +1910,12 @@ class RuntimeOrchestrator:
             ("market.rr", quality_market_ctx.get("rr")),
         )
         expectancy, expectancy_source = self._finite_numeric(
+            (
+                "score.expectancy_after_costs",
+                score_probabilistic.get("expectancy_after_costs"),
+            ),
             ("market.expectancy", quality_market_ctx.get("expectancy")),
             ("signal.expectancy", signal_payload.get("expectancy")),
-            ("score.raw_expectancy", score_probabilistic.get("raw_expectancy")),
         )
         quality_market_ctx.update(
             {

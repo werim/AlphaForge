@@ -79,7 +79,7 @@ class _AlwaysAcceptBrain:
         return SimpleNamespace(
             total_score=0.9,
             components={},
-            probabilistic={"raw_expectancy": 0.2},
+            probabilistic={"raw_expectancy": 0.2, "expectancy_after_costs": 0.2},
         ), _Plan(), "ok"
 
 
@@ -1710,7 +1710,7 @@ class _ParityBrain:
         class _Score:
             total_score = 0.88
             components = {}
-            probabilistic = {"raw_expectancy": 0.2}
+            probabilistic = {"raw_expectancy": 0.2, "expectancy_after_costs": 0.2}
         return _Score()
 
     def choose_order_plan(self, signal_payload, market_ctx, score_ctx):
