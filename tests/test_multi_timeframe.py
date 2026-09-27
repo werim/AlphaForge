@@ -495,6 +495,7 @@ def _runtime_candidate():
             "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
             "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
             "spread_pct": .0002, "market_data_latency_ms": 20.0,
+            "volatility_regime": "normal",
             "liquidity_score": .9, "volume_24h_usdt": 100_000_000,
             "market_ts": time.time(), "timeframe": "1m", "equity": 100_000.0,
             "available_balance": 100_000.0, "notional": 1_000.0}
