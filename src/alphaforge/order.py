@@ -287,13 +287,13 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
     regime_ok = True
     if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
-        regime_ok = regime == "TREND"
+        regime_ok = regime in {"TREND", "TRENDING"}
     elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
-        # BREAKOUT setup/regime alignment must not be blocked because a data
-        # source labels volatility as BREAKOUT instead of normal/high.
-        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
+        # Accept both legacy and canonical MTF regime vocabulary.  Regime
+        # naming must not create a second policy authority.
+        regime_ok = regime in {"TREND", "TRENDING", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
     elif "RANGE_MEAN_REVERSION" in setup_type:
-        regime_ok = regime == "RANGE"
+        regime_ok = regime in {"RANGE", "MEAN_REVERTING"}
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
     _check((not orderbook_filter_enabled) or (not orderbook_missing), "orderbook_present")
     _check((not orderbook_filter_enabled) or (not orderbook_risky), "orderbook_quality")
