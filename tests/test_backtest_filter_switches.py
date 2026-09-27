@@ -82,10 +82,10 @@ def test_rr_too_low_uses_effective_rr_and_can_only_be_bypassed_in_backtest():
     enabled = evaluate_trade_quality(c, market, {}, {"MODE": "BACKTEST", "MIN_EFFECTIVE_RR": 1.6})
     disabled = evaluate_trade_quality(c, market, {}, {"MODE": "BACKTEST", "MIN_EFFECTIVE_RR": 1.6, "DISABLED_BACKTEST_FILTERS": ["RR_TOO_LOW"]})
     paper = evaluate_trade_quality(c, market, {}, {"MODE": "PAPER", "MIN_EFFECTIVE_RR": 1.6, "DISABLED_BACKTEST_FILTERS": ["RR_TOO_LOW"]})
-    assert enabled.reject_reason == "RR_TOO_LOW"
+    assert enabled.reject_reason == "LOW_EFFECTIVE_RR"
     assert disabled.accepted
     assert "RR_TOO_LOW" in disabled.diagnostics["bypassed_reject_reasons"]
-    assert paper.reject_reason == "RR_TOO_LOW"
+    assert paper.reject_reason == "LOW_EFFECTIVE_RR"
 
 
 def test_regime_mismatch_enabled_by_default():
