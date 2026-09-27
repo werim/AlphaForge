@@ -491,7 +491,8 @@ class LiveReadinessEvaluator:
                    AND executable_raw_rr IS NOT NULL
                    AND remaining_execution_penalty IS NOT NULL
                    AND effective_rr IS NOT NULL
-                   AND UPPER(COALESCE(rr_basis,''))='EXPECTED_FILL_RUNTIME_PARITY'"""
+                   AND UPPER(COALESCE(rr_basis,''))='EXPECTED_FILL_RUNTIME_PARITY'
+                   AND COALESCE(execution_cost_semantics,'')<>''"""
             )
             phase3_execution_reject_rows = evidence_count(
                 "UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','SPREAD_TOO_HIGH','HIGH_SLIPPAGE','SLIPPAGE_TOO_HIGH','HIGH_TOTAL_COST','LOW_LIQUIDITY','THIN_LIQUIDITY','HIGH_LATENCY','BAD_EXECUTION','EXECUTION_CONTEXT_UNAVAILABLE','INVALID_FAKE_ZERO','EXCESSIVE_VOLATILITY_PENALTY','EXCESSIVE_VOLATILITY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')"
@@ -505,6 +506,7 @@ class LiveReadinessEvaluator:
                    AND (candidate_raw_rr IS NULL OR executable_raw_rr IS NULL
                         OR remaining_execution_penalty IS NULL
                         OR UPPER(COALESCE(rr_basis,''))<>'EXPECTED_FILL_RUNTIME_PARITY'
+                        OR COALESCE(execution_cost_semantics,'')=''
                         OR effective_rr IS NULL OR min_effective_rr IS NULL OR min_effective_rr <= 0
                         OR cost_penalty IS NULL OR spread_pct IS NULL
                         OR expected_slippage_pct IS NULL OR liquidity_score IS NULL
