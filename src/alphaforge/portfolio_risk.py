@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import math
 from typing import Any, Mapping
 
 PORTFOLIO_REJECT_REASONS = {
@@ -74,6 +75,81 @@ class PortfolioRiskDecision:
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def scale_candidate_exposure(
+    *,
+    original_notional: Any,
+    risk_scale: Any = 1.0,
+    original_quantity: Any | None = None,
+    require_scale: bool = False,
+) -> dict[str, Any]:
+    """Return one fail-closed capital-scaling projection for pre-submit sizing.
+
+    risk_scale is a fraction in [0, 1]. When a caller requires a scale,
+    missing or invalid evidence is never promoted to 1.0.
+    """
+    try:
+        notional = float(original_notional)
+    except (TypeError, ValueError):
+        notional = float("nan")
+    if not math.isfinite(notional) or notional <= 0.0:
+        return {
+            "status": "INVALID",
+            "reason": "INVALID_ORIGINAL_NOTIONAL",
+            "original_notional": None,
+            "risk_scale": None,
+            "effective_notional": None,
+            "original_quantity": None,
+            "effective_quantity": None,
+        }
+
+    raw_scale = risk_scale
+    if raw_scale is None and not require_scale:
+        raw_scale = 1.0
+    try:
+        scale = float(raw_scale)
+    except (TypeError, ValueError):
+        scale = float("nan")
+    if not math.isfinite(scale) or scale < 0.0 or scale > 1.0:
+        return {
+            "status": "INVALID",
+            "reason": "INVALID_RISK_SCALE",
+            "original_notional": notional,
+            "risk_scale": None,
+            "effective_notional": None,
+            "original_quantity": None,
+            "effective_quantity": None,
+        }
+
+    original_qty = None
+    effective_qty = None
+    if original_quantity is not None:
+        try:
+            original_qty = float(original_quantity)
+        except (TypeError, ValueError):
+            original_qty = float("nan")
+        if not math.isfinite(original_qty) or original_qty <= 0.0:
+            return {
+                "status": "INVALID",
+                "reason": "INVALID_ORIGINAL_QUANTITY",
+                "original_notional": notional,
+                "risk_scale": scale,
+                "effective_notional": None,
+                "original_quantity": None,
+                "effective_quantity": None,
+            }
+        effective_qty = original_qty * scale
+
+    effective = notional * scale
+    return {
+        "status": "COMPLETE",
+        "reason": "",
+        "original_notional": notional,
+        "risk_scale": scale,
+        "effective_notional": effective,
+        "original_quantity": original_qty,
+        "effective_quantity": effective_qty,
+    }
 
 def correlation_group_for_symbol(symbol: str, override: Mapping[str, str] | None = None) -> str:
     s = str(symbol or "").upper().replace("-", "")
@@ -229,14 +305,22 @@ class BacktestPortfolioState:
 
     def notional_for(self, *, entry: Any, balance: Any | None = None, risk_pct: Any | None = None, risk_scale: Any = 1.0, notional: Any | None = None) -> float | None:
         explicit = _num(notional, None)
-        if explicit is not None and explicit > 0:
-            return explicit * max(_num(risk_scale, 1.0) or 1.0, 0.0)
-        equity = _num(balance, self.current_equity)
-        pct = _num(risk_pct, None)
-        if equity is None or pct is None:
+        base_notional = explicit
+        if base_notional is None:
+            equity = _num(balance, self.current_equity)
+            pct = _num(risk_pct, None)
+            if equity is None or pct is None:
+                return None
+            base_notional = equity * (pct / 100.0)
+        projection = scale_candidate_exposure(
+            original_notional=base_notional,
+            risk_scale=risk_scale,
+            require_scale=False,
+        )
+        effective = projection.get("effective_notional")
+        if projection.get("status") != "COMPLETE" or effective is None:
             return None
-        scaled = equity * (pct / 100.0) * max(_num(risk_scale, 1.0) or 1.0, 0.0)
-        return scaled if scaled > 0 else None
+        return float(effective) if float(effective) > 0.0 else None
 
     def snapshot(self, *, mode: str, symbol: str, side: str = "LONG", config: Mapping[str, Any] | Any | None = None, timestamp: int | float | None = None, candidate_notional: float | None = None) -> PortfolioRiskSnapshot:
         day = self._day_key(timestamp)
