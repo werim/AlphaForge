@@ -253,7 +253,13 @@ def test_campaign_aggregate_does_not_promote_missing_execution_measurements(tmp_
     conn.commit(); conn.close()
     result=_qualify(db,cid)
     blockers=_latest_blockers(db)
-    assert result["status"] != "CANARY_QUALIFIED"
+    conn=sqlite3.connect(db)
+    qualification_status=conn.execute(
+        "SELECT status FROM burnin_qualification_snapshots WHERE qualification_id=?",
+        (result["qualification_id"],),
+    ).fetchone()[0]
+    conn.close()
+    assert qualification_status != "CANARY_QUALIFIED"
     assert any(
         blocker.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:")
         and "spread_current" in blocker
