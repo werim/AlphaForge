@@ -993,7 +993,12 @@ def test_issue481_guided_sub_min_stop_rejects_before_ai_scoring(side, stop, targ
     assert reject["score"] is None
     assert reject["candidate_rr"] == pytest.approx(1.2)
     assert reject["executable_raw_rr"] == pytest.approx(0.0)
-    assert reject["stop_distance_pct"] == pytest.approx(0.01)
+    expected_fill = 100.02 if side == "LONG" else 99.98
+    expected_stop_pct = abs(expected_fill - stop) / expected_fill * 100.0
+    assert reject["planned_stop_distance_pct"] == pytest.approx(0.01)
+    assert reject["executable_stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_basis"] == "EXPECTED_FILL"
     assert "STOP_TOO_TIGHT" in reject["all_failed_gates"]
     assert "RR_TOO_LOW" in reject["all_failed_gates"]
     assert "LOW_EFFECTIVE_RR" in reject["all_failed_gates"]
@@ -1046,7 +1051,12 @@ def test_issue481_min_stop_boundary_reaches_scoring_unchanged(side, stop, target
 
     assert brain.calls == 1
     reject = rejects[-1]
-    assert reject["stop_distance_pct"] == pytest.approx(0.15)
+    expected_fill = 100.02 if side == "LONG" else 99.98
+    expected_stop_pct = abs(expected_fill - stop) / expected_fill * 100.0
+    assert reject["planned_stop_distance_pct"] == pytest.approx(0.15)
+    assert reject["executable_stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_basis"] == "EXPECTED_FILL"
     assert reject["sl"] == pytest.approx(stop)
     assert reject["tp"] == pytest.approx(target)
     assert reject["primary_reject_reason"] != "STOP_TOO_TIGHT"
