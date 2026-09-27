@@ -179,6 +179,10 @@ Until those are fixed and revalidated with fresh evidence, a CANARY qualificatio
 10. #491 candidate-notional SSOT.
 
 ### P2/P3 after safety/evidence closure
+- #502 authoritative microstructure coverage;
+- #503 derivatives leverage/liquidation/funding realism if leveraged futures LIVE is intended;
+- #504 canonical regime breadth;
+- #505 adaptive post-entry position management;
 - empirical stop/ATR/volatility policy calibration;
 - metric naming/observability cleanup;
 - legacy/dead-path quarantine;
