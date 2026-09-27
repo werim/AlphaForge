@@ -53,7 +53,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
-from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
+from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
     normalize_mtf_execution_confirmation_mode, runtime_filter_config)
@@ -2743,7 +2743,14 @@ class RuntimeOrchestrator:
             )
             return
 
-        candidate_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
+        candidate_notional = next(
+            (
+                market_ctx.get(key)
+                for key in ("notional", "notional_usdt", "order_notional")
+                if market_ctx.get(key) is not None
+            ),
+            None,
+        )
         inferred_equity = market_ctx.get("equity", market_ctx.get("available_balance"))
         available_balance = market_ctx.get("available_balance", inferred_equity)
         portfolio_evidence_source = (
@@ -2806,6 +2813,72 @@ class RuntimeOrchestrator:
                 market_ctx["notional"] = candidate_notional
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
+        original_quantity = next(
+            (
+                market_ctx.get(key)
+                for key in ("quantity", "qty")
+                if market_ctx.get(key) is not None
+            ),
+            None,
+        )
+        sizing_projection = scale_candidate_exposure(
+            original_notional=candidate_notional,
+            risk_scale=market_ctx.get("risk_scale"),
+            original_quantity=original_quantity,
+            require_scale=bool(market_ctx.get("stop_too_wide_softened")),
+        )
+        market_ctx.update({
+            "sizing_status": sizing_projection.get("status"),
+            "sizing_reason": sizing_projection.get("reason"),
+            "original_notional": sizing_projection.get("original_notional"),
+            "risk_scale": sizing_projection.get("risk_scale"),
+            "effective_notional": sizing_projection.get("effective_notional"),
+            "original_quantity": sizing_projection.get("original_quantity"),
+            "effective_quantity": sizing_projection.get("effective_quantity"),
+        })
+        if sizing_projection.get("status") != "COMPLETE":
+            reject_reason = "UNKNOWN_PORTFOLIO_RISK"
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": reject_reason,
+                "reject_reason": reject_reason,
+                "primary_reject_reason": reject_reason,
+                "reject_reasons": [reject_reason],
+                "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "effective_rr": effective_rr,
+                "explanation": "canonical_risk_scaling_gate",
+                "execution_ctx": execution_ctx,
+                "sizing_status": sizing_projection.get("status"),
+                "sizing_reason": sizing_projection.get("reason"),
+                "original_notional": sizing_projection.get("original_notional"),
+                "risk_scale": sizing_projection.get("risk_scale"),
+                "effective_notional": sizing_projection.get("effective_notional"),
+                "original_quantity": sizing_projection.get("original_quantity"),
+                "effective_quantity": sizing_projection.get("effective_quantity"),
+            }
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**market_ctx, **reject_payload},
+            )
+            return
+
+        candidate_notional = float(sizing_projection["effective_notional"])
+        market_ctx["notional"] = candidate_notional
+        for alias in ("notional_usdt", "order_notional"):
+            if alias in market_ctx:
+                market_ctx[alias] = candidate_notional
+        effective_quantity = sizing_projection.get("effective_quantity")
+        if effective_quantity is not None:
+            market_ctx["quantity"] = float(effective_quantity)
+            market_ctx["qty"] = float(effective_quantity)
         snapshot = snapshot_from_state(
             mode=self.config.execution_mode.value,
             symbol=selection.symbol,
