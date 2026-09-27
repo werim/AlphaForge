@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import inspect
+
+import pytest
 from types import SimpleNamespace
 
 import alphaforge.runtime as runtime_module
+from alphaforge.ai_brain import AIBrain
 from alphaforge.order import TradeQualityDecision
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -123,3 +126,70 @@ def test_runtime_quality_adapter_keeps_runtime_risk_out_of_shared_stats():
     # Portfolio/daily-loss/cooldown authority remains alphaforge.portfolio_risk;
     # shared candidate quality must not invent a second runtime-state model.
     assert "shared_quality_authority" in result["diagnostics"]
+
+
+def test_aibrain_exposes_raw_expectancy_used_for_scoring():
+    brain = AIBrain.for_stateless_scoring()
+    score = brain.score_signal(
+        {
+            "symbol": "BTCUSDT",
+            "setup": "TREND_CONTINUATION",
+            "risk_reward": 2.0,
+            "setup_quality": 0.9,
+        },
+        {
+            "momentum_confirmation": 0.9,
+            "liquidity_quality": 0.9,
+            "volatility_fit": 0.9,
+            "spread_bps": 1.0,
+            "expected_slippage_pct": 0.0002,
+            "latency_ms": 20.0,
+            "funding_rate_pct": 0.0,
+        },
+        {"regime": "TRENDING", "alignment": 0.9},
+        {
+            "setup": {"TREND_CONTINUATION": 0.3},
+            "regime": {"TRENDING": 0.2},
+            "symbol": {"BTCUSDT": 0.1},
+            "sample_size": 100,
+        },
+    )
+    assert score.probabilistic["raw_expectancy"] == pytest.approx(0.2)
+    assert score.probabilistic["raw_expectancy_source"] == "setup_regime_symbol_expectancy_stats"
+
+
+def test_runtime_quality_adapter_falls_back_to_aibrain_raw_expectancy(monkeypatch):
+    seen = {}
+
+    def fake_quality(candidate, market_ctx, recent_stats, config):
+        seen["candidate"] = candidate
+        seen["market_ctx"] = dict(market_ctx)
+        return TradeQualityDecision(accepted=True, diagnostics={})
+
+    monkeypatch.setattr(runtime_module, "evaluate_trade_quality", fake_quality)
+    market = _market()
+    market.pop("expectancy", None)
+    result = _runtime()._evaluate_authoritative_trade_quality(
+        symbol="BTCUSDT",
+        market_ctx=market,
+        signal_payload={
+            "side": "LONG",
+            "entry_price": 100.0,
+            "stop_loss": 99.0,
+            "take_profit": 103.0,
+            "risk_reward": 3.0,
+            "setup": "TREND_CONTINUATION",
+            "setup_reason": "fixture",
+            "regime": "TRENDING",
+        },
+        score_ctx=SimpleNamespace(
+            total_score=0.8,
+            probabilistic={"raw_expectancy": 0.15},
+        ),
+        effective_rr=2.8,
+    )
+
+    assert result["accepted"] is True
+    assert seen["candidate"].expectancy == 0.15
+    assert seen["market_ctx"]["expectancy"] == 0.15
+    assert result["diagnostics"]["expectancy_source"] == "score.raw_expectancy"

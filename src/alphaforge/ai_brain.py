@@ -94,7 +94,8 @@ class AIBrain:
     ) -> ScoreContext:
         setup_quality = self._clip01(_num(signal, "setup_quality", 0.5))
         regime_alignment = self._clip01(_num(regime_ctx, "alignment", 0.5))
-        expectancy_edge = self._expectancy_edge(signal, regime_ctx, stats_ctx)
+        raw_expectancy = self._raw_expectancy(signal, regime_ctx, stats_ctx)
+        expectancy_edge = self._clip01((raw_expectancy + 1.0) / 2.0)
         momentum_confirmation = self._clip01(_num(market_ctx, "momentum_confirmation", 0.5))
         liquidity_quality = self._clip01(_num(market_ctx, "liquidity_quality", 0.5))
         volatility_fit = self._clip01(_num(market_ctx, "volatility_fit", 0.5))
@@ -204,6 +205,8 @@ class AIBrain:
             "confidence": confidence,
             "calibrated_score": calibrated_score,
             "expectancy_after_costs": expectancy_after_costs,
+            "raw_expectancy": raw_expectancy,
+            "raw_expectancy_source": "setup_regime_symbol_expectancy_stats",
             "sample_size": sample_size,
             "source": "ai_brain_v2_probabilistic",
             "warnings": [],
@@ -447,7 +450,7 @@ class AIBrain:
                 session.close()
 
     # ---- Stats helpers ---------------------------------------------------
-    def _expectancy_edge(self, signal: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> float:
+    def _raw_expectancy(self, signal: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> float:
         setup = str(signal.get("setup", "unknown"))
         regime = str(regime_ctx.get("regime", "unknown"))
         symbol = str(signal.get("symbol", "unknown"))
@@ -456,8 +459,10 @@ class AIBrain:
             _num(stats_ctx.get("regime", {}), regime, 0.0),
             _num(stats_ctx.get("symbol", {}), symbol, 0.0),
         ]
-        expectancy = sum(values) / len(values)
-        return self._clip01((expectancy + 1.0) / 2.0)
+        return sum(values) / len(values)
+
+    def _expectancy_edge(self, signal: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> float:
+        return self._clip01((self._raw_expectancy(signal, regime_ctx, stats_ctx) + 1.0) / 2.0)
 
     def _upsert_expectancy(self, table: str, key_col: str, key_val: str, pnl: float) -> None:
         self.session.execute(

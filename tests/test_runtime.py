@@ -76,7 +76,11 @@ class _AlwaysAcceptBrain:
             limit_price = None
             stop_price = None
 
-        return {}, _Plan(), "ok"
+        return SimpleNamespace(
+            total_score=0.9,
+            components={},
+            probabilistic={"raw_expectancy": 0.2},
+        ), _Plan(), "ok"
 
 
 def test_execution_mode_from_env_parses_and_validates() -> None:
