@@ -710,9 +710,9 @@ def test_periodic_metrics_do_not_fabricate_drawdown_when_risk_state_incomplete(
     engine, runtime, _, _ = _canonical_reject_fixture(
         tmp_path, monkeypatch, "incomplete-drawdown")
     monkeypatch.setattr(
-        runtime,
+        RuntimeOrchestrator,
         "_paper_portfolio_risk_state",
-        lambda _symbol, now_ts: {
+        lambda self, _symbol, now_ts: {
             "equity": None,
             "rolling_peak_equity": None,
             "rolling_drawdown_pct": None,
