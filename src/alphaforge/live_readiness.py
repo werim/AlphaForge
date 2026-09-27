@@ -216,7 +216,7 @@ class LiveReadinessEvaluator:
         rollback = {"rollback_ready"}
         phase6_release = {"phase6_release_gate_evidence"}
         phase3_execution_realism = {"execution_cost_breakdown_present", "effective_rr_available", "execution_rejects_persisted", "effective_rr_threshold_provenance_valid", "no_accepted_trade_with_effective_rr_below_threshold", "no_accepted_trade_with_missing_critical_execution_context", "no_fake_zero_execution_costs"}
-        phase4_portfolio_risk = {"portfolio_risk_snapshot_present", "portfolio_risk_rejects_persisted", "no_accepted_trade_over_position_limit", "no_accepted_trade_over_notional_limit", "no_accepted_trade_over_symbol_notional_limit", "no_accepted_trade_after_daily_loss_limit", "no_accepted_trade_with_unknown_portfolio_risk", "correlation_risk_evidence_present", "drawdown_guard_evidence_present", "portfolio_accounting_reconciliation_present", "backtest_and_paper_share_portfolio_risk_engine"}
+        phase4_portfolio_risk = {"portfolio_risk_snapshot_present", "portfolio_risk_rejects_persisted", "no_accepted_trade_over_position_limit", "no_accepted_trade_over_notional_limit", "no_accepted_trade_over_symbol_notional_limit", "no_accepted_trade_after_daily_loss_limit", "no_accepted_trade_with_unknown_portfolio_risk", "correlation_risk_evidence_present", "drawdown_guard_evidence_present", "portfolio_accounting_reconciliation_present", "backtest_and_paper_have_canonical_portfolio_risk_evidence"}
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
@@ -224,7 +224,7 @@ class LiveReadinessEvaluator:
             CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("phase3_execution_realism_complete", self._checks_pass(checks, phase3_execution_realism), "requires execution cost breakdown, effective RR, execution reject persistence, no fake-zero costs, and no accepted trade with below-threshold/missing execution context"),
-            CheckResult("phase4_portfolio_risk_complete", self._checks_pass(checks, phase4_portfolio_risk), "requires portfolio risk snapshots, persisted portfolio rejects, exposure/drawdown/correlation guards, and BACKTEST/PAPER shared engine evidence"),
+            CheckResult("phase4_portfolio_risk_complete", self._checks_pass(checks, phase4_portfolio_risk), "requires portfolio risk snapshots, persisted portfolio rejects, exposure/drawdown/correlation guards, and BACKTEST/PAPER canonical portfolio-risk evidence"),
             CheckResult("effective_rr_penalty_breakdown_complete", bool(mode_parity.get("effective_rr_penalty_breakdown_complete", False) or mode_parity.get("execution_context_complete", False)), "requires persisted execution-context/effective-RR penalty evidence"),
             CheckResult("exchange_connectivity_healthy", bool(reconciliation.get("exchange_connectivity_healthy", False)), "requires measured healthy exchange connectivity; PAPER success is insufficient"),
             CheckResult("authenticated_reconciliation_evidence_complete", self._checks_pass(checks, reconciliation_checks) and bool(reconciliation.get("authenticated", reconciliation.get("authenticated_reconciliation", False))), "requires authenticated read-only reconciliation evidence"),
@@ -605,7 +605,7 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("correlation_risk_evidence_present", correlation_rows > 0, f"correlation_rows={correlation_rows}"))
         checks.append(CheckResult("drawdown_guard_evidence_present", drawdown_rows > 0, f"drawdown_rows={drawdown_rows}"))
         checks.append(CheckResult("portfolio_accounting_reconciliation_present", reconcile_rows > 0 and accounting_distinct_states > 1, f"reconcile_rows={reconcile_rows},distinct_accounting_states={accounting_distinct_states}"))
-        checks.append(CheckResult("backtest_and_paper_share_portfolio_risk_engine", shared_engine_rows >= 2, f"modes_with_portfolio_risk={shared_engine_rows}"))
+        checks.append(CheckResult("backtest_and_paper_have_canonical_portfolio_risk_evidence", shared_engine_rows >= 2, f"authority=alphaforge.portfolio_risk,modes_with_portfolio_risk={shared_engine_rows}"))
         return checks
 
 

@@ -121,6 +121,13 @@ jobs:
           pytest -q tests/test_issue492_executable_stop_risk.py
           pytest -q tests/test_issue421_portfolio_risk_state.py -k "portfolio or risk"
 
+      - name: Portfolio-risk authority gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue496_portfolio_risk_authority.py
+          pytest -q tests/test_portfolio_risk_engine.py
+          pytest -q tests/test_live_readiness.py -k "phase3_execution_gate_blocks_when_each_required_check_fails or final_gate_missing_each_individual_gate_blocks_real_orders"
+
       - name: Protected safety mutation gate
         run: python scripts/run_safety_mutations.py
 
