@@ -1014,6 +1014,11 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
     }.get(decision_raw, decision_raw or None)
 
     payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}
+    # raw_rr remains a compatibility alias whose only canonical modern
+    # meaning is candidate/structural RR. Do not infer candidate/executable
+    # stages from legacy raw_rr-only evidence.
+    if payload.get("candidate_raw_rr") is not None:
+        payload["raw_rr"] = payload.get("candidate_raw_rr")
     payload["evidence_id"] = evidence_id
     payload["decision"] = decision
     payload["timestamp"] = evidence.get("timestamp")
