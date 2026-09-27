@@ -265,6 +265,8 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         effective_rr = rr
     min_trade_score = float(cfg["MIN_TRADE_SCORE"])
     score_eval = score if min_trade_score <= 1.0 else (score * 10.0 if 0.0 <= score < 1.0 else score)
+    score_gate_active = bool(cfg.get("SCORE_GATE_ACTIVE", True))
+    expectancy_gate_active = bool(cfg.get("EXPECTANCY_GATE_ACTIVE", True))
     pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
     orderbook_imbalance = _nullable_float(market_ctx.get("orderbook_imbalance"))
     spoof_risk = _nullable_float(market_ctx.get("spoof_risk"))
@@ -279,11 +281,11 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             return False
         return True
 
-    _check(score_eval >= min_trade_score, "score")
+    _check((not score_gate_active) or score_eval >= min_trade_score, "score")
     _check(rr >= float(cfg["MIN_RR"]), "rr")
     _check(effective_rr >= float(cfg["MIN_EFFECTIVE_RR"]), "effective_rr")
-    _check((not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
-    _check(expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
+    _check((not expectancy_gate_active) or (not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
+    _check((not expectancy_gate_active) or expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
     _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
     regime_ok = True
     if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
@@ -330,7 +332,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
 
     if not candidate or not getattr(candidate, "symbol", None):
         reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
-    elif score_eval < min_trade_score and not _bypass("LOW_SCORE"):
+    elif score_gate_active and score_eval < min_trade_score and not _bypass("LOW_SCORE"):
         reject_reason, failed_filter = "LOW_SCORE", "score"
     elif rr < float(cfg["MIN_RR"]) and not _bypass("RR_TOO_LOW"):
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
@@ -339,9 +341,9 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         # stages. Preserve the legacy BACKTEST RR_TOO_LOW bypass switch, but
         # emit the canonical post-cost reason for evidence/readiness.
         reject_reason, failed_filter = "LOW_EFFECTIVE_RR", "effective_rr"
-    elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
+    elif expectancy_gate_active and cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
         reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
-    elif expectancy_val is not None and expectancy_val < float(cfg["MIN_EXPECTANCY"]):
+    elif expectancy_gate_active and expectancy_val is not None and expectancy_val < float(cfg["MIN_EXPECTANCY"]):
         reject_reason, failed_filter = "NEGATIVE_EXPECTANCY", "expectancy"
     elif cfg["BLOCK_CHOP_MARKET"] and any("CHOP" in f for f in pattern_flags):
         reject_reason, failed_filter = "CHOP_MARKET_BLOCK", "pattern_flags"
