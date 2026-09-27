@@ -2708,6 +2708,49 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
 
+        if order_plan.decision != "ACCEPTED":
+            reject_reason = score_reject_reason(score_ctx)
+            await self._persist_reject({
+                **market_ctx,
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": order_plan.decision,
+                "reason": reject_reason,
+                "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "score_components": getattr(score_ctx, "components", None),
+                "rr": signal_payload.get("risk_reward"),
+                "side": signal_payload.get("side", market_ctx.get("side")),
+                "setup_type": signal_payload.get("setup", signal_payload.get("setup_type")),
+                "entry": signal_payload.get("entry_price", market_ctx.get("entry")),
+                "sl": signal_payload.get("stop_loss", market_ctx.get("sl")),
+                "tp": signal_payload.get("take_profit", market_ctx.get("tp")),
+                "regime": signal_payload.get("regime", market_ctx.get("regime")),
+                "effective_rr": effective_rr,
+                "explanation": explanation,
+                "execution_ctx": execution_ctx,
+                "spread_pct": execution_ctx.get("spread_pct"),
+                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                "latency_ms": execution_ctx.get("latency_ms"),
+                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                "volatility_regime": execution_ctx.get("volatility_regime"),
+            })
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {
+                "reason": reject_reason,
+                "reject_reason": reject_reason,
+                "decision": "REJECTED",
+                "signal_id": signal_id,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "effective_rr": effective_rr,
+                "execution_ctx": execution_ctx,
+            })
+            return
+
+
         quality = self._evaluate_authoritative_trade_quality(
             symbol=selection.symbol,
             market_ctx=market_ctx,
@@ -2780,50 +2823,6 @@ class RuntimeOrchestrator:
                 selection.symbol,
                 {**market_ctx, **reject_payload},
             )
-            return
-
-        if order_plan.decision != "ACCEPTED":
-            reject_reason = score_reject_reason(score_ctx)
-            await self._persist_reject({
-                **market_ctx,
-                "signal_id": signal_id,
-                "symbol": selection.symbol,
-                "mode": self.config.execution_mode.value,
-                "phase": "final",
-                "decision": order_plan.decision,
-                "reason": reject_reason,
-                "confidence": order_plan.confidence,
-                "score": getattr(score_ctx, "total_score", None),
-                "score_components": getattr(score_ctx, "components", None),
-                "rr": signal_payload.get("risk_reward"),
-                "side": signal_payload.get("side", market_ctx.get("side")),
-                "setup_type": signal_payload.get("setup", signal_payload.get("setup_type")),
-                "entry": signal_payload.get("entry_price", market_ctx.get("entry")),
-                "sl": signal_payload.get("stop_loss", market_ctx.get("sl")),
-                "tp": signal_payload.get("take_profit", market_ctx.get("tp")),
-                "regime": signal_payload.get("regime", market_ctx.get("regime")),
-                "effective_rr": effective_rr,
-                "explanation": explanation,
-                "execution_ctx": execution_ctx,
-                "trade_quality": quality_diagnostics,
-                "spread_pct": execution_ctx.get("spread_pct"),
-                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
-                "latency_ms": execution_ctx.get("latency_ms"),
-                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
-                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
-                "volatility_regime": execution_ctx.get("volatility_regime"),
-            })
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {
-                "reason": reject_reason,
-                "reject_reason": reject_reason,
-                "decision": "REJECTED",
-                "signal_id": signal_id,
-                "score": getattr(score_ctx, "total_score", None),
-                "rr": signal_payload.get("risk_reward"),
-                "effective_rr": effective_rr,
-                "execution_ctx": execution_ctx,
-                "trade_quality": quality_diagnostics,
-            })
             return
 
         if execution_safety is not None and not bool(execution_safety.get("accepted")):
