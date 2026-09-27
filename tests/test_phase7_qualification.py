@@ -23,6 +23,46 @@ def _run(e):
             c.execute(text("INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version) VALUES (:id,'r','rel','2026-01-01T00:00:00Z','PAPER','BTCUSDT','REJECTED',1,'[]','{}','{}','v')"), {"id": f"obs-r-{i}"})
 
 
+def _persist_measured_drawdown(
+    e,
+    *,
+    event_id="dd",
+    peak=1000.0,
+    trough=1000.0,
+    drawdown=0.0,
+    consecutive_losses=0,
+    resolved=1,
+    rolling_expectancy=0.1,
+    payload=None,
+):
+    evidence_payload = payload if payload is not None else {
+        "evidence_status": "COMPLETE",
+        "evidence_source": "TEST_MEASURED_LEDGER",
+        "risk_state_complete": True,
+    }
+    with e.begin() as c:
+        c.execute(text("""
+            INSERT INTO burnin_drawdown_events(
+                drawdown_event_id,burnin_run_id,release_id,
+                peak_equity,trough_equity,drawdown_pct,
+                consecutive_losses,rolling_expectancy,resolved,
+                payload_json,schema_version
+            ) VALUES (
+                :id,'r','rel',:peak,:trough,:drawdown,
+                :losses,:rolling,:resolved,:payload,'v'
+            )
+        """), {
+            "id": event_id,
+            "peak": peak,
+            "trough": trough,
+            "drawdown": drawdown,
+            "losses": consecutive_losses,
+            "rolling": rolling_expectancy,
+            "resolved": resolved,
+            "payload": json.dumps(evidence_payload, sort_keys=True),
+        })
+
+
 def _qualifying_evidence(e):
     with e.begin() as c:
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
@@ -32,6 +72,7 @@ def _qualifying_evidence(e):
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,stale_data_count,execution_rejects,reconciliation_quality,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE',1,1,1,1,1,1,.9,.9,0,0,0,'CLEAN','now','v')"))
+    _persist_measured_drawdown(e)
 
 
 def _qualifying_thresholds():
@@ -90,11 +131,115 @@ def test_missing_costs_block_qualification():
 
 def test_qualification_emits_legacy_and_explicit_recovery_status():
     e=_engine(); _run(e)
+    _persist_measured_drawdown(e)
 
     snap=BurnInQualificationEngine(e, BurnInThresholds(require_operator_ack=False,require_phase1_6_gates=False)).evaluate("r")
 
     assert snap.metrics["recovery_status"] == "RECOVERED"
     assert snap.metrics["drawdown_recovery_status"] == "RECOVERED"
+
+
+def test_no_drawdown_rows_are_insufficient_evidence():
+    e=_engine(); _run(e)
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1, minimum_total_decisions=1,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+    assert snap.drawdown_status == "INSUFFICIENT_EVIDENCE"
+    assert "DRAWDOWN_INSUFFICIENT_EVIDENCE" in snap.blockers
+    assert snap.metrics["max_drawdown_pct"] is None
+    assert snap.metrics["drawdown_recovery_status"] == "INSUFFICIENT"
+
+
+def test_synthetic_zero_drawdown_placeholder_is_insufficient():
+    e=_engine(); _run(e)
+    with e.begin() as c:
+        c.execute(text("""
+            INSERT INTO burnin_drawdown_events(
+                drawdown_event_id,burnin_run_id,release_id,
+                peak_equity,trough_equity,drawdown_pct,
+                consecutive_losses,rolling_expectancy,resolved,
+                payload_json,schema_version
+            ) VALUES ('synthetic','r','rel',NULL,NULL,0,0,NULL,1,'{}','v')
+        """))
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1, minimum_total_decisions=1,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+    assert snap.drawdown_status == "INSUFFICIENT_EVIDENCE"
+    assert any(b.startswith("DRAWDOWN_INSUFFICIENT_EVIDENCE:") for b in snap.blockers)
+    assert snap.metrics["drawdown_recovery_status"] == "INSUFFICIENT"
+
+
+def test_measured_zero_drawdown_can_pass_drawdown_gate():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(e)
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(e)._compute_drawdown(rows, blockers, metrics)
+    assert status == "PASS"
+    assert blockers == []
+    assert metrics["max_drawdown_pct"] == 0.0
+    assert metrics["drawdown_recovery_status"] == "RECOVERED"
+    assert metrics["drawdown_missing_fields"] == []
+
+
+def test_drawdown_peak_trough_must_match_reported_percentage():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(e, peak=1000, trough=900, drawdown=0.01)
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(e)._compute_drawdown(rows, blockers, metrics)
+    assert status == "INSUFFICIENT_EVIDENCE"
+    assert any("drawdown_pct_consistency" in b for b in blockers)
+
+
+def test_unresolved_measured_drawdown_blocks():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(
+        e, peak=1000, trough=950, drawdown=0.05,
+        consecutive_losses=2, resolved=0,
+    )
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(e)._compute_drawdown(rows, blockers, metrics)
+    assert status == "FAIL"
+    assert "DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER" in blockers
+    assert metrics["unresolved_drawdown_events"] == 1
+
+
+def test_measured_drawdown_breach_blocks():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(
+        e, peak=1000, trough=500, drawdown=0.5,
+        consecutive_losses=0, resolved=1,
+    )
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(
+        e, BurnInThresholds(max_drawdown_pct=0.08)
+    )._compute_drawdown(rows, blockers, metrics)
+    assert status == "FAIL"
+    assert "DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER" in blockers
+    assert metrics["max_drawdown_pct"] == 0.5
 
 
 def test_positive_lcb_can_qualify_but_live_not_enabled():
