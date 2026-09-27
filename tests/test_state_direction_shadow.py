@@ -119,7 +119,11 @@ class _Provider:
 
 class _AlwaysAcceptBrain:
     def before_real_order(self, *_args, **_kwargs):
-        score = SimpleNamespace(total_score=0.9, components={})
+        score = SimpleNamespace(
+            total_score=0.9,
+            components={},
+            probabilistic={"raw_expectancy": 0.2},
+        )
         plan = SimpleNamespace(
             decision="ACCEPTED", reason="", confidence=0.9,
             order_type="MARKET", limit_price=None, stop_price=None,
