@@ -1191,7 +1191,10 @@ class RuntimeOrchestrator:
                     "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
                     "entry_source", "stop_source", "target_source", "setup_timeframe",
                     "execution_timeframe", "structural_stop", "structural_target",
-                    "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
+                    "all_failed_gates", "failed_gate_evidence",
+                    "planned_stop_distance_pct", "executable_stop_distance_pct",
+                    "stop_distance_pct", "stop_distance_basis",
+                    "stop_distance_evidence_status", "stop_distance_missing_fields",
                     "min_signal_score", "min_raw_rr", "min_effective_rr",
                     "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
@@ -3756,14 +3759,44 @@ class RuntimeOrchestrator:
         if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
             add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
 
-        entry = number(payload.get("entry", payload.get("entry_price")))
-        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
-        if entry is not None and entry > 0 and stop is not None:
-            stop_distance_pct = abs(entry - stop) / entry * 100.0
+        stop_distance_pct = number(payload.get("stop_distance_pct"))
+        stop_distance_status = str(
+            payload.get("stop_distance_evidence_status") or ""
+        ).upper()
+        if stop_distance_status == "UNAVAILABLE":
+            add(
+                "STOP_DISTANCE_EXECUTION_UNAVAILABLE",
+                None,
+                "expected_fill",
+                "EVIDENCE_REQUIRED",
+                "STOP_DISTANCE_CONTRACT",
+            )
+        elif stop_distance_pct is not None:
             if stop_distance_pct < float(self.config.min_sl_pct):
-                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
+                add(
+                    "STOP_TOO_TIGHT", stop_distance_pct,
+                    float(self.config.min_sl_pct), "<", "STOP_DISTANCE_CONTRACT",
+                )
             if stop_distance_pct > float(self.config.max_sl_pct):
-                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+                add(
+                    "STOP_TOO_WIDE", stop_distance_pct,
+                    float(self.config.max_sl_pct), ">", "STOP_DISTANCE_CONTRACT",
+                )
+        else:
+            entry = number(payload.get("entry", payload.get("entry_price")))
+            stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
+            if entry is not None and entry > 0 and stop is not None:
+                legacy_stop_distance_pct = abs(entry - stop) / entry * 100.0
+                if legacy_stop_distance_pct < float(self.config.min_sl_pct):
+                    add(
+                        "STOP_TOO_TIGHT", legacy_stop_distance_pct,
+                        float(self.config.min_sl_pct), "<", "PLANNED_ENTRY_LEGACY",
+                    )
+                if legacy_stop_distance_pct > float(self.config.max_sl_pct):
+                    add(
+                        "STOP_TOO_WIDE", legacy_stop_distance_pct,
+                        float(self.config.max_sl_pct), ">", "PLANNED_ENTRY_LEGACY",
+                    )
 
         spread = number(payload.get("spread_pct", execution.get("spread_pct")))
         if spread is not None and spread > float(self.config.max_spread_pct):
@@ -3833,6 +3866,9 @@ class RuntimeOrchestrator:
                 "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
                 "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
                 "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
+                "planned_stop_distance_pct", "executable_stop_distance_pct",
+                "stop_distance_pct", "stop_distance_basis",
+                "stop_distance_evidence_status", "stop_distance_missing_fields",
                 "setup_type", "setup_reason", "geometry_source",
             ):
                 result[key] = None
@@ -3884,14 +3920,25 @@ class RuntimeOrchestrator:
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
         })
-        try:
-            entry_value = float(result.get("entry"))
-            stop_value = float(result.get("sl"))
-            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
-        except (TypeError, ValueError):
-            stop_distance_pct = None
+        if result.get("stop_distance_evidence_status") not in {"COMPLETE", "UNAVAILABLE"}:
+            try:
+                stop_evidence = build_stop_distance_evidence(
+                    entry=result.get("entry"),
+                    stop=result.get("sl"),
+                    expected_fill=result.get("expected_fill"),
+                    require_expected_fill=False,
+                )
+                result.update(stop_evidence.as_dict())
+            except ValueError:
+                result.update(
+                    planned_stop_distance_pct=None,
+                    executable_stop_distance_pct=None,
+                    stop_distance_pct=None,
+                    stop_distance_basis=None,
+                    stop_distance_evidence_status="UNAVAILABLE",
+                    stop_distance_missing_fields=["entry", "sl"],
+                )
         result.update({
-            "stop_distance_pct": stop_distance_pct,
             "min_signal_score": float(self.config.min_signal_score),
             "min_raw_rr": float(self.config.min_rr),
             "min_effective_rr": float(self.config.min_effective_rr),
@@ -4030,7 +4077,11 @@ class RuntimeOrchestrator:
                                        "entry_slippage_embedded_in_fill": bool(execution_aligned),
                                        "embedded_entry_slippage_cost": embedded_entry_slippage_cost,
                                        "fill_shift_initial_risk_ratio": fill_shift_initial_risk_ratio,
+                                       "planned_stop_distance_pct": payload.get("planned_stop_distance_pct"),
+                                       "executable_stop_distance_pct": payload.get("executable_stop_distance_pct"),
                                        "stop_distance_pct": payload.get("stop_distance_pct"),
+                                       "stop_distance_basis": payload.get("stop_distance_basis"),
+                                       "stop_distance_evidence_status": payload.get("stop_distance_evidence_status"),
                                        "all_failed_gates": payload.get("all_failed_gates"),
                                        "failed_gate_evidence": payload.get("failed_gate_evidence"),
                                        "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),
