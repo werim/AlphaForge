@@ -30,6 +30,7 @@ from alphaforge.execution import (
     build_execution_cost_model,
     evaluate_execution_safety,
     build_execution_cost_semantics,
+    build_stop_distance_evidence,
     execution_context_is_unavailable,
     weighted_average_fill_price,
 )
@@ -2374,6 +2375,29 @@ class RuntimeOrchestrator:
         rr_metrics = self._execution_rr_metrics(raw_rr, market_ctx, execution_ctx)
         effective_rr = float(rr_metrics["effective_rr"] or 0.0)
         market_ctx.update(rr_metrics)
+        stop_distance = None
+        if market_ctx.get("entry") is not None and market_ctx.get("sl") is not None:
+            try:
+                stop_distance = build_stop_distance_evidence(
+                    entry=market_ctx.get("entry"),
+                    stop=market_ctx.get("sl"),
+                    expected_fill=rr_metrics.get("expected_fill"),
+                    require_expected_fill=self.config.execution_mode in {
+                        ExecutionMode.PAPER,
+                        ExecutionMode.LIVE_PRECHECK,
+                        ExecutionMode.LIVE,
+                    },
+                )
+                market_ctx.update(stop_distance.as_dict())
+            except ValueError:
+                market_ctx.update(
+                    planned_stop_distance_pct=None,
+                    executable_stop_distance_pct=None,
+                    stop_distance_pct=None,
+                    stop_distance_basis="EXPECTED_FILL",
+                    stop_distance_evidence_status="UNAVAILABLE",
+                    stop_distance_missing_fields=["entry", "sl"],
+                )
         execution_safety = None
         if self.config.execution_mode in {
             ExecutionMode.PAPER,
@@ -2420,25 +2444,50 @@ class RuntimeOrchestrator:
             and isinstance(generation_for_geometry.get("candidate"), Mapping)
         )
         if guided_geometry:
-            try:
-                planned_entry = float(market_ctx.get("entry"))
-                planned_stop = float(market_ctx.get("sl"))
-            except (TypeError, ValueError):
-                planned_entry = planned_stop = float("nan")
-            if (
-                math.isfinite(planned_entry)
-                and planned_entry > 0.0
-                and math.isfinite(planned_stop)
-            ):
-                stop_distance_pct = abs(planned_entry - planned_stop) / planned_entry * 100.0
-                market_ctx.update(
-                    stop_distance_pct=stop_distance_pct,
-                    min_stop_pct=float(self.config.min_sl_pct),
-                    max_stop_pct=float(self.config.max_sl_pct),
+            market_ctx.update(
+                min_stop_pct=float(self.config.min_sl_pct),
+                max_stop_pct=float(self.config.max_sl_pct),
+            )
+            stop_distance_pct = market_ctx.get("stop_distance_pct")
+            stop_distance_complete = (
+                market_ctx.get("stop_distance_evidence_status") == "COMPLETE"
+                and stop_distance_pct is not None
+            )
+            if not stop_distance_complete:
+                reject_reason = "STOP_DISTANCE_EXECUTION_UNAVAILABLE"
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": [reject_reason],
+                    "confidence": 0.0,
+                    "score": None,
+                    "rr": raw_rr,
+                    "candidate_rr": rr_metrics["candidate_rr"],
+                    "expected_fill": rr_metrics["expected_fill"],
+                    "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                    "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
+                    "effective_rr": effective_rr,
+                    "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
+                    "explanation": "guided_executable_stop_distance_unavailable",
+                    "execution_ctx": execution_ctx,
+                    "execution_safety": execution_safety,
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
                 )
-                if stop_distance_pct < float(self.config.min_sl_pct):
-                    reject_reason = "STOP_TOO_TIGHT"
-                    reject_payload = {
+                return
+            if float(stop_distance_pct) < float(self.config.min_sl_pct):
+                reject_reason = "STOP_TOO_TIGHT"
+                reject_payload = {
                         "signal_id": signal_id,
                         "symbol": selection.symbol,
                         "mode": self.config.execution_mode.value,
@@ -2469,12 +2518,12 @@ class RuntimeOrchestrator:
                         "volatility_regime": execution_ctx.get("volatility_regime"),
                     }
                     await self._persist_reject({**market_ctx, **reject_payload})
-                    await self._emit_lifecycle_event(
-                        LifecycleState.SIGNAL_REJECTED.value,
-                        selection.symbol,
-                        {**market_ctx, **reject_payload},
-                    )
-                    return
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
+                )
+                return
 
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
