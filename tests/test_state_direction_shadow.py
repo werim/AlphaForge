@@ -122,7 +122,7 @@ class _AlwaysAcceptBrain:
         score = SimpleNamespace(
             total_score=0.9,
             components={},
-            probabilistic={"raw_expectancy": 0.2},
+            probabilistic={"raw_expectancy": 0.2, "expectancy_after_costs": 0.2},
         )
         plan = SimpleNamespace(
             decision="ACCEPTED", reason="", confidence=0.9,
