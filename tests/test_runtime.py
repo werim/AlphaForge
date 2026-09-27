@@ -1509,7 +1509,7 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
 
 def test_effective_rr_gate_still_rejects_before_paper_portfolio_and_execution() -> None:
     rejects: list[dict] = []
-    market = {"entry": 100.0, "sl": 99.0, "tp": 101.05, "rr": 1.05, "side": "LONG",
+    market = {"entry": 100.0, "sl": 99.9, "tp": 100.13, "rr": 1.30, "side": "LONG",
               "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
               "liquidity_score": .9}
@@ -1709,6 +1709,8 @@ class _ParityBrain:
     def score_signal(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
         class _Score:
             total_score = 0.88
+            components = {}
+            probabilistic = {"raw_expectancy": 0.2}
         return _Score()
 
     def choose_order_plan(self, signal_payload, market_ctx, score_ctx):

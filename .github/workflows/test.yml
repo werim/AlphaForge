@@ -59,6 +59,7 @@ jobs:
         run: |
           pytest -q tests/test_issue497_trade_quality_authority.py
           pytest -q tests/test_trade_quality.py tests/test_backtest_filter_switches.py tests/test_backtest_paper_pre_submit_parity.py tests/test_agent_phase_b.py
+          pytest -q tests/test_runtime.py tests/test_multi_timeframe.py tests/test_state_direction_shadow.py tests/test_issue421_full_chain_replay.py
 
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
