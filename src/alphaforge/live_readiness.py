@@ -664,11 +664,65 @@ class LiveReadinessEvaluator:
         min_samples, min_ok = self._parse_non_negative_int(mode_parity.get("min_sample_count", 1) if mode_parity else 1, default=1)
         mismatch_count, mismatch_ok = self._parse_non_negative_int(mode_parity.get("mismatch_count", 0) if mode_parity else 0)
         missing_count, missing_ok = self._parse_non_negative_int(mode_parity.get("missing_field_count", 0) if mode_parity else 0)
+        semantic_count, semantic_ok = self._parse_non_negative_int(
+            mode_parity.get("semantic_violation_count", 0) if mode_parity else 0
+        )
         no_submit_verified = bool(mode_parity.get("no_submit_verified", mode_parity.get("no_order_submission_verified", False)))
         execution_context_complete = bool(mode_parity.get("execution_context_complete", False))
         execution_evidence_status = str(mode_parity.get("execution_evidence_status", "COMPLETE_MEASURED") or "").upper()
         execution_evidence_blocking = execution_evidence_status in {"UNAVAILABLE_BLOCKING", "INVALID_FAKE_ZERO", "INCOMPLETE", "UNAVAILABLE"}
-        parity_ok = status == "COMPLETE" and sample_ok and min_ok and mismatch_ok and missing_ok and sample_count >= min_samples and mismatch_count == 0 and missing_count == 0 and no_submit_verified and execution_context_complete and not execution_evidence_blocking
+        compared_modes = {
+            str(value or "").upper()
+            for value in (mode_parity.get("modes_compared") or [])
+        }
+        required_modes = {"BACKTEST", "PAPER", "LIVE_PRECHECK"}
+        comparison_fields = {
+            str(value or "")
+            for value in (mode_parity.get("comparison_fields") or [])
+        }
+        required_protected_fields = {
+            "decision",
+            "primary_reject_reason",
+            "failed_gates",
+            "score",
+            "candidate_rr",
+            "executable_raw_rr",
+            "remaining_execution_penalty",
+            "effective_rr",
+            "rr_basis",
+            "execution_cost_semantics",
+            "threshold_provenance",
+            "execution_evidence_status",
+            "portfolio_decision",
+            "original_notional",
+            "risk_scale",
+            "effective_notional",
+            "stop_distance_basis",
+            "geometry_status",
+            "geometry_source",
+            "lifecycle_pre_submit_terminal_state",
+        }
+        modes_complete = required_modes.issubset(compared_modes)
+        protected_fields_complete = required_protected_fields.issubset(
+            comparison_fields
+        )
+        parity_ok = (
+            status == "COMPLETE"
+            and sample_ok
+            and min_ok
+            and mismatch_ok
+            and missing_ok
+            and semantic_ok
+            and sample_count >= min_samples
+            and mismatch_count == 0
+            and missing_count == 0
+            and semantic_count == 0
+            and modes_complete
+            and protected_fields_complete
+            and no_submit_verified
+            and execution_context_complete
+            and not execution_evidence_blocking
+        )
         configured = bool(reconciliation.get("provider_configured", False))
         evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
         complete = configured and evidence_status == "COMPLETE"
@@ -680,6 +734,20 @@ class LiveReadinessEvaluator:
             parity_details = "LIVE_PRECHECK_EXECUTION_CONTEXT_MISSING"
         elif not no_submit_verified:
             parity_details = "LIVE_PRECHECK_NO_SUBMIT_UNVERIFIED"
+        elif not modes_complete:
+            parity_details = (
+                "MODE_PARITY_REQUIRED_MODES_MISSING:"
+                + ",".join(sorted(required_modes - compared_modes))
+            )
+        elif not protected_fields_complete:
+            parity_details = (
+                "MODE_PARITY_PROTECTED_FIELDS_MISSING:"
+                + ",".join(sorted(required_protected_fields - comparison_fields))
+            )
+        elif not semantic_ok or semantic_count != 0:
+            parity_details = (
+                f"MODE_PARITY_SEMANTIC_VIOLATIONS:{semantic_count}"
+            )
         return [CheckResult("mode_parity", parity_ok, parity_details), CheckResult("live_reconciliation_provider", configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not configured else "provider_configured=true"), CheckResult("reconciliation_evidence_complete", complete, f"evidence_status={evidence_status}"), CheckResult("reconciliation_no_orphans", complete and no_orphans, f"snapshot={dict(reconciliation)}"), CheckResult("duplicate_execution_free", complete and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"), CheckResult("reconciliation_fail_closed_clear", complete and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}")]
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
