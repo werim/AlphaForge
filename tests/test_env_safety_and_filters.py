@@ -28,6 +28,7 @@ def _live_context(*, allow: bool, **authorization: bool) -> tuple[OrderExecution
         "operator_acknowledged": True,
         "qualification_passed": True,
         "reconciliation_passed": True,
+        "execution_owner_valid": True,
         "kill_switch_active": False,
     }
     defaults.update(authorization)
