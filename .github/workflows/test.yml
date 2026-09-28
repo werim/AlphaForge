@@ -134,7 +134,7 @@ jobs:
           pytest -q tests/test_runtime.py -k "periodic_metrics_persist_measured_drawdown or periodic_metrics_do_not_fabricate_drawdown"
 
       - name: Full regression suite
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || github.event.pull_request.number == 536
         run: pytest -q
 
       - name: Executable stop-risk gate
