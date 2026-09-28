@@ -1,3 +1,22 @@
+# #507 execution-ownership dependency repair — 2026-09-28
+
+### Added
+- Optional explicit ownership-engine injection for runtime construction.
+### Changed
+- Injected persistence dependencies are the default ownership store unless a separate ownership engine is explicitly supplied.
+### Fixed
+- Hidden creation/use of the environment database when `_build_runtime_from_env` received an explicit persistence engine, which failed merged-dev full CI.
+### Removed
+- Implicit environment-URL fallback for execution ownership under explicit dependency injection.
+### Breaking Changes
+- Callers that intentionally require separate persistence and ownership stores must pass both engines explicitly. Normal environment-built runtime behavior is unchanged.
+### Known Issues
+- Exact-head CI is required before #507 can be closed. LIVE remains disabled and NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
 # #421 P2-D/P2-E completion and P2-F current-state cleanup — 2026-09-24
 
 ### Added
@@ -15,10 +34,6 @@
 - None. No production threshold, lifecycle, schema, export, migration, cost or LIVE-authorization change.
 ### Known Issues
 - Fresh FAST and public six-hour SOAK must pass on the exact final `dev` SHA before #421 is complete. LIVE NOT READY.
-
-## Historical changelog entries
-
-Entries below preserve the repository state at the time of each change.
 
 # #421 P2-D full-chain replay expansion — 2026-09-24
 

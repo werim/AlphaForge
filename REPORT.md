@@ -1,3 +1,19 @@
+# #507 explicit execution-ownership dependency repair — 2026-09-28
+
+## Why / root cause
+
+Merged PR #538 introduced a dedicated execution-ownership engine, but `_build_runtime_from_env(persistence_engine=...)` still opened `ALPHAFORGE_DATABASE_URL` when the explicit engine URL differed. Full CI correctly failed `test_explicit_persistence_dependencies_override_env_for_all_runtime_consumers`: a hidden `env.db` was created even though every runtime dependency was expected to use the injected database.
+
+## Change / behavior
+
+The builder now accepts an optional explicit `execution_ownership_engine`. Without that argument, ownership uses the resolved runtime persistence engine. With it, the supplied engine is used directly. No environment database is opened behind explicit dependency injection. Normal environment construction is unchanged because its persistence engine already comes from the canonical configured URL.
+
+This preserves single-owner/fencing semantics while making ownership-store authority explicit and testable. It does not enable LIVE, loosen reconciliation/qualification/kill-switch gates, change thresholds, or alter order behavior. Lifecycle and exports are unchanged. The additive `execution_account_leases` schema remains; there is no migration rewrite, historical backfill, or campaign mutation.
+
+## Validation / risks / recommendation
+
+The former CI failure and the adjacent #507 ownership, LIVE authorization, trading-mode, and environment-safety suites pass: 30 tests. Compile, diff checks, PR CI, and exact merged-dev CI remain required. Callers needing a separate account-wide ownership store must now inject it explicitly; silently consulting an unrelated environment URL is intentionally removed. LIVE remains NOT READY.
+
 # #421 P2-D/P2-E completion and P2-F documentation consistency — 2026-09-24
 
 ## Why / root cause

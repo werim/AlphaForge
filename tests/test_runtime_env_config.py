@@ -19,6 +19,7 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
     runtime = _build_runtime_from_env(persistence_engine=engine)
 
     assert Path(runtime.persistence_engine.url.database).resolve() == campaign_db.resolve()
+    assert Path(runtime.execution_ownership_engine.url.database).resolve() == campaign_db.resolve()
     with runtime.ai_brain.session_factory() as session:
         assert Path(session.bind.url.database).resolve() == campaign_db.resolve()
     runtime.on_lifecycle_event({"signal_id": "canonical-signal", "symbol": "BTCUSDT", "mode": "PAPER", "lifecycle_state": "SIGNAL_CREATED", "timestamp": "2026-08-17T00:00:00Z", "details": {}})
@@ -28,6 +29,26 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
         assert conn.execute(text("SELECT decision_id FROM order_decisions WHERE signal_id='canonical-reject' AND decision='REJECTED'")).scalar_one() == "canonical-reject:REJECTED"
     assert not env_db.exists()
     engine.dispose()
+
+
+def test_explicit_execution_ownership_dependency_is_used_without_env_fallback(monkeypatch, tmp_path) -> None:
+    env_db = tmp_path / "env.db"
+    campaign_db = tmp_path / "campaign.db"
+    ownership_db = tmp_path / "ownership.db"
+    monkeypatch.setenv("ALPHAFORGE_DATABASE_URL", f"sqlite+pysqlite:///{env_db}")
+    persistence_engine = init_db(f"sqlite+pysqlite:///{campaign_db}")
+    ownership_engine = init_db(f"sqlite+pysqlite:///{ownership_db}")
+
+    runtime = _build_runtime_from_env(
+        persistence_engine=persistence_engine,
+        execution_ownership_engine=ownership_engine,
+    )
+
+    assert runtime.persistence_engine is persistence_engine
+    assert runtime.execution_ownership_engine is ownership_engine
+    assert not env_db.exists()
+    persistence_engine.dispose()
+    ownership_engine.dispose()
 
 
 def test_runtime_env_prefers_canonical_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:
