@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import csv
+from dataclasses import asdict, replace
+import hashlib
+import json
 
 import pytest
 
@@ -8,6 +11,11 @@ from alphaforge.execution import (
     PROVENANCE_ESTIMATED,
     build_execution_cost_breakdown,
     build_execution_cost_semantics,
+)
+from alphaforge.historical_validation import (
+    MANIFEST_SCHEMA,
+    generate_backtest_walk_forward_report,
+    historical_rows_from_backtest_decisions,
 )
 from alphaforge.walk_forward import (
     HistoricalRow,
@@ -316,3 +324,82 @@ def test_untouched_test_must_be_untouched_and_true_holdout_remains_admissible():
         and segment["search_selection_lineage"]["declared_fresh"] is True
         for segment in report["segments"]
     )
+
+
+def test_existing_backtest_decision_evidence_generates_machine_readable_report(tmp_path):
+    contract = _contract()
+    evidence_path = tmp_path / "decision_evidence.csv"
+    rows = []
+    for row_id, timestamp, net_return in (
+        ("train", "2026-01-15T00:00:00Z", 1.0),
+        ("oos", "2026-02-15T00:00:00Z", 2.0),
+    ):
+        source = _row(row_id, timestamp, net_return)
+        rows.append(
+            {
+                "evidence_id": source.row_id,
+                "mode": "BACKTEST",
+                "timestamp": source.timestamp,
+                "symbol": source.symbol,
+                "regime": source.regime,
+                "lifecycle_state_after": "POSITION_CLOSED",
+                "net_pnl_pct": source.net_return,
+                "candidate_raw_rr": source.candidate_rr,
+                "executable_raw_rr": source.executable_rr,
+                "remaining_execution_penalty": source.remaining_execution_penalty,
+                "effective_rr": source.effective_rr,
+                "rr_basis": source.rr_basis,
+                "execution_cost_semantics": json.dumps(source.execution_cost_semantics, sort_keys=True),
+            }
+        )
+    with evidence_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    evidence_sha = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA,
+        "contract": {
+            "segments": [asdict(segment) for segment in contract.segments],
+            "universe": asdict(contract.universe),
+        },
+        "decision_evidence_csv": evidence_path.name,
+        "decision_evidence_sha256": evidence_sha,
+        "min_effective_rr": 1.6,
+    }
+    manifest_path = tmp_path / "walk_forward_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+    output_path = tmp_path / "walk_forward_report.json"
+
+    report = generate_backtest_walk_forward_report(manifest_path, output_path)
+
+    persisted = json.loads(output_path.read_text())
+    assert report["contract_identity"] == contract.identity
+    assert persisted["segments"][1]["git_sha"] == GIT_SHA
+    assert persisted["segments"][1]["config_hash"] == contract.segments[1].config_hash
+    assert persisted["segments"][1]["data_hash"] == contract.segments[1].data_hash
+    assert persisted["universe"]["identity"] == contract.universe.identity
+    assert persisted["source_artifact"] == {
+        "path": evidence_path.name,
+        "sha256": evidence_sha,
+        "mode": "BACKTEST",
+    }
+    assert persisted["promotion_evidence"]["future_paper"] == "REQUIRED_NOT_PROVIDED"
+    assert persisted["promotion_evidence"]["live_authorized"] is False
+
+
+def test_backtest_adapter_rejects_legacy_or_incomplete_economics():
+    with pytest.raises(ValueError, match="candidate_raw_rr"):
+        historical_rows_from_backtest_decisions(
+            [
+                {
+                    "evidence_id": "legacy",
+                    "mode": "BACKTEST",
+                    "timestamp": "2026-01-15T00:00:00Z",
+                    "symbol": "BTCUSDT",
+                    "regime": "TRENDING",
+                    "lifecycle_state_after": "POSITION_CLOSED",
+                    "net_pnl_pct": 1.0,
+                }
+            ]
+        )

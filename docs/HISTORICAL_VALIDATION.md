@@ -18,6 +18,14 @@ source segment IDs. An OOS or test segment may reference only earlier calibratio
 segments. Each report carries the complete immutable segment records and their
 deterministic contract identity.
 
+Every OOS/test segment also records search/selection lineage: lineage identity,
+candidate variant identities, evaluation count, whether the evidence influenced
+selection, and whether it is declared fresh. Missing lineage fails closed.
+Evidence reused across variants or used to select a model/threshold is retained
+as research evidence but reported as `INADMISSIBLE_REUSED_OOS`, never as an
+unqualified historical pass. `UNTOUCHED_TEST` requires exactly one evaluation,
+one candidate variant, no selection influence, and an explicit fresh declaration.
+
 `WalkForwardContract.calibrate` requires a target OOS/test segment and passes the
 calibrator only that target's declared calibration rows. Evaluation rows and
 later rows therefore cannot enter the fitted values through this API. Config
@@ -56,3 +64,25 @@ Promotion evidence remains explicitly distinct:
 - future PAPER: `REQUIRED_NOT_PROVIDED`;
 - OOS replaces fresh PAPER: `false`;
 - LIVE authorized: `false`.
+
+## Existing BACKTEST evidence adapter
+
+`alphaforge.historical_validation` reads the canonical `decision_evidence.csv`
+artifact offline. Its manifest carries the complete contract plus the exact CSV
+SHA256 and minimum effective-RR reporting threshold. The adapter accepts terminal
+BACKTEST outcomes only and requires persisted candidate RR, executable raw RR,
+remaining execution penalty, effective RR, RR basis, and execution-cost semantics.
+Legacy or incomplete economics fail closed; the adapter never reconstructs them.
+
+Generate a machine-readable report with:
+
+```bash
+python -m alphaforge.historical_validation \
+  --manifest /path/to/walk_forward_manifest.json \
+  --output /path/to/walk_forward_report.json
+```
+
+The manifest schema is `walk_forward_backtest_adapter_v1`. Artifact paths are
+resolved relative to the manifest, and the CSV content must match the declared
+SHA256. This command does not run a backtest, tune parameters, start PAPER, or
+authorize LIVE.
