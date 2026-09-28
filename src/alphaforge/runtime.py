@@ -6204,7 +6204,7 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
     )
 
 
-def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session_factory: Any | None = None) -> RuntimeOrchestrator:
+def _build_runtime_from_env(*, persistence_engine: Engine | None = None, execution_ownership_engine: Engine | None = None, session_factory: Any | None = None) -> RuntimeOrchestrator:
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
     persistence_enabled = cfg.persistence.enabled
@@ -6213,12 +6213,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         else cfg.persistence.database_url
     )
     engine = persistence_engine or init_db(resolved_database_url)
-    canonical_ownership_url = cfg.persistence.database_url
-    execution_ownership_engine = (
-        engine
-        if str(engine.url) == str(canonical_ownership_url)
-        else init_db(canonical_ownership_url)
-    )
+    ownership_engine = execution_ownership_engine or engine
     SessionLocal = session_factory or sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
@@ -6374,7 +6369,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         state_direction_shadow_enabled=state_direction_shadow_enabled,
         state_direction_shadow_store=state_direction_shadow_store,
         persistence_engine=engine,
-        execution_ownership_engine=execution_ownership_engine,
+        execution_ownership_engine=ownership_engine,
         control_store=RuntimeControlStore(engine),
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled
