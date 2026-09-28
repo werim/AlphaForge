@@ -897,7 +897,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
 
     def _execution_reconciliation_blocked(self) -> bool:
@@ -1093,6 +1093,8 @@ class RuntimeOrchestrator:
                 if not is_sqlite_busy_error(exc):
                     raise
                 logger.warning("shutdown_runtime_state_persistence_skipped reason=SQLITE_BUSY")
+            if self._fatal_task_exception is None and not self._recovery_required:
+                self._release_execution_ownership()
             await self._shutdown_tasks()
         if self._fatal_task_exception is not None:
             reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
