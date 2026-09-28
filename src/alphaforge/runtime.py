@@ -5947,6 +5947,8 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec,
         max_notional_exposure=cfg.runtime.max_notional_exposure,
         max_symbol_notional=cfg.runtime.max_symbol_notional,
+        max_correlation_group_exposure=cfg.runtime.max_correlation_group_exposure,
+        max_correlated_positions=cfg.runtime.max_correlated_positions,
         max_daily_loss_pct=cfg.runtime.max_daily_loss_pct,
         stale_market_data_sec=cfg.runtime.stale_market_data_sec,
         max_clock_skew_ms=cfg.runtime.max_clock_skew_ms,
