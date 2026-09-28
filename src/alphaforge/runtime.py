@@ -46,6 +46,7 @@ from alphaforge.execution import (
     build_stop_risk_metrics,
     evaluate_stop_risk_policy,
 )
+from alphaforge.execution_ownership import acquire_execution_ownership, release_execution_ownership, validate_execution_ownership
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.decision_invariant import (
     assert_pre_submit_invariant_parity,
@@ -191,6 +192,10 @@ class RuntimeConfig:
     enable_canary_mode: bool= field(default_factory=lambda: canonical_field_default("enable_canary_mode"))
     operator_live_acknowledged: bool= field(default_factory=lambda: canonical_field_default("operator_live_acknowledged"))
     allow_live_orders: bool= field(default_factory=lambda: canonical_field_default("allow_live_orders"))
+    execution_account_scope: str= field(default_factory=lambda: canonical_field_default("execution_account_scope"))
+    paper_account_model: str= field(default_factory=lambda: canonical_field_default("paper_account_model"))
+    execution_lease_ttl_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_ttl_sec"))
+    execution_lease_min_validity_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_min_validity_sec"))
     live_trading_enabled: bool = field(default_factory=lambda: bool(canonical_field_default("live_enabled")))
     reconciliation_interval_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_interval_sec"))
     reconciliation_timeout_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_timeout_sec"))
@@ -221,6 +226,12 @@ class RuntimeConfig:
         )
         if int(self.max_clock_skew_ms) < 0:
             raise ValueError("max_clock_skew_ms must be >= 0")
+        self.execution_account_scope = str(self.execution_account_scope or "").strip()
+        self.paper_account_model = str(self.paper_account_model or "").strip().upper()
+        if self.paper_account_model != "ISOLATED_CAMPAIGN":
+            raise ValueError("PAPER_ACCOUNT_MODEL must be ISOLATED_CAMPAIGN")
+        if float(self.execution_lease_min_validity_sec) >= float(self.execution_lease_ttl_sec):
+            raise ValueError("execution_lease_min_validity_sec must be < execution_lease_ttl_sec")
         if (self.mtf_execution_confirmation_mode == "SHADOW"
                 and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
             raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
@@ -310,6 +321,7 @@ class RuntimeOrchestrator:
     state_direction_shadow_store: StateDirectionShadowStore | None = None
     paper_slippage_bps: float = 2.0
     persistence_engine: Engine | None = None
+    execution_ownership_engine: Engine | None = None
     control_store: RuntimeControlStore | None = None
     selected_candidate_enricher: Callable[[list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]] | None = None
     mtf_context_provider: Any | None = None
@@ -363,6 +375,11 @@ class RuntimeOrchestrator:
     _qualification_report: QualificationReport | None = field(default=None, init=False)
     _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
     _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _execution_account_scope: str | None = field(default=None, init=False)
+    _execution_account_model: str | None = field(default=None, init=False)
+    _execution_fencing_token: int | None = field(default=None, init=False)
+    _execution_lease_expires_at: float | None = field(default=None, init=False)
+    _last_execution_ownership: dict[str, Any] = field(default_factory=dict, init=False)
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_advisory_summary: dict[str, int] = field(default_factory=dict, init=False)
@@ -600,6 +617,12 @@ class RuntimeOrchestrator:
         if session is not None:
             return session.get_bind()
         return None
+
+    def _resolve_execution_ownership_engine(self) -> Engine | None:
+        """Resolve account ownership independently from campaign evidence persistence."""
+        if self.execution_ownership_engine is not None:
+            return self.execution_ownership_engine
+        return self._resolve_persistence_engine()
 
     @staticmethod
     def _finite_numeric(*candidates: tuple[str, Any]) -> tuple[float | None, str | None]:
@@ -881,7 +904,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
 
     def _execution_reconciliation_blocked(self) -> bool:
@@ -1077,6 +1100,8 @@ class RuntimeOrchestrator:
                 if not is_sqlite_busy_error(exc):
                     raise
                 logger.warning("shutdown_runtime_state_persistence_skipped reason=SQLITE_BUSY")
+            if self._fatal_task_exception is None and not self._recovery_required:
+                self._release_execution_ownership()
             await self._shutdown_tasks()
         if self._fatal_task_exception is not None:
             reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
@@ -3879,10 +3904,168 @@ class RuntimeOrchestrator:
         if executed is False:
             return
         if self.config.execution_mode == ExecutionMode.PAPER:
+            accepted_burnin_payload.update({
+                "execution_account_scope": self._last_execution_ownership.get("account_scope"),
+                "execution_account_model": self._last_execution_ownership.get("account_model"),
+                "execution_fencing_token": self._last_execution_ownership.get("fencing_token"),
+                "execution_ownership_reason": self._last_execution_ownership.get("reason"),
+            })
             self._persist_burnin_decision(
                 accepted_burnin_payload,
                 lifecycle_state=LifecycleState.POSITION_OPENED.value,
             )
+
+    def _execution_account_identity(self) -> dict[str, Any]:
+        mode = self.config.execution_mode
+        if mode is ExecutionMode.PAPER:
+            model = str(self.config.paper_account_model or "").strip().upper()
+            if model != "ISOLATED_CAMPAIGN":
+                raise RuntimeError("PAPER_ACCOUNT_MODEL_UNSUPPORTED")
+            campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+            if campaign_id:
+                scope = f"paper:campaign:{campaign_id}"
+                durable_required = True
+            else:
+                scope = f"paper:runtime:{self.runtime_instance_id}"
+                durable_required = False
+            return {
+                "account_scope": scope,
+                "account_model": model,
+                "durable_required": durable_required,
+                "mutation_mode": "PAPER",
+            }
+        if mode is ExecutionMode.LIVE:
+            configured = str(self.config.execution_account_scope or "").strip()
+            return {
+                "account_scope": f"live:{configured}" if configured else "",
+                "account_model": "SINGLE_OWNER_LIVE_ACCOUNT",
+                "durable_required": True,
+                "mutation_mode": "LIVE",
+            }
+        return {
+            "account_scope": "",
+            "account_model": "NO_MUTATION",
+            "durable_required": False,
+            "mutation_mode": mode.value,
+        }
+
+    def _authorize_execution_ownership(self) -> dict[str, Any]:
+        identity = self._execution_account_identity()
+        mode = self.config.execution_mode
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            evidence = {**identity, "acquired": True, "reason": "NO_MUTATION"}
+            self._last_execution_ownership = evidence
+            return evidence
+
+        scope = str(identity.get("account_scope") or "")
+        if not scope:
+            raise RuntimeError("EXECUTION_ACCOUNT_SCOPE_REQUIRED")
+
+        engine = self._resolve_execution_ownership_engine()
+        if engine is None:
+            if mode is ExecutionMode.PAPER and not bool(identity.get("durable_required")):
+                evidence = {
+                    **identity,
+                    "owner_instance_id": self.runtime_instance_id,
+                    "owner_startup_id": self.startup_id,
+                    "fencing_token": 0,
+                    "lease_expires_at": None,
+                    "acquired": True,
+                    "reason": "LOCAL_EPHEMERAL_ISOLATED",
+                }
+                self._execution_account_scope = scope
+                self._execution_account_model = str(identity["account_model"])
+                self._execution_fencing_token = 0
+                self._execution_lease_expires_at = None
+                self._last_execution_ownership = evidence
+                return evidence
+            raise RuntimeError("EXECUTION_OWNERSHIP_PERSISTENCE_UNAVAILABLE")
+
+        lease = acquire_execution_ownership(
+            engine,
+            account_scope=scope,
+            mode=mode.value,
+            owner_instance_id=self.runtime_instance_id,
+            owner_startup_id=self.startup_id,
+            lease_ttl_sec=float(self.config.execution_lease_ttl_sec),
+        )
+        evidence = {**identity, **lease.as_dict()}
+        self._last_execution_ownership = evidence
+        if not lease.acquired:
+            raise RuntimeError(
+                "EXECUTION_OWNERSHIP_BLOCKED:" + (lease.reason or "UNKNOWN")
+            )
+        self._execution_account_scope = scope
+        self._execution_account_model = str(identity["account_model"])
+        self._execution_fencing_token = lease.fencing_token
+        self._execution_lease_expires_at = lease.lease_expires_at
+        return evidence
+
+    def _execution_ownership_snapshot(self) -> dict[str, Any]:
+        identity = self._execution_account_identity()
+        mode = self.config.execution_mode
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            return {**identity, "valid": True, "reason": "NO_MUTATION"}
+        if (
+            mode is ExecutionMode.PAPER
+            and self._execution_fencing_token == 0
+            and self._execution_account_scope == identity.get("account_scope")
+        ):
+            return {
+                **identity,
+                "owner_instance_id": self.runtime_instance_id,
+                "owner_startup_id": self.startup_id,
+                "fencing_token": 0,
+                "lease_expires_at": None,
+                "valid": True,
+                "reason": "LOCAL_EPHEMERAL_ISOLATED",
+            }
+        engine = self._resolve_execution_ownership_engine()
+        if engine is None or not self._execution_account_scope:
+            return {
+                **identity,
+                "valid": False,
+                "reason": "EXECUTION_OWNERSHIP_UNAVAILABLE",
+            }
+        lease = validate_execution_ownership(
+            engine,
+            account_scope=self._execution_account_scope,
+            owner_instance_id=self.runtime_instance_id,
+            owner_startup_id=self.startup_id,
+            fencing_token=self._execution_fencing_token,
+            min_validity_sec=float(self.config.execution_lease_min_validity_sec),
+        )
+        return {**identity, **lease.as_dict(), "valid": bool(lease.acquired)}
+
+    def _validate_execution_ownership(self) -> dict[str, Any]:
+        evidence = self._execution_ownership_snapshot()
+        self._last_execution_ownership = dict(evidence)
+        if not bool(evidence.get("valid")):
+            raise RuntimeError(
+                "EXECUTION_OWNERSHIP_FENCED:"
+                + str(evidence.get("reason") or "UNKNOWN")
+            )
+        return evidence
+
+    def _release_execution_ownership(self) -> bool:
+        if (
+            not self._execution_account_scope
+            or self._execution_fencing_token in (None, 0)
+        ):
+            return False
+        engine = self._resolve_execution_ownership_engine()
+        if engine is None:
+            return False
+        released = release_execution_ownership(
+            engine,
+            account_scope=self._execution_account_scope,
+            owner_instance_id=self.runtime_instance_id,
+            owner_startup_id=self.startup_id,
+            fencing_token=self._execution_fencing_token,
+        )
+        if released:
+            self._execution_lease_expires_at = time.time()
+        return released
 
     def _authoritative_live_authorization(self) -> dict[str, bool]:
         report = self._qualification_report
@@ -3905,6 +4088,7 @@ class RuntimeOrchestrator:
             "operator_acknowledged": bool(self.config.operator_live_acknowledged),
             "qualification_passed": qualification_passed,
             "reconciliation_passed": reconciliation_passed,
+            "execution_owner_valid": bool(self._execution_ownership_snapshot().get("valid")),
             # This method re-reads RuntimeControlStore on every invocation.
             "kill_switch_active": bool(self._kill_switch_active()),
         }
@@ -4018,6 +4202,7 @@ class RuntimeOrchestrator:
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
+        ownership_evidence = self._authorize_execution_ownership()
         if mode == ExecutionMode.PAPER:
             # The earlier decision gate can become stale across scoring and
             # lifecycle awaits. No await occurs between this check and fill.
@@ -4026,6 +4211,7 @@ class RuntimeOrchestrator:
                 await self._emit_lifecycle_event(LifecycleState.CANCELLED.value, symbol,
                     {"reason": reason, "signal_id": decision.get("signal_id"), "execution_attempted": False})
                 return False
+            ownership_evidence = self._validate_execution_ownership()
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
         elif mode == ExecutionMode.LIVE_PRECHECK:
             result = {"mode": mode.value, "status": "no_submit_verified", "symbol": symbol}
@@ -4034,11 +4220,13 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode requires real_execution_adapter")
             authorization_ctx = self._build_live_order_execution_context(symbol, market_ctx)
             validate_live_order_authorization(authorization_ctx)
+            ownership_evidence = self._validate_execution_ownership()
             result = await self.real_execution_adapter.submit(decision, market_ctx)
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
         result = self._canonical_execution_result(result, decision, market_ctx, mode=mode)
+        result["execution_ownership"] = dict(ownership_evidence)
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
@@ -6001,6 +6189,10 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         enable_canary_mode=cfg.runtime.enable_canary_mode,
         operator_live_acknowledged=cfg.runtime.operator_live_acknowledged,
         allow_live_orders=cfg.runtime.allow_live_orders,
+        execution_account_scope=cfg.runtime.execution_account_scope,
+        paper_account_model=cfg.runtime.paper_account_model,
+        execution_lease_ttl_sec=cfg.runtime.execution_lease_ttl_sec,
+        execution_lease_min_validity_sec=cfg.runtime.execution_lease_min_validity_sec,
         live_trading_enabled=cfg.runtime.live_enabled,
         reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec,
         reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
@@ -6021,6 +6213,12 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         else cfg.persistence.database_url
     )
     engine = persistence_engine or init_db(resolved_database_url)
+    canonical_ownership_url = cfg.persistence.database_url
+    execution_ownership_engine = (
+        engine
+        if str(engine.url) == str(canonical_ownership_url)
+        else init_db(canonical_ownership_url)
+    )
     SessionLocal = session_factory or sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
@@ -6176,6 +6374,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         state_direction_shadow_enabled=state_direction_shadow_enabled,
         state_direction_shadow_store=state_direction_shadow_store,
         persistence_engine=engine,
+        execution_ownership_engine=execution_ownership_engine,
         control_store=RuntimeControlStore(engine),
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled

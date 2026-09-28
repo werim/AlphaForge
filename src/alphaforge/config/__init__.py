@@ -148,6 +148,10 @@ class RuntimeSettings:
     enable_canary_mode: bool= field(default_factory=lambda: canonical_field_default("enable_canary_mode"))
     operator_live_acknowledged: bool= field(default_factory=lambda: canonical_field_default("operator_live_acknowledged"))
     allow_live_orders: bool= field(default_factory=lambda: canonical_field_default("allow_live_orders"))
+    execution_account_scope: str= field(default_factory=lambda: canonical_field_default("execution_account_scope"))
+    paper_account_model: str= field(default_factory=lambda: canonical_field_default("paper_account_model"))
+    execution_lease_ttl_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_ttl_sec"))
+    execution_lease_min_validity_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_min_validity_sec"))
     reconciliation_interval_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_interval_sec"))
     reconciliation_timeout_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_timeout_sec"))
     provider_transient_outage_grace_seconds: float= field(default_factory=lambda: canonical_field_default("provider_transient_outage_grace_seconds"))
@@ -387,6 +391,7 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         cfg.update({
             "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
             "PAPER_CANDIDATE_NOTIONAL": runtime.paper_candidate_notional,
+            "PAPER_ACCOUNT_MODEL": runtime.paper_account_model,
             "MAX_CORRELATION_GROUP_EXPOSURE": runtime.max_correlation_group_exposure,
             "MAX_CORRELATED_POSITIONS": runtime.max_correlated_positions,
         })
@@ -484,6 +489,10 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         enable_canary_mode=val("ALPHAFORGE_ENABLE_CANARY_MODE"),
         operator_live_acknowledged=val("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"),
         allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),
+        execution_account_scope=val("ALPHAFORGE_EXECUTION_ACCOUNT_SCOPE"),
+        paper_account_model=val("ALPHAFORGE_PAPER_ACCOUNT_MODEL"),
+        execution_lease_ttl_sec=val("ALPHAFORGE_EXECUTION_LEASE_TTL_SEC"),
+        execution_lease_min_validity_sec=val("ALPHAFORGE_EXECUTION_LEASE_MIN_VALIDITY_SEC"),
         reconciliation_interval_sec=val("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC"),
         reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
         provider_transient_outage_grace_seconds=val("ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS"),

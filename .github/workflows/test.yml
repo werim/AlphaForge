@@ -93,6 +93,10 @@ jobs:
           pytest -q tests/test_issue421_execution_safety.py::test_multi_gate_execution_reject_persists_all_failed_threshold_evidence
           pytest -q tests/test_m0_scoring_context.py::test_context_rules_are_identical_for_paper_and_live_and_thresholds_unchanged
 
+      - name: Execution ownership fencing gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_issue507_execution_ownership.py tests/test_runtime_live_authorization.py tests/test_trading_modes.py tests/test_env_safety_and_filters.py
+
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
