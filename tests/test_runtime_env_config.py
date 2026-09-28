@@ -19,6 +19,7 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
     runtime = _build_runtime_from_env(persistence_engine=engine)
 
     assert Path(runtime.persistence_engine.url.database).resolve() == campaign_db.resolve()
+    assert Path(runtime.execution_ownership_engine.url.database).resolve() == campaign_db.resolve()
     with runtime.ai_brain.session_factory() as session:
         assert Path(session.bind.url.database).resolve() == campaign_db.resolve()
     runtime.on_lifecycle_event({"signal_id": "canonical-signal", "symbol": "BTCUSDT", "mode": "PAPER", "lifecycle_state": "SIGNAL_CREATED", "timestamp": "2026-08-17T00:00:00Z", "details": {}})
