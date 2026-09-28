@@ -28,6 +28,36 @@ class SegmentRole(StrEnum):
     UNTOUCHED_TEST = "UNTOUCHED_TEST"
 
 
+@dataclass(frozen=True, slots=True)
+class SearchSelectionLineage:
+    lineage_id: str
+    candidate_variant_ids: tuple[str, ...]
+    evidence_evaluation_count: int
+    influenced_selection: bool
+    declared_fresh: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not self.lineage_id
+            or not self.candidate_variant_ids
+            or any(not variant_id for variant_id in self.candidate_variant_ids)
+            or self.evidence_evaluation_count < len(self.candidate_variant_ids)
+        ):
+            raise ValueError("search/selection lineage is incomplete")
+        reused = self.evidence_evaluation_count > 1 or len(self.candidate_variant_ids) > 1
+        if self.declared_fresh and (reused or self.influenced_selection):
+            raise ValueError("reused or selection-influencing evidence cannot be declared fresh")
+
+    @property
+    def promotion_admissible(self) -> bool:
+        return (
+            self.declared_fresh
+            and not self.influenced_selection
+            and self.evidence_evaluation_count == 1
+            and len(self.candidate_variant_ids) == 1
+        )
+
+
 class UniverseMode(StrEnum):
     POINT_IN_TIME = "TIMESTAMP_CORRECT_MEMBERSHIP"
     FIXED = "FIXED_UNIVERSE"
@@ -136,6 +166,7 @@ class Segment:
     universe_identity: str
     frozen_at: str
     calibration_segment_ids: tuple[str, ...]
+    search_selection_lineage: SearchSelectionLineage | None
 
     @classmethod
     def freeze(
@@ -153,6 +184,7 @@ class Segment:
         universe: UniverseProvenance,
         frozen_at: str,
         calibration_segment_ids: Sequence[str] = (),
+        search_selection_lineage: SearchSelectionLineage | None = None,
     ) -> "Segment":
         if not all((segment_id, window_id, git_sha, data_identity, universe.identity)):
             raise ValueError("segment provenance is incomplete")
@@ -175,6 +207,7 @@ class Segment:
             universe_identity=universe.identity,
             frozen_at=frozen_at,
             calibration_segment_ids=tuple(sorted(map(str, calibration_segment_ids))),
+            search_selection_lineage=search_selection_lineage,
         )
 
     @property
@@ -242,6 +275,13 @@ class WalkForwardContract:
                 if segment.calibration_segment_ids:
                     raise ValueError("calibration segments cannot have fitted-data sources")
                 continue
+            if segment.search_selection_lineage is None:
+                raise ValueError("OOS/test segments require search/selection lineage")
+            if (
+                segment.role == SegmentRole.UNTOUCHED_TEST
+                and not segment.search_selection_lineage.promotion_admissible
+            ):
+                raise ValueError("UNTOUCHED_TEST evidence must be fresh and untouched")
             if not segment.calibration_segment_ids:
                 raise ValueError("OOS/test segments require explicit calibration sources")
             for source_id in segment.calibration_segment_ids:
@@ -396,6 +436,19 @@ def build_validation_report(
         ]
 
     segment_summary = grouped(("role", "window_id", "segment_id"))
+    inadmissible_search_segments = [
+        {
+            "segment_id": segment.segment_id,
+            "window_id": segment.window_id,
+            "role": segment.role,
+            "reason": "OOS_EVIDENCE_REUSED_OR_INFLUENCED_SELECTION",
+            "search_selection_lineage": asdict(segment.search_selection_lineage),
+        }
+        for segment in contract.segments
+        if segment.role != SegmentRole.CALIBRATION
+        and segment.search_selection_lineage is not None
+        and not segment.search_selection_lineage.promotion_admissible
+    ]
     negative_oos = [
         item
         for item in segment_summary
@@ -419,11 +472,20 @@ def build_validation_report(
             "by_role_regime": grouped(("role", "regime")),
         },
         "rows": details,
-        "historical_validation": "FAIL" if negative_oos else "PASS",
+        "historical_validation": (
+            "INADMISSIBLE_REUSED_OOS"
+            if inadmissible_search_segments
+            else "FAIL" if negative_oos else "PASS"
+        ),
         "negative_oos_segments": negative_oos,
+        "inadmissible_search_segments": inadmissible_search_segments,
         "promotion_evidence": {
             "historical_calibration": "PRESENT",
-            "historical_oos": "FAIL" if negative_oos else "PASS",
+            "historical_oos": (
+                "INADMISSIBLE_REUSED_OOS"
+                if inadmissible_search_segments
+                else "FAIL" if negative_oos else "PASS"
+            ),
             "future_paper": "REQUIRED_NOT_PROVIDED",
             "oos_replaces_fresh_paper": False,
             "live_authorized": False,

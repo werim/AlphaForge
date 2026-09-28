@@ -12,6 +12,7 @@ from alphaforge.execution import (
 from alphaforge.walk_forward import (
     HistoricalRow,
     Membership,
+    SearchSelectionLineage,
     Segment,
     SegmentRole,
     UniverseMode,
@@ -40,7 +41,16 @@ EXECUTION_CONTEXT = {
 }
 
 
-def _segment(role: SegmentRole, start: str, end: str, suffix: str, universe: UniverseProvenance, config=None, window="window-1"):
+def _segment(
+    role: SegmentRole,
+    start: str,
+    end: str,
+    suffix: str,
+    universe: UniverseProvenance,
+    config=None,
+    window="window-1",
+    search_lineage=None,
+):
     return Segment.freeze(
         segment_id=f"segment-{suffix}",
         window_id=window,
@@ -54,6 +64,18 @@ def _segment(role: SegmentRole, start: str, end: str, suffix: str, universe: Uni
         universe=universe,
         frozen_at="2026-01-01T00:00:00Z",
         calibration_segment_ids=() if role == SegmentRole.CALIBRATION else ("segment-is",),
+        search_selection_lineage=(
+            None
+            if role == SegmentRole.CALIBRATION
+            else search_lineage
+            or SearchSelectionLineage(
+                lineage_id=f"search-{suffix}",
+                candidate_variant_ids=("variant-a",),
+                evidence_evaluation_count=1,
+                influenced_selection=False,
+                declared_fresh=True,
+            )
+        ),
     )
 
 
@@ -202,3 +224,95 @@ def test_report_reuses_canonical_execution_cost_and_rr_semantics():
             [_row("train", "2026-01-15T00:00:00Z", 1.0), mismatched],
             min_effective_rr=1.6,
         )
+
+
+def test_reused_oos_that_influenced_selection_is_not_a_historical_pass():
+    contract = _contract()
+    reused = SearchSelectionLineage(
+        lineage_id="threshold-sweep-1",
+        candidate_variant_ids=("variant-a", "variant-b"),
+        evidence_evaluation_count=3,
+        influenced_selection=True,
+        declared_fresh=False,
+    )
+    contract = WalkForwardContract(
+        segments=(contract.segments[0], replace(contract.segments[1], search_selection_lineage=reused)),
+        universe=contract.universe,
+    )
+    report = build_validation_report(
+        contract,
+        [_row("train", "2026-01-15T00:00:00Z", 1.0), _row("oos", "2026-02-15T00:00:00Z", 2.0)],
+        min_effective_rr=1.6,
+    )
+    assert report["historical_validation"] == "INADMISSIBLE_REUSED_OOS"
+    assert report["promotion_evidence"]["historical_oos"] == "INADMISSIBLE_REUSED_OOS"
+    assert report["inadmissible_search_segments"][0]["search_selection_lineage"] == {
+        "lineage_id": "threshold-sweep-1",
+        "candidate_variant_ids": ("variant-a", "variant-b"),
+        "evidence_evaluation_count": 3,
+        "influenced_selection": True,
+        "declared_fresh": False,
+    }
+
+
+def test_missing_or_falsely_fresh_search_lineage_fails_closed():
+    contract = _contract()
+    with pytest.raises(ValueError, match="search/selection lineage"):
+        WalkForwardContract(
+            segments=(contract.segments[0], replace(contract.segments[1], search_selection_lineage=None)),
+            universe=contract.universe,
+        )
+    with pytest.raises(ValueError, match="cannot be declared fresh"):
+        SearchSelectionLineage(
+            lineage_id="reused",
+            candidate_variant_ids=("variant-a",),
+            evidence_evaluation_count=2,
+            influenced_selection=False,
+            declared_fresh=True,
+        )
+
+
+def test_untouched_test_must_be_untouched_and_true_holdout_remains_admissible():
+    base = _contract()
+    reused = SearchSelectionLineage(
+        lineage_id="reused-test",
+        candidate_variant_ids=("variant-a",),
+        evidence_evaluation_count=2,
+        influenced_selection=False,
+        declared_fresh=False,
+    )
+    bad_test = _segment(
+        SegmentRole.UNTOUCHED_TEST,
+        "2026-03-01T00:00:00Z",
+        "2026-04-01T00:00:00Z",
+        "test",
+        base.universe,
+        search_lineage=reused,
+    )
+    with pytest.raises(ValueError, match="fresh and untouched"):
+        WalkForwardContract(segments=(*base.segments, bad_test), universe=base.universe)
+
+    untouched = _segment(
+        SegmentRole.UNTOUCHED_TEST,
+        "2026-03-01T00:00:00Z",
+        "2026-04-01T00:00:00Z",
+        "test",
+        base.universe,
+    )
+    contract = WalkForwardContract(segments=(*base.segments, untouched), universe=base.universe)
+    report = build_validation_report(
+        contract,
+        [
+            _row("train", "2026-01-15T00:00:00Z", 1.0),
+            _row("oos", "2026-02-15T00:00:00Z", 1.0),
+            _row("test", "2026-03-15T00:00:00Z", 1.0),
+        ],
+        min_effective_rr=1.6,
+    )
+    assert report["historical_validation"] == "PASS"
+    assert report["inadmissible_search_segments"] == []
+    assert any(
+        segment["role"] == SegmentRole.UNTOUCHED_TEST
+        and segment["search_selection_lineage"]["declared_fresh"] is True
+        for segment in report["segments"]
+    )
