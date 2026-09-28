@@ -65,7 +65,42 @@ def _seed_valid(session: Session) -> None:
 
 
 def _parity() -> dict[str, object]:
-    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True, "effective_rr_penalty_breakdown_complete": True}
+    return {
+        "evidence_status": "COMPLETE",
+        "sample_count": 5,
+        "min_sample_count": 3,
+        "mismatch_count": 0,
+        "missing_field_count": 0,
+        "semantic_violation_count": 0,
+        "no_order_submission_verified": True,
+        "no_submit_verified": True,
+        "execution_context_complete": True,
+        "execution_evidence_status": "COMPLETE",
+        "effective_rr_penalty_breakdown_complete": True,
+        "modes_compared": ["BACKTEST", "PAPER", "LIVE_PRECHECK"],
+        "comparison_fields": [
+            "decision",
+            "primary_reject_reason",
+            "failed_gates",
+            "score",
+            "candidate_rr",
+            "executable_raw_rr",
+            "remaining_execution_penalty",
+            "effective_rr",
+            "rr_basis",
+            "execution_cost_semantics",
+            "threshold_provenance",
+            "execution_evidence_status",
+            "portfolio_decision",
+            "original_notional",
+            "risk_scale",
+            "effective_notional",
+            "stop_distance_basis",
+            "geometry_status",
+            "geometry_source",
+            "lifecycle_pre_submit_terminal_state",
+        ],
+    }
 
 
 def _reconciliation() -> dict[str, object]:
