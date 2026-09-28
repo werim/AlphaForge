@@ -73,7 +73,7 @@ from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_sta
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
     normalize_mtf_execution_confirmation_mode, runtime_filter_config)
-from alphaforge.config_registry import managed_config_value
+from alphaforge.config_registry import canonical_field_default
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
@@ -117,103 +117,103 @@ class LiveReconciliationProvider(ExchangeSnapshotProvider, Protocol):
 
 @dataclass(slots=True)
 class RuntimeConfig:
-    execution_mode: ExecutionMode = ExecutionMode.PAPER
-    min_signal_score: float = 0.62
-    scan_interval_sec: float = 1.0
-    heartbeat_interval_sec: float = 30.0
-    max_symbols_per_scan: int = 5
-    max_reject_log_entries: int = 1000
-    max_concurrent_positions: int = 3
-    symbol_cooldown_sec: float = 120.0
-    max_notional_exposure: float = 100_000.0
-    max_symbol_notional: float = 50_000.0
-    max_open_positions: int = 3
-    max_daily_loss_pct: float = 0.03
+    execution_mode: ExecutionMode = field(default_factory=lambda: ExecutionMode(canonical_field_default("execution_mode")))
+    min_signal_score: float= field(default_factory=lambda: canonical_field_default("min_signal_score"))
+    scan_interval_sec: float= field(default_factory=lambda: canonical_field_default("scan_interval_sec"))
+    heartbeat_interval_sec: float= field(default_factory=lambda: canonical_field_default("heartbeat_interval_sec"))
+    max_symbols_per_scan: int= field(default_factory=lambda: canonical_field_default("max_symbols_per_scan"))
+    max_reject_log_entries: int= field(default_factory=lambda: canonical_field_default("max_reject_log_entries"))
+    max_concurrent_positions: int= field(default_factory=lambda: canonical_field_default("max_concurrent_positions"))
+    symbol_cooldown_sec: float= field(default_factory=lambda: canonical_field_default("symbol_cooldown_sec"))
+    max_notional_exposure: float= field(default_factory=lambda: canonical_field_default("max_notional_exposure"))
+    max_symbol_notional: float= field(default_factory=lambda: canonical_field_default("max_symbol_notional"))
+    max_open_positions: int = field(default_factory=lambda: int(canonical_field_default("max_concurrent_positions")))
+    max_daily_loss_pct: float= field(default_factory=lambda: canonical_field_default("max_daily_loss_pct"))
     max_rolling_drawdown_pct: float = 0.08
-    max_correlation_group_exposure: float = 75_000.0
-    max_correlated_positions: int = 2
+    max_correlation_group_exposure: float= field(default_factory=lambda: canonical_field_default("max_correlation_group_exposure"))
+    max_correlated_positions: int= field(default_factory=lambda: canonical_field_default("max_correlated_positions"))
     reject_unknown_portfolio_risk: bool = True
-    stale_market_data_sec: float = 15.0
-    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
-    min_rr: float = 1.20
-    min_effective_rr: float = 1.10
-    max_spread_pct: float = 0.0025
-    max_expected_slippage_pct: float = 0.0020
-    max_total_cost_pct: float = 0.20
-    min_liquidity_score: float = 0.30
-    max_volatility_penalty_pct: float = 0.20
-    reject_unknown_execution_context: bool = True
-    max_latency_ms: int = 2500
-    paper_fee_bps: float | None = 4.0
-    paper_execution_latency_ms: float | None = 50.0
+    stale_market_data_sec: float= field(default_factory=lambda: canonical_field_default("stale_market_data_sec"))
+    max_clock_skew_ms: int= field(default_factory=lambda: canonical_field_default("max_clock_skew_ms"))
+    min_rr: float= field(default_factory=lambda: canonical_field_default("min_rr"))
+    min_effective_rr: float= field(default_factory=lambda: canonical_field_default("min_effective_rr"))
+    max_spread_pct: float= field(default_factory=lambda: canonical_field_default("max_spread_pct"))
+    max_expected_slippage_pct: float= field(default_factory=lambda: canonical_field_default("max_expected_slippage_pct"))
+    max_total_cost_pct: float= field(default_factory=lambda: canonical_field_default("max_total_cost_pct"))
+    min_liquidity_score: float= field(default_factory=lambda: canonical_field_default("min_liquidity_score"))
+    max_volatility_penalty_pct: float= field(default_factory=lambda: canonical_field_default("max_volatility_penalty_pct"))
+    reject_unknown_execution_context: bool= field(default_factory=lambda: canonical_field_default("reject_unknown_execution_context"))
+    max_latency_ms: int= field(default_factory=lambda: canonical_field_default("max_latency_ms"))
+    paper_fee_bps: float | None= field(default_factory=lambda: canonical_field_default("paper_fee_bps"))
+    paper_execution_latency_ms: float | None= field(default_factory=lambda: canonical_field_default("paper_execution_latency_ms"))
     # Explicit PAPER-only portfolio evidence. These values never substitute
     # for unknown LIVE/LIVE_PRECHECK account state.
     paper_initial_equity: float | None = 1_000.0
-    paper_candidate_notional: float | None = 10.0  # conservative 1% of the default ledger
-    market_data_base_url: str = "https://fapi.binance.com"
-    regime_timeframe: str = "1h"
-    setup_timeframe: str = "15m"
-    execution_timeframe: str = "1m"
-    mtf_guided_signal_generation_enabled: bool = True
-    mtf_execution_confirmation_mode: str = "ENFORCE"
-    regime_direction_threshold: float = 0.0005
-    setup_direction_threshold: float = 0.0003
-    execution_direction_threshold: float = 0.0005
-    enable_state_direction_resolution: bool = False
-    paper_decision_timeframe: str = "1m"  # deprecated alias
+    paper_candidate_notional: float | None= field(default_factory=lambda: canonical_field_default("paper_candidate_notional"))
+    market_data_base_url: str = field(default_factory=lambda: str(canonical_field_default("binance_market_data_base_url")))
+    regime_timeframe: str= field(default_factory=lambda: canonical_field_default("regime_timeframe"))
+    setup_timeframe: str= field(default_factory=lambda: canonical_field_default("setup_timeframe"))
+    execution_timeframe: str= field(default_factory=lambda: canonical_field_default("execution_timeframe"))
+    mtf_guided_signal_generation_enabled: bool= field(default_factory=lambda: canonical_field_default("mtf_guided_signal_generation_enabled"))
+    mtf_execution_confirmation_mode: str= field(default_factory=lambda: canonical_field_default("mtf_execution_confirmation_mode"))
+    regime_direction_threshold: float= field(default_factory=lambda: canonical_field_default("regime_direction_threshold"))
+    setup_direction_threshold: float= field(default_factory=lambda: canonical_field_default("setup_direction_threshold"))
+    execution_direction_threshold: float= field(default_factory=lambda: canonical_field_default("execution_direction_threshold"))
+    enable_state_direction_resolution: bool= field(default_factory=lambda: canonical_field_default("enable_state_direction_resolution"))
+    paper_decision_timeframe: str = field(default_factory=lambda: str(canonical_field_default("execution_timeframe")))  # deprecated alias
     require_mtf_alignment: bool = False
-    max_abs_funding_rate_pct: float = 0.0010
-    min_liquidity_usd: float = 5_000_000.0
+    max_abs_funding_rate_pct: float= field(default_factory=lambda: canonical_field_default("max_abs_funding_rate_pct"))
+    min_liquidity_usd: float= field(default_factory=lambda: canonical_field_default("min_liquidity_usd"))
     # Keep every decision-filter field that can be environment-configured on
     # the runtime config.  Phase 8/9 campaign identity hashes this effective
     # filter configuration, so dropping any of these while building the
     # orchestrator would make a PAPER preflight compare two different payloads.
-    min_sl_pct: float = 0.15
-    max_sl_pct: float = 1.5
-    min_atr_pct: float = 0.25
-    max_atr_pct: float = 3.0
-    block_unknown_expectancy: bool = True
-    block_chop_market: bool = True
-    require_regime_alignment: bool = True
-    enable_orderbook_filter: bool = False
-    stop_too_wide_hard_reject: bool = True
-    stop_too_wide_soft_score_min: float = 9.0
-    stop_too_wide_soft_effective_rr_min: float = 1.75
-    stop_too_wide_max_risk_scale: float = 0.50
-    stop_too_wide_extreme_mult: float = 1.50
-    max_trades_global_per_day: int = 10
-    max_trades_symbol_per_day: int = 2
-    symbol_loss_streak_limit: int = 3
-    global_loss_streak_limit: int = 5
-    global_kill_switch: bool = False
-    require_live_qualification: bool = True
-    enable_shadow_mode: bool = False
-    enable_canary_mode: bool = False
-    operator_live_acknowledged: bool = False
-    allow_live_orders: bool = False
-    live_trading_enabled: bool = False
-    reconciliation_interval_sec: float = 5.0
-    reconciliation_timeout_sec: float = 2.0
-    provider_transient_outage_grace_seconds: float = 300.0
-    require_exchange_connectivity_for_live: bool = True
-    required_live_exchanges: tuple[str, ...] = ("binance",)
-    exchange_connectivity_timeout_sec: float = 2.0
-    enable_binance_readonly_reconciliation: bool = False
+    min_sl_pct: float= field(default_factory=lambda: canonical_field_default("min_sl_pct"))
+    max_sl_pct: float= field(default_factory=lambda: canonical_field_default("max_sl_pct"))
+    min_atr_pct: float= field(default_factory=lambda: canonical_field_default("min_atr_pct"))
+    max_atr_pct: float= field(default_factory=lambda: canonical_field_default("max_atr_pct"))
+    block_unknown_expectancy: bool= field(default_factory=lambda: canonical_field_default("block_unknown_expectancy"))
+    block_chop_market: bool= field(default_factory=lambda: canonical_field_default("block_chop_market"))
+    require_regime_alignment: bool= field(default_factory=lambda: canonical_field_default("require_regime_alignment"))
+    enable_orderbook_filter: bool= field(default_factory=lambda: canonical_field_default("enable_orderbook_filter"))
+    stop_too_wide_hard_reject: bool= field(default_factory=lambda: canonical_field_default("stop_too_wide_hard_reject"))
+    stop_too_wide_soft_score_min: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_soft_score_min"))
+    stop_too_wide_soft_effective_rr_min: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_soft_effective_rr_min"))
+    stop_too_wide_max_risk_scale: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_max_risk_scale"))
+    stop_too_wide_extreme_mult: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_extreme_mult"))
+    max_trades_global_per_day: int= field(default_factory=lambda: canonical_field_default("max_trades_global_per_day"))
+    max_trades_symbol_per_day: int= field(default_factory=lambda: canonical_field_default("max_trades_symbol_per_day"))
+    symbol_loss_streak_limit: int= field(default_factory=lambda: canonical_field_default("symbol_loss_streak_limit"))
+    global_loss_streak_limit: int= field(default_factory=lambda: canonical_field_default("global_loss_streak_limit"))
+    global_kill_switch: bool= field(default_factory=lambda: canonical_field_default("global_kill_switch"))
+    require_live_qualification: bool= field(default_factory=lambda: canonical_field_default("require_live_qualification"))
+    enable_shadow_mode: bool= field(default_factory=lambda: canonical_field_default("enable_shadow_mode"))
+    enable_canary_mode: bool= field(default_factory=lambda: canonical_field_default("enable_canary_mode"))
+    operator_live_acknowledged: bool= field(default_factory=lambda: canonical_field_default("operator_live_acknowledged"))
+    allow_live_orders: bool= field(default_factory=lambda: canonical_field_default("allow_live_orders"))
+    live_trading_enabled: bool = field(default_factory=lambda: bool(canonical_field_default("live_enabled")))
+    reconciliation_interval_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_interval_sec"))
+    reconciliation_timeout_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_timeout_sec"))
+    provider_transient_outage_grace_seconds: float= field(default_factory=lambda: canonical_field_default("provider_transient_outage_grace_seconds"))
+    require_exchange_connectivity_for_live: bool= field(default_factory=lambda: canonical_field_default("require_exchange_connectivity_for_live"))
+    required_live_exchanges: tuple[str, ...] = field(default_factory=lambda: tuple(part.strip() for part in str(canonical_field_default("required_live_exchanges")).split(",") if part.strip()))
+    exchange_connectivity_timeout_sec: float= field(default_factory=lambda: canonical_field_default("exchange_connectivity_timeout_sec"))
+    enable_binance_readonly_reconciliation: bool= field(default_factory=lambda: canonical_field_default("enable_binance_readonly_reconciliation"))
     pending_order_timeout_sec: float = 300.0
     require_exchange_reconciliation_for_paper: bool = True
     diagnostic_mode: bool = False
     phase7_burnin_release_id: str = "default"
     phase7_burnin_snapshot_interval_sec: float = 300.0
-    reject_forward_horizon_bars: int = 240
-    reject_resolver_interval_sec: float = 60.0
-    agent_graph_enabled: bool = False
-    agent_graph_shadow: bool = True
-    agent_graph_max_steps: int = 12
-    agent_graph_max_reflection_retries: int = 1
-    agent_graph_stage_timeout_seconds: float = 5.0
-    agent_graph_persist_traces: bool = True
-    agent_graph_max_pending_runs: int = 64
-    agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
+    reject_forward_horizon_bars: int= field(default_factory=lambda: canonical_field_default("reject_forward_horizon_bars"))
+    reject_resolver_interval_sec: float= field(default_factory=lambda: canonical_field_default("reject_resolver_interval_sec"))
+    agent_graph_enabled: bool= field(default_factory=lambda: canonical_field_default("agent_graph_enabled"))
+    agent_graph_shadow: bool= field(default_factory=lambda: canonical_field_default("agent_graph_shadow"))
+    agent_graph_max_steps: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_steps"))
+    agent_graph_max_reflection_retries: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_reflection_retries"))
+    agent_graph_stage_timeout_seconds: float= field(default_factory=lambda: canonical_field_default("agent_graph_stage_timeout_seconds"))
+    agent_graph_persist_traces: bool= field(default_factory=lambda: canonical_field_default("agent_graph_persist_traces"))
+    agent_graph_max_pending_runs: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_pending_runs"))
+    agent_graph_database_url: str= field(default_factory=lambda: canonical_field_default("agent_graph_database_url"))
 
     def __post_init__(self) -> None:
         self.mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(

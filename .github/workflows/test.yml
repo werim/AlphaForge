@@ -86,6 +86,13 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_issue500_correlation_risk_config_ssot.py
 
+      - name: Runtime default-authority SSOT gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue501_runtime_default_authority.py
+          pytest -q tests/test_issue421_execution_safety.py::test_multi_gate_execution_reject_persists_all_failed_threshold_evidence
+          pytest -q tests/test_m0_scoring_context.py::test_context_rules_are_identical_for_paper_and_live_and_thresholds_unchanged
+
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
@@ -130,7 +137,7 @@ jobs:
           pytest -q tests/test_runtime.py -k "periodic_metrics_persist_measured_drawdown or periodic_metrics_do_not_fabricate_drawdown"
 
       - name: Full regression suite
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || github.event.pull_request.number == 536
         run: pytest -q
 
       - name: Executable stop-risk gate

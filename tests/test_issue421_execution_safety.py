@@ -632,6 +632,11 @@ def test_multi_gate_execution_reject_persists_all_failed_threshold_evidence() ->
     config = RuntimeConfig(
         execution_mode=ExecutionMode.PAPER,
         paper_execution_latency_ms=3000.0,
+        max_latency_ms=2500,
+        max_spread_pct=0.0025,
+        min_liquidity_score=0.30,
+        max_abs_funding_rate_pct=0.001,
+        max_volatility_penalty_pct=0.20,
     )
     runtime, rejects = _run_paper(
         _market(
