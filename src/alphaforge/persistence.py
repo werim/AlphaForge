@@ -414,10 +414,12 @@ def init_db(database_url: str | None = None) -> Engine:
         _apply_sqlite_migrations(conn)
     # Provision runtime-owned tables through their canonical schema functions;
     # init_db orchestrates them but does not duplicate their definitions.
+    from alphaforge.execution_ownership import ensure_execution_ownership_schema
     from alphaforge.reconciliation import ensure_reconciliation_tables
     from alphaforge.runtime_control import ensure_runtime_control_schema
     from alphaforge.runtime_state import ensure_runtime_state_schema
 
+    ensure_execution_ownership_schema(engine)
     ensure_reconciliation_tables(engine)
     ensure_runtime_control_schema(engine)
     ensure_runtime_state_schema(engine)
