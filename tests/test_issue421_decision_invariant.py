@@ -71,11 +71,22 @@ def _surface(**overrides):
 def test_each_protected_dimension_is_fail_closed(field, value):
     reference = _surface()
     drifted = _surface(**{field: value})
+    semantic_fields = {
+        "decision",
+        "all_failed_gates",
+        "executable_raw_rr",
+        "remaining_execution_penalty",
+        "effective_rr",
+        "original_notional",
+        "risk_scale",
+        "effective_notional",
+        "geometry_status",
+    }
     expected_error = (
         "DECISION_PARITY_EVIDENCE_INCOMPLETE"
         if field == "execution_evidence_status" and value == "INCOMPLETE"
         else "DECISION_SEMANTIC_INVARIANT_VIOLATION"
-        if field in {"decision", "all_failed_gates"}
+        if field in semantic_fields
         else "DECISION_PARITY_MISMATCH"
     )
     with pytest.raises(ValueError, match=expected_error):
