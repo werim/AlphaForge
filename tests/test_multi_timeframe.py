@@ -11,6 +11,7 @@ from alphaforge.burnin import (BurnInRun, bootstrap_burnin_schema,
                                canonical_decision_sql, persist_burnin_run)
 from alphaforge.burnin_campaign import build_phase8_campaign_identity
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
+                                        build_mtf_candidate_context,
                                         build_regime_context, build_setup_context, closed_candles,
                                         evaluate_mtf_alignment)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
@@ -275,6 +276,46 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
         (candidate["entry"] - candidate["tp"])
         / (candidate["sl"] - candidate["entry"])
     )
+
+
+def test_provider_and_pure_builder_share_exact_as_of_generation(monkeypatch):
+    decision_ms = 20_000_000
+    rows_by_tf = {
+        "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
+        "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
+        "1m": _provider_rows([102.15 - i * .1 for i in range(8)], decision_ms),
+    }
+    canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
+                 "market_data_latency_ms": 20.0, "liquidity_score": .9}
+    provider = BinanceMTFProvider()
+    monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
+    paper = asyncio.run(provider.build(
+        "BTCUSDT", canonical, execution_ctx=canonical,
+        decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
+        execution_timeframe="1m",
+    ))
+    layers = {
+        layer: closed_candles(rows_by_tf[timeframe], timeframe=timeframe, decision_ts_ms=decision_ms)
+        for layer, timeframe in (("regime", "1h"), ("setup", "15m"), ("execution", "1m"))
+    }
+    pure = build_mtf_candidate_context(
+        layers, execution_ctx=canonical, decision_ts_ms=decision_ms,
+        regime_timeframe="1h", setup_timeframe="15m", execution_timeframe="1m",
+        provider="BINANCE_FUTURES_CLOSED_KLINES",
+    )
+
+    assert pure == paper
+
+    future = {key: [*value] for key, value in layers.items()}
+    future["execution"].append({
+        "open_ts": decision_ms + 1, "close_ts": decision_ms + 60_000,
+        "open": 1.0, "high": 1_000.0, "low": .1, "close": 999.0, "volume": 999_999.0,
+    })
+    assert build_mtf_candidate_context(
+        future, execution_ctx=canonical, decision_ts_ms=decision_ms,
+        regime_timeframe="1h", setup_timeframe="15m", execution_timeframe="1m",
+        provider="BINANCE_FUTURES_CLOSED_KLINES",
+    ) == paper
 
 
 def test_provider_fails_closed_when_execution_entry_is_outside_setup_zone(monkeypatch):

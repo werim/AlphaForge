@@ -17,7 +17,8 @@ if str(SRC_DIR) not in sys.path:
 from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.adaptive_learning import classify_expectancy_bucket
-from alphaforge.multi_timeframe import build_execution_context as build_historical_execution_context, build_regime_context, build_setup_context
+from alphaforge.multi_timeframe import (build_execution_context as build_historical_execution_context,
+    build_mtf_candidate_context, build_regime_context, build_setup_context)
 from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
 from alphaforge.expectancy_evidence import fetch_expectancy_as_of
 from alphaforge.config import load_config_from_env
@@ -32,6 +33,7 @@ from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
     HistoricalCandle,
     HistoricalDataError,
+    SUPPORTED_INTERVAL_MS,
     fetch_binance_klines_paginated,
     load_or_fetch_candles as load_or_fetch_historical_candles,
 )
@@ -433,7 +435,7 @@ class LifecycleRow:
     setup_type: str
     setup_reason: str
     regime: str
-    score: float
+    score: Optional[float]
     rr: Optional[float]
     entry: float
     sl: float
@@ -715,6 +717,54 @@ def _build_market_ctx(
     base.update(exec_ctx)
     base["spread_unit_assumed"] = spread_unit_assumed
     return base
+
+
+def _closed_mtf_layers_from_1m(candles: List[Candle], *, decision_ts_ms: int,
+                               regime_timeframe: str, setup_timeframe: str,
+                               execution_timeframe: str) -> dict[str, list[dict[str, Any]]]:
+    """Aggregate complete, as-of 1m rows into PAPER's configured MTF layers."""
+    source_step = SUPPORTED_INTERVAL_MS["1m"]
+    closed_source = {
+        int(candle.timestamp): candle
+        for candle in candles
+        if int(candle.timestamp) + source_step - 1 <= decision_ts_ms
+    }
+
+    def aggregate(timeframe: str) -> list[dict[str, Any]]:
+        target_step = SUPPORTED_INTERVAL_MS.get(timeframe)
+        if target_step is None or target_step < source_step or target_step % source_step:
+            return []
+        rows: list[dict[str, Any]] = []
+        count = target_step // source_step
+        bucket_starts = sorted({(timestamp // target_step) * target_step for timestamp in closed_source})
+        for bucket_start in bucket_starts:
+            expected = [bucket_start + offset * source_step for offset in range(count)]
+            if bucket_start + target_step - 1 > decision_ts_ms or any(ts not in closed_source for ts in expected):
+                continue
+            bucket = [closed_source[ts] for ts in expected]
+            rows.append({
+                "open_ts": bucket_start,
+                "open": bucket[0].open,
+                "high": max(candle.high for candle in bucket),
+                "low": min(candle.low for candle in bucket),
+                "close": bucket[-1].close,
+                "volume": sum(candle.volume for candle in bucket),
+                "close_ts": bucket_start + target_step - 1,
+            })
+        return rows[-64:]
+
+    return {
+        "regime": aggregate(regime_timeframe),
+        "setup": aggregate(setup_timeframe),
+        "execution": aggregate(execution_timeframe),
+    }
+
+
+def _closed_candles_at(candles: List[Candle], *, timeframe: str, end_ms: int) -> List[Candle]:
+    step = SUPPORTED_INTERVAL_MS.get(timeframe)
+    if step is None:
+        return []
+    return [candle for candle in candles if int(candle.timestamp) + step - 1 <= end_ms]
 def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Candle], idx: int) -> Dict[str, Any]:
     now = candles[idx]
     prev = candles[idx - 1] if idx > 0 else now
@@ -790,18 +840,21 @@ def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int
         for c in candles[:idx + 1]
         if int(c.timestamp) <= decision_ts
     ]
-    timeframe = str(market_ctx.get("timeframe", "1m"))
-    regime = build_regime_context(historical[-20:], timeframe)
-    setup = build_setup_context(historical[-12:], timeframe, regime=regime)
-    execution = build_historical_execution_context(
-        historical[-5:], timeframe,
-        {**dict(market_ctx), "market_data_latency_ms": market_ctx.get("market_data_latency_ms")},
-        trade_side=str(market_ctx.get("side") or ""),
-    )
-    scoring_market = {**dict(market_ctx), "mode": "BACKTEST", "mtf": {
-        "regime": regime, "setup": setup, "execution": execution,
-        "alignment": {"alignment": regime.get("regime_alignment")},
-    }}
+    existing_mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else None
+    if existing_mtf is None:
+        timeframe = str(market_ctx.get("timeframe", "1m"))
+        regime = build_regime_context(historical[-20:], timeframe)
+        setup = build_setup_context(historical[-12:], timeframe, regime=regime)
+        execution = build_historical_execution_context(
+            historical[-5:], timeframe,
+            {**dict(market_ctx), "market_data_latency_ms": market_ctx.get("market_data_latency_ms")},
+            trade_side=str(market_ctx.get("side") or ""),
+        )
+        existing_mtf = {
+            "regime": regime, "setup": setup, "execution": execution,
+            "alignment": {"alignment": regime.get("regime_alignment")},
+        }
+    scoring_market = {**dict(market_ctx), "mode": "BACKTEST", "mtf": existing_mtf}
     signal = build_signal_payload(symbol, scoring_market, signal_id=f"{symbol}:{decision_ts}", default_mode="BACKTEST")
     scope = dict(expectancy_scope or {})
     stats_ctx = empty_stats_context()
@@ -893,7 +946,7 @@ def _fetch_klines_legacy(symbol: str, interval: str, start_ms: int, end_ms: int)
         for r in rows
     ]
 
-def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], interval: str) -> None:
+def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], interval: str | Iterable[str]) -> None:
     """Keep run-local candle artifacts aligned with the current symbol universe.
 
     Candle JSON files live inside the run artifact directory, not a shared cache.
@@ -903,7 +956,11 @@ def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], inter
     candles_dir = Path(output_dir) / "candles"
     if not candles_dir.exists():
         return
-    expected = {f"{str(symbol).upper()}_{interval}.json" for symbol in symbols}
+    intervals = (interval,) if isinstance(interval, str) else tuple(interval)
+    expected = {
+        f"{str(symbol).upper()}_{timeframe}.json"
+        for symbol in symbols for timeframe in intervals
+    }
     for path in candles_dir.glob("*.json"):
         if path.name not in expected:
             path.unlink()
@@ -948,6 +1005,77 @@ def scan_symbol_backtest(
     now = candles[idx]
     prev = candles[idx - 1]
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
+    if "mtf_source_candles" in context:
+        regime_timeframe = str(context.get("regime_timeframe") or "1h")
+        setup_timeframe = str(context.get("setup_timeframe") or "15m")
+        execution_timeframe = str(context.get("execution_timeframe") or "1m")
+        simulation_timeframe = str(context.get("simulation_timeframe") or execution_timeframe)
+        simulation_step = SUPPORTED_INTERVAL_MS.get(simulation_timeframe)
+        decision_ts_ms = (
+            int(now.timestamp) + simulation_step - 1
+            if simulation_step is not None else int(now.timestamp)
+        )
+        layers = _closed_mtf_layers_from_1m(
+            list(context.get("mtf_source_candles") or []),
+            decision_ts_ms=decision_ts_ms,
+            regime_timeframe=regime_timeframe,
+            setup_timeframe=setup_timeframe,
+            execution_timeframe=execution_timeframe,
+        )
+        mtf_execution_ctx = {
+            **dict(mctx),
+            **dict(context.get("mtf_execution_ctx") or {}),
+        }
+        mtf = build_mtf_candidate_context(
+            layers,
+            execution_ctx=mtf_execution_ctx,
+            decision_ts_ms=decision_ts_ms,
+            regime_timeframe=regime_timeframe,
+            setup_timeframe=setup_timeframe,
+            execution_timeframe=execution_timeframe,
+            state_direction_resolution_enabled=bool(context.get("enable_state_direction_resolution", False)),
+            regime_direction_threshold=float(context.get("regime_direction_threshold", .0005)),
+            setup_direction_threshold=float(context.get("setup_direction_threshold", .0003)),
+            execution_direction_threshold=float(context.get("execution_direction_threshold", .0005)),
+            guided_signal_generation_enabled=bool(context.get("mtf_guided_signal_generation_enabled", True)),
+            provider="BACKTEST_HISTORICAL_CLOSED_1M",
+        )
+        mctx["mtf"] = mtf
+        generation = mtf.get("generation") if isinstance(mtf.get("generation"), Mapping) else {}
+        alignment = mtf.get("alignment") if isinstance(mtf.get("alignment"), Mapping) else {}
+        generated_candidate = generation.get("candidate") if isinstance(generation, Mapping) else None
+        if (alignment.get("aligned") and generation.get("evidence_status") == "COMPLETE"
+                and isinstance(generated_candidate, Mapping)):
+            mctx.update(dict(generated_candidate))
+            regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+            mctx["regime"] = regime_layer.get("regime")
+            mctx["setup"] = generated_candidate.get("setup_type")
+            mctx["timeframe"] = execution_timeframe
+            mctx.update(build_execution_context(mctx))
+        elif alignment.get("aligned") and generation.get("mode") == "LEGACY_VETO":
+            # Explicit rollback mode preserves the pre-existing breakout
+            # candidate while still using shared MTF equality as its veto.
+            mctx["timeframe"] = execution_timeframe
+        else:
+            reasons = list(alignment.get("reasons") or [])
+            reason = str(reasons[0] if reasons else generation.get("reason") or "MTF_GUIDED_GEOMETRY_UNAVAILABLE")
+            result = {
+                "status": "rejected",
+                "accepted": False,
+                "candidate": None,
+                "reason": reason,
+                "reject_reason": reason,
+                "rejection_reason": reason,
+                "diagnostics": {
+                    "primary_reject_reason": reason,
+                    "all_failed_gates": reasons,
+                    "mtf": mtf,
+                    "score_status": "NOT_SCORED_MTF_REJECT",
+                },
+            }
+            context["last_result"] = result
+            context["market_ctx"] = mctx
+            return None
     if "min_effective_rr" in context:
         mctx["MIN_EFFECTIVE_RR"] = context["min_effective_rr"]
     authoritative = _historical_authoritative_score(
@@ -1628,7 +1756,10 @@ def process_backtest_result(
     setup_type = diagnostics.get("setup_type", mctx.get("setup_type", ""))
     setup_reason = diagnostics.get("setup_reason", mctx.get("setup_reason", ""))
     regime = diagnostics.get("regime", mctx.get("regime", ""))
-    score = float(diagnostics.get("score", mctx.get("score", 0.0)) or 0.0)
+    score_status = str(diagnostics.get("score_status", "SCORED") or "SCORED").upper()
+    score_unavailable = score_status == "NOT_SCORED_MTF_REJECT"
+    score = None if score_unavailable else float(diagnostics.get("score", mctx.get("score", 0.0)) or 0.0)
+    score_for_policy = float(score or 0.0)
     rr = float(diagnostics.get("rr", mctx.get("rr", 0.0)) or 0.0)
     entry = float(diagnostics.get("entry", mctx.get("entry", 0.0)) or 0.0)
     sl = float(diagnostics.get("sl", mctx.get("sl", 0.0)) or 0.0)
@@ -1681,7 +1812,7 @@ def process_backtest_result(
             rescue_size_multiplier = sbr.size_multiplier
         else:
             ok, rescue_reason = _rescue_acceptance_allowed(
-            mode=mode, reason=reject_reason, score=score, effective_rr=effective_rr_value, regime=regime,
+            mode=mode, reason=reject_reason, score=score_for_policy, effective_rr=effective_rr_value, regime=regime,
             mctx=mctx, cfg=rescue_config, stats=rescue_stats, recent_stats=recent_stats, open_rows=open_rows, symbol=symbol,
         )
         if not short_breakdown_ok:
@@ -1694,12 +1825,12 @@ def process_backtest_result(
             "original_reject_reason": reject_reason,
             "rescue_size_multiplier": rescue_size_multiplier,
             "rescue_effective_rr": effective_rr_value,
-            "rescue_score": score,
+            "rescue_score": score_for_policy,
             "rescue_mode": mode,
             "rescue_min_shadow_expectancy": getattr(sbr, "min_shadow_expectancy", 0.0) if rescue_reason == SHORT_BREAKDOWN_RESCUE_REASON else None,
         }
         rescued = CandidateOrder(
-            candle.timestamp, symbol, side, entry, sl, tp, rr, setup_type, setup_reason, regime, score, order_type,
+            candle.timestamp, symbol, side, entry, sl, tp, rr, setup_type, setup_reason, regime, score_for_policy, order_type,
             expectancy_bucket=expectancy_bucket, accepted_reason=rescue_reason, original_reject_reason=reject_reason,
             rescue_size_multiplier=rescue_size_multiplier, rescue_effective_rr=effective_rr_value,
             rescue_decision_context=json.dumps(context, sort_keys=True),
@@ -1750,6 +1881,8 @@ def process_backtest_result(
             status_after="SIGNAL_CREATED",
             order_type=order_type,
             expectancy_bucket=expectancy_bucket,
+            event_flags=score_status if score_unavailable else "",
+            expectancy_available=not score_unavailable,
             volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
             spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
             funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
@@ -1800,6 +1933,8 @@ def process_backtest_result(
                 reject_reason=reason,
                 order_type=order_type,
                 expectancy_bucket=expectancy_bucket,
+                event_flags=score_status if score_unavailable else "",
+                expectancy_available=not score_unavailable,
                 volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
                 spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
                 funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
@@ -1829,7 +1964,7 @@ def process_backtest_result(
                 "setup_reason": setup_reason,
                 "regime": regime,
                 "score": score,
-                "gate_score": _safe_float(diagnostics.get("score"), score),
+                "gate_score": None if score_unavailable else _safe_float(diagnostics.get("score"), score_for_policy),
                 "rr": rr,
                 "expectancy": expectancy,
                 "quality_score": diagnostics.get("quality_score", 0.0),
@@ -2221,6 +2356,7 @@ def _persist_lifecycle_rows(
                 "disabled_filter_bypass_count": row.disabled_filter_bypass_count,
                 "filter_switch_experiment_active": row.filter_switch_experiment_active,
                 "source_stage": row.source_stage or source_stage,
+                "event_flags": row.event_flags,
                 "rr_available": row.rr_available,
                 "effective_rr_available": row.effective_rr_available,
                 "expectancy_available": row.expectancy_available,
@@ -2425,6 +2561,7 @@ def _persist_lifecycle_rows(
                        json_extract(execution_ctx, '$.funding_rate_pct') AS funding_rate_pct,
                        json_extract(execution_ctx, '$.volume_24h_usdt') AS volume_24h_usdt,
                        json_extract(execution_ctx, '$.accepted_reason') AS accepted_reason,
+                       json_extract(execution_ctx, '$.event_flags') AS event_flags,
                        json_extract(execution_ctx, '$.side') AS side,
                        json_extract(execution_ctx, '$.entry') AS entry,
                        json_extract(execution_ctx, '$.sl') AS sl,
@@ -3581,7 +3718,8 @@ def verify_export_integrity(
         if expectancy_bucket == "":
             errors.append(f"lifecycle row index={idx} missing expectancy_bucket")
         signal_terminals.setdefault(signal_id, set()).add(lifecycle_state)
-        if lifecycle_state == "SIGNAL_CREATED":
+        score_status = str(row.get("event_flags", "") or "").strip().upper()
+        if lifecycle_state == "SIGNAL_CREATED" and score_status != "NOT_SCORED_MTF_REJECT":
             score_by_signal[signal_id] = row.get("score")
             rr_by_signal[signal_id] = row.get("rr")
         ctx = _decode_execution_ctx(row.get("execution_ctx"))
@@ -4953,15 +5091,32 @@ def main():
     write_backtest_filter_state_artifacts(args.output_dir, filter_state)
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
+        mtf_source_by_symbol = dict(candles_by_symbol)
     else:
         fixed_symbols = fixed_symbols_for_state
         universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
-        _prune_stale_candle_artifacts(args.output_dir, [row["symbol"] for row in universe], args.interval)
+        required_intervals = {args.interval, "1m"}
+        _prune_stale_candle_artifacts(args.output_dir, [row["symbol"] for row in universe], required_intervals)
         candles_by_symbol = {}
+        mtf_source_by_symbol = {}
         for row in universe:
-            c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir, force_refresh=args.force_refresh)
+            c = _closed_candles_at(
+                load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir, force_refresh=args.force_refresh),
+                timeframe=args.interval,
+                end_ms=end_ms,
+            )
             if c:
                 candles_by_symbol[row["symbol"]] = c
+            mtf_source = c if args.interval == "1m" else _closed_candles_at(
+                load_or_fetch_candles(
+                    row["symbol"], "1m", start_ms, end_ms, args.output_dir,
+                    force_refresh=args.force_refresh,
+                ),
+                timeframe="1m",
+                end_ms=end_ms,
+            )
+            if mtf_source:
+                mtf_source_by_symbol[row["symbol"]] = mtf_source
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
     symbol_meta_by_symbol = {row["symbol"]: row for row in universe}
     lifecycle = []
@@ -5087,6 +5242,16 @@ def main():
                     "portfolio_config": portfolio_config,
                     "expectancy_bind": expectancy_session,
                     "expectancy_scope": expectancy_scope,
+                    "mtf_source_candles": mtf_source_by_symbol.get(symbol, []),
+                    "simulation_timeframe": args.interval,
+                    "regime_timeframe": getattr(getattr(cfg, "runtime", cfg), "regime_timeframe", "1h"),
+                    "setup_timeframe": getattr(getattr(cfg, "runtime", cfg), "setup_timeframe", "15m"),
+                    "execution_timeframe": getattr(getattr(cfg, "runtime", cfg), "execution_timeframe", "1m"),
+                    "mtf_guided_signal_generation_enabled": getattr(getattr(cfg, "runtime", cfg), "mtf_guided_signal_generation_enabled", True),
+                    "regime_direction_threshold": getattr(getattr(cfg, "runtime", cfg), "regime_direction_threshold", .0005),
+                    "setup_direction_threshold": getattr(getattr(cfg, "runtime", cfg), "setup_direction_threshold", .0003),
+                    "execution_direction_threshold": getattr(getattr(cfg, "runtime", cfg), "execution_direction_threshold", .0005),
+                    "enable_state_direction_resolution": getattr(getattr(cfg, "runtime", cfg), "enable_state_direction_resolution", False),
                 }
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})

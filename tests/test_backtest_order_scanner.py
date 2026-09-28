@@ -30,6 +30,16 @@ def test_load_candles_between_start_end(tmp_path: Path):
     assert len(out) == 2
 
 
+def test_backtest_discards_candles_not_closed_by_requested_end():
+    candles = [
+        bo.Candle(0, 1, 2, .5, 1.5, 1),
+        bo.Candle(60_000, 1.5, 2, 1, 1.8, 1),
+    ]
+
+    assert bo._closed_candles_at(candles, timeframe="1m", end_ms=119_998) == [candles[0]]
+    assert bo._closed_candles_at(candles, timeframe="1m", end_ms=119_999) == candles
+
+
 def test_scan_creates_virtual_candidate(monkeypatch):
     class _Mode:
         BACKTEST = "BACKTEST"
@@ -88,6 +98,11 @@ def test_offline_main_uses_decision_pipeline_without_network_or_manual_rows(tmp_
     assert all(row["reject_reason"] for row in rejected_rows)
     assert all("OFFLINE_FIXTURE" not in str(row) for row in lifecycle_rows + rejected_rows)
     assert all(row["funding_rate_pct"] != "0.0" for row in lifecycle_rows)
+    not_scored = [row for row in lifecycle_rows if row.get("event_flags") == "NOT_SCORED_MTF_REJECT"]
+    assert not_scored
+    assert all(row["score"] == "" for row in not_scored)
+    assert all(row["expectancy_available"].lower() in {"false", "0"} for row in not_scored)
+    assert any("NOT_SCORED_MTF_REJECT" in row["diagnostics"] for row in rejected_rows)
 
 
 def test_scan_routes_non_breakout_bar_through_order_cycle(monkeypatch):
@@ -1904,12 +1919,14 @@ def test_prune_stale_candle_artifacts_keeps_only_current_run_symbols(tmp_path):
     candles = tmp_path / "candles"
     candles.mkdir()
     (candles / "BTCUSDT_1h.json").write_text("{}")
+    (candles / "BTCUSDT_1m.json").write_text("{}")
     (candles / "ETHUSDT_1h.json").write_text("{}")
     (candles / "ETHUSDT_15m.json").write_text("{}")
 
-    bo._prune_stale_candle_artifacts(str(tmp_path), ["BTCUSDT"], "1h")
+    bo._prune_stale_candle_artifacts(str(tmp_path), ["BTCUSDT"], {"1h", "1m"})
 
     assert (candles / "BTCUSDT_1h.json").exists()
+    assert (candles / "BTCUSDT_1m.json").exists()
     assert not (candles / "ETHUSDT_1h.json").exists()
     assert not (candles / "ETHUSDT_15m.json").exists()
 

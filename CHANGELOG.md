@@ -1,3 +1,27 @@
+# #455 BACKTEST ↔ PAPER MTF candidate parity — 2026-09-28
+
+### Added
+- Pure timestamp-bounded MTF candidate builder shared by PAPER and BACKTEST.
+- Deterministic complete-candle 1m aggregation for BACKTEST 1h/15m/1m evidence.
+- Explicit `NOT_SCORED_MTF_REJECT` null-score evidence for pre-scoring MTF rejects.
+### Changed
+- BACKTEST canonical side, setup, entry, stop, target, raw RR, and normalized scoring MTF context now come from PAPER's regime-guided generation semantics.
+- Non-1m simulations load one additional 1m historical evidence stream for MTF generation.
+### Fixed
+- Candidate-generation divergence despite shared AIBrain scoring.
+- Future source candles influencing an earlier historical MTF decision.
+- Missing pre-score evidence appearing as numeric score zero.
+### Removed
+- Same-timeframe reconstructed MTF scoring context when canonical shared MTF context exists.
+### Breaking Changes
+- BACKTEST can reject earlier for incomplete MTF or historical execution evidence; this is fail-closed alignment, not a threshold change. No schema/API migration.
+### Known Issues
+- Provider-specific native-candle versus 1m-aggregation boundary comparison remains an external qualification item. LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
 # #455 BACKTEST score authority isolation — 2026-09-28
 
 ### Added
@@ -12,10 +36,6 @@
 - Direct callers of the private `_build_market_ctx(...)` helper must use `legacy_geometry_*` for diagnostics; production scanner consumers remain unchanged.
 ### Known Issues
 - #455 pure 1h/15m/1m MTF candidate-generation parity remains open. LIVE NOT READY.
-
-## Historical changelog entries
-
-Entries below preserve the repository state at the time of each change.
 
 # #455 BACKTEST spread provenance — 2026-09-28
 
