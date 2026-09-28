@@ -3895,6 +3895,12 @@ class RuntimeOrchestrator:
         if executed is False:
             return
         if self.config.execution_mode == ExecutionMode.PAPER:
+            accepted_burnin_payload.update({
+                "execution_account_scope": self._last_execution_ownership.get("account_scope"),
+                "execution_account_model": self._last_execution_ownership.get("account_model"),
+                "execution_fencing_token": self._last_execution_ownership.get("fencing_token"),
+                "execution_ownership_reason": self._last_execution_ownership.get("reason"),
+            })
             self._persist_burnin_decision(
                 accepted_burnin_payload,
                 lifecycle_state=LifecycleState.POSITION_OPENED.value,
@@ -4073,6 +4079,7 @@ class RuntimeOrchestrator:
             "operator_acknowledged": bool(self.config.operator_live_acknowledged),
             "qualification_passed": qualification_passed,
             "reconciliation_passed": reconciliation_passed,
+            "execution_owner_valid": bool(self._execution_ownership_snapshot().get("valid")),
             # This method re-reads RuntimeControlStore on every invocation.
             "kill_switch_active": bool(self._kill_switch_active()),
         }
@@ -4186,6 +4193,7 @@ class RuntimeOrchestrator:
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
+        ownership_evidence = self._authorize_execution_ownership()
         if mode == ExecutionMode.PAPER:
             # The earlier decision gate can become stale across scoring and
             # lifecycle awaits. No await occurs between this check and fill.
@@ -4194,6 +4202,7 @@ class RuntimeOrchestrator:
                 await self._emit_lifecycle_event(LifecycleState.CANCELLED.value, symbol,
                     {"reason": reason, "signal_id": decision.get("signal_id"), "execution_attempted": False})
                 return False
+            ownership_evidence = self._validate_execution_ownership()
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
         elif mode == ExecutionMode.LIVE_PRECHECK:
             result = {"mode": mode.value, "status": "no_submit_verified", "symbol": symbol}
@@ -4202,11 +4211,13 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode requires real_execution_adapter")
             authorization_ctx = self._build_live_order_execution_context(symbol, market_ctx)
             validate_live_order_authorization(authorization_ctx)
+            ownership_evidence = self._validate_execution_ownership()
             result = await self.real_execution_adapter.submit(decision, market_ctx)
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
         result = self._canonical_execution_result(result, decision, market_ctx, mode=mode)
+        result["execution_ownership"] = dict(ownership_evidence)
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
