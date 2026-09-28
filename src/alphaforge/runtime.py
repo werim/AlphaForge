@@ -3900,6 +3900,158 @@ class RuntimeOrchestrator:
                 lifecycle_state=LifecycleState.POSITION_OPENED.value,
             )
 
+    def _execution_account_identity(self) -> dict[str, Any]:
+        mode = self.config.execution_mode
+        if mode is ExecutionMode.PAPER:
+            model = str(self.config.paper_account_model or "").strip().upper()
+            if model != "ISOLATED_CAMPAIGN":
+                raise RuntimeError("PAPER_ACCOUNT_MODEL_UNSUPPORTED")
+            campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+            if campaign_id:
+                scope = f"paper:campaign:{campaign_id}"
+                durable_required = True
+            else:
+                scope = f"paper:runtime:{self.runtime_instance_id}"
+                durable_required = False
+            return {
+                "account_scope": scope,
+                "account_model": model,
+                "durable_required": durable_required,
+                "mutation_mode": "PAPER",
+            }
+        if mode is ExecutionMode.LIVE:
+            configured = str(self.config.execution_account_scope or "").strip()
+            return {
+                "account_scope": f"live:{configured}" if configured else "",
+                "account_model": "SINGLE_OWNER_LIVE_ACCOUNT",
+                "durable_required": True,
+                "mutation_mode": "LIVE",
+            }
+        return {
+            "account_scope": "",
+            "account_model": "NO_MUTATION",
+            "durable_required": False,
+            "mutation_mode": mode.value,
+        }
+
+    def _authorize_execution_ownership(self) -> dict[str, Any]:
+        identity = self._execution_account_identity()
+        mode = self.config.execution_mode
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            evidence = {**identity, "acquired": True, "reason": "NO_MUTATION"}
+            self._last_execution_ownership = evidence
+            return evidence
+
+        scope = str(identity.get("account_scope") or "")
+        if not scope:
+            raise RuntimeError("EXECUTION_ACCOUNT_SCOPE_REQUIRED")
+
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            if mode is ExecutionMode.PAPER and not bool(identity.get("durable_required")):
+                evidence = {
+                    **identity,
+                    "owner_instance_id": self.runtime_instance_id,
+                    "owner_startup_id": self.startup_id,
+                    "fencing_token": 0,
+                    "lease_expires_at": None,
+                    "acquired": True,
+                    "reason": "LOCAL_EPHEMERAL_ISOLATED",
+                }
+                self._execution_account_scope = scope
+                self._execution_account_model = str(identity["account_model"])
+                self._execution_fencing_token = 0
+                self._execution_lease_expires_at = None
+                self._last_execution_ownership = evidence
+                return evidence
+            raise RuntimeError("EXECUTION_OWNERSHIP_PERSISTENCE_UNAVAILABLE")
+
+        lease = acquire_execution_ownership(
+            engine,
+            account_scope=scope,
+            mode=mode.value,
+            owner_instance_id=self.runtime_instance_id,
+            owner_startup_id=self.startup_id,
+            lease_ttl_sec=float(self.config.execution_lease_ttl_sec),
+        )
+        evidence = {**identity, **lease.as_dict()}
+        self._last_execution_ownership = evidence
+        if not lease.acquired:
+            raise RuntimeError(
+                "EXECUTION_OWNERSHIP_BLOCKED:" + (lease.reason or "UNKNOWN")
+            )
+        self._execution_account_scope = scope
+        self._execution_account_model = str(identity["account_model"])
+        self._execution_fencing_token = lease.fencing_token
+        self._execution_lease_expires_at = lease.lease_expires_at
+        return evidence
+
+    def _execution_ownership_snapshot(self) -> dict[str, Any]:
+        identity = self._execution_account_identity()
+        mode = self.config.execution_mode
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            return {**identity, "valid": True, "reason": "NO_MUTATION"}
+        if (
+            mode is ExecutionMode.PAPER
+            and self._execution_fencing_token == 0
+            and self._execution_account_scope == identity.get("account_scope")
+        ):
+            return {
+                **identity,
+                "owner_instance_id": self.runtime_instance_id,
+                "owner_startup_id": self.startup_id,
+                "fencing_token": 0,
+                "lease_expires_at": None,
+                "valid": True,
+                "reason": "LOCAL_EPHEMERAL_ISOLATED",
+            }
+        engine = self._resolve_persistence_engine()
+        if engine is None or not self._execution_account_scope:
+            return {
+                **identity,
+                "valid": False,
+                "reason": "EXECUTION_OWNERSHIP_UNAVAILABLE",
+            }
+        lease = validate_execution_ownership(
+            engine,
+            account_scope=self._execution_account_scope,
+            owner_instance_id=self.runtime_instance_id,
+            owner_startup_id=self.startup_id,
+            fencing_token=self._execution_fencing_token,
+            min_validity_sec=float(self.config.execution_lease_min_validity_sec),
+        )
+        return {**identity, **lease.as_dict(), "valid": bool(lease.acquired)}
+
+    def _validate_execution_ownership(self) -> dict[str, Any]:
+        evidence = self._execution_ownership_snapshot()
+        self._last_execution_ownership = dict(evidence)
+        if not bool(evidence.get("valid")):
+            raise RuntimeError(
+                "EXECUTION_OWNERSHIP_FENCED:"
+                + str(evidence.get("reason") or "UNKNOWN")
+            )
+        return evidence
+
+    def _release_execution_ownership(self) -> bool:
+        if (
+            not self._execution_account_scope
+            or self._execution_fencing_token in (None, 0)
+        ):
+            return False
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            return False
+        released = release_execution_ownership(
+            engine,
+            account_scope=self._execution_account_scope,
+            owner_instance_id=self.runtime_instance_id,
+            owner_startup_id=self.startup_id,
+            fencing_token=self._execution_fencing_token,
+        )
+        if released:
+            self._execution_lease_expires_at = time.time()
+        return released
+
     def _authoritative_live_authorization(self) -> dict[str, bool]:
         report = self._qualification_report
         qualification_passed = bool(
