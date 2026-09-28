@@ -17,6 +17,10 @@ mutations = MODULE.mutations
 def test_cross_component_safety_mutations_are_ci_protected() -> None:
     cases = {case.name: case for case in mutations()}
     required = {
+        "double_count_entry_slippage": (
+            "src/alphaforge/execution.py",
+            "tests/test_execution_cost_semantics.py::",
+        ),
         "risk_scale_not_applied": (
             "src/alphaforge/runtime.py",
             "tests/test_issue489_risk_scale_sizing.py::",

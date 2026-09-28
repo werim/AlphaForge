@@ -60,7 +60,7 @@ def mutations() -> list[Mutation]:
         Mutation("planned_entry_as_fill", EXECUTION,
                  'fill = entry_price * (1.0 + slip if normalized_side == "LONG" else 1.0 - slip)',
                  "fill = entry_price", "tests/test_paper_rr_geometry.py::test_two_bps_fill_collapses_tight_stop_rr_symmetrically"),
-        Mutation("double_count_entry_slippage", RUNTIME,
+        Mutation("double_count_entry_slippage", EXECUTION,
                  "model.total_penalty - model.slippage_penalty / 2.0, 0.0)",
                  "model.total_penalty, 0.0)",
                  "tests/test_execution_cost_semantics.py::test_expected_entry_movement_is_not_deducted_twice_from_effective_rr"),
