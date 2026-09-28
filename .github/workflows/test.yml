@@ -86,6 +86,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_issue500_correlation_risk_config_ssot.py
 
+      - name: Runtime default-authority SSOT gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_issue501_runtime_default_authority.py
+
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
