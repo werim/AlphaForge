@@ -87,6 +87,8 @@ class RuntimeSettings:
     symbol_cooldown_sec: float = 120.0
     max_notional_exposure: float = 100_000.0
     max_symbol_notional: float = 50_000.0
+    max_correlation_group_exposure: float = 75_000.0
+    max_correlated_positions: int = 2
     max_daily_loss_pct: float = 0.03
     stale_market_data_sec: float = 15.0
     max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
@@ -385,6 +387,8 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         cfg.update({
             "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
             "PAPER_CANDIDATE_NOTIONAL": runtime.paper_candidate_notional,
+            "MAX_CORRELATION_GROUP_EXPOSURE": runtime.max_correlation_group_exposure,
+            "MAX_CORRELATED_POSITIONS": runtime.max_correlated_positions,
         })
     return cfg
 
@@ -425,6 +429,8 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         symbol_cooldown_sec=val("ALPHAFORGE_SYMBOL_COOLDOWN_SEC"),
         max_notional_exposure=val("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE"),
         max_symbol_notional=val("ALPHAFORGE_MAX_SYMBOL_NOTIONAL"),
+        max_correlation_group_exposure=val("ALPHAFORGE_MAX_CORRELATION_GROUP_EXPOSURE"),
+        max_correlated_positions=val("ALPHAFORGE_MAX_CORRELATED_POSITIONS"),
         max_daily_loss_pct=val("ALPHAFORGE_MAX_DAILY_LOSS_PCT"),
         stale_market_data_sec=val("ALPHAFORGE_STALE_MARKET_DATA_SEC"),
         max_clock_skew_ms=int(val("ALPHAFORGE_MAX_CLOCK_SKEW_MS")),
