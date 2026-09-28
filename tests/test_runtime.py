@@ -1437,7 +1437,7 @@ def test_mtf_reject_starts_new_same_symbol_signal_after_open_position(
 
 
 def test_paper_accepted_observation_follows_pending_position_persistence(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
 
     async def scanner() -> list[dict]:
@@ -1481,7 +1481,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=scanner,
-        persistence_engine=init_db("sqlite+pysqlite:///:memory:"),
+        persistence_engine=init_db(f"sqlite+pysqlite:///{tmp_path / 'paper-ownership.db'}"),
     )
     orchestrator._campaign_id = "campaign"
     orchestrator._burnin_run_id = "run"
