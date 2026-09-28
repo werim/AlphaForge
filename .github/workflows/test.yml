@@ -78,6 +78,10 @@ jobs:
           pytest -q tests/test_issue490_protected_mode_parity.py tests/test_issue421_decision_invariant.py
           pytest -q tests/test_live_readiness.py -k "mode_parity"
 
+      - name: PAPER candidate-notional SSOT gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_issue491_paper_candidate_notional_ssot.py
+
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py

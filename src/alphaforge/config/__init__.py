@@ -100,6 +100,7 @@ class RuntimeSettings:
     reject_unknown_execution_context: bool = True
     paper_fee_bps: float = 4.0
     paper_execution_latency_ms: float = 50.0
+    paper_candidate_notional: float = 10.0
     market_data_base_url: str = "https://fapi.binance.com"
     regime_timeframe: str = "1h"
     setup_timeframe: str = "15m"
@@ -383,7 +384,7 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
     if mode_value == "PAPER":
         cfg.update({
             "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
-            "PAPER_CANDIDATE_NOTIONAL": getattr(runtime, "paper_candidate_notional", 10.0),
+            "PAPER_CANDIDATE_NOTIONAL": runtime.paper_candidate_notional,
         })
     return cfg
 
@@ -437,6 +438,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         reject_unknown_execution_context=val("ALPHAFORGE_REJECT_UNKNOWN_EXECUTION_CONTEXT"),
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
         paper_execution_latency_ms=val("ALPHAFORGE_PAPER_EXECUTION_LATENCY_MS"),
+        paper_candidate_notional=val("ALPHAFORGE_PAPER_CANDIDATE_NOTIONAL"),
         market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
         regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
