@@ -1728,14 +1728,25 @@ class RuntimeOrchestrator:
         executable_rr = reward_distance / risk_distance
         return executable_rr if math.isfinite(executable_rr) else 0.0
 
-    def _expected_fill_price(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float | None, float | None]:
+    def _expected_fill_price(
+        self,
+        market_ctx: Mapping[str, Any],
+        execution_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> tuple[float | None, float | None]:
+        mode_value = (
+            mode if isinstance(mode, ExecutionMode)
+            else ExecutionMode(str(mode).upper()) if mode is not None
+            else self.config.execution_mode
+        )
         try:
             entry = float(market_ctx.get("entry"))
         except (TypeError, ValueError):
             return None, None
         if not math.isfinite(entry) or entry <= 0:
             return None, None
-        if self.config.execution_mode is ExecutionMode.PAPER:
+        if mode_value is ExecutionMode.PAPER:
             try:
                 if self.paper_slippage_bps is not None:
                     slippage_pct = max(float(self.paper_slippage_bps), 0.0) / 10_000.0
@@ -1763,9 +1774,23 @@ class RuntimeOrchestrator:
             return None, None
         return round(fill, 8), slippage_pct
 
-    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
+    def _execution_rr_metrics(
+        self,
+        raw_rr: Any,
+        market_ctx: Mapping[str, Any],
+        execution_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        mode_value = (
+            mode if isinstance(mode, ExecutionMode)
+            else ExecutionMode(str(mode).upper()) if mode is not None
+            else self.config.execution_mode
+        )
         candidate_rr = float(raw_rr or 0.0)
-        expected_fill, fill_slippage_pct = self._expected_fill_price(market_ctx, execution_ctx)
+        expected_fill, fill_slippage_pct = self._expected_fill_price(
+            market_ctx, execution_ctx, mode=mode_value,
+        )
         executable_raw_rr = self._fill_adjusted_raw_rr(
             side=market_ctx.get("side"), fill=expected_fill,
             stop=market_ctx.get("sl"), target=market_ctx.get("tp"),
@@ -1790,7 +1815,7 @@ class RuntimeOrchestrator:
                     side=market_ctx.get("side"),
                     expected_fill_provenance=(
                         PROVENANCE_MODELLED
-                        if self.config.execution_mode is ExecutionMode.PAPER
+                        if mode_value is ExecutionMode.PAPER
                         else PROVENANCE_ESTIMATED
                     ),
                     decision_timestamp=market_ctx.get("decision_timestamp"),
