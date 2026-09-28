@@ -1,3 +1,19 @@
+# #455 BACKTEST estimated-spread provenance correction — 2026-09-28
+
+## Why / root cause
+
+BACKTEST supplied a numeric estimated spread and `spread_source=ESTIMATED_BACKTEST` without an explicit status. The shared execution-context builder interpreted any numeric spread as measured, producing the contradictory pair `spread_status=MEASURED` / `spread_source=ESTIMATED_BACKTEST`.
+
+## Change / behavior
+
+Both BACKTEST market-context builders now bind spread status at the source: explicit historical spread evidence is `MEASURED`, while the liquidity/volatility estimate is `MODEL_ESTIMATE`. The shared execution builder preserves that status instead of inferring measured authority from numeric presence. Missing funding, latency, and orderbook evidence remains unavailable/null.
+
+No spread value, cost formula, threshold, candidate geometry, score, lifecycle transition, PAPER/LIVE path, or authorization gate changed. Existing persistence/export shapes are unchanged; new prospective rows carry corrected status metadata. No migration, backfill, campaign access, or historical mutation occurred.
+
+## Validation / risks / recommendation
+
+Four focused provenance regressions and 177 adjacent BACKTEST, shared pre-submit, execution-cost, execution-layer, and scanner tests pass. Compile, diff checks, PR CI, and exact merged-dev CI remain required. This is a coherent execution-provenance slice of #455, not closure: pure 1h/15m/1m MTF candidate-generation parity and the legacy pre-authoritative score field remain unresolved. LIVE remains NOT READY.
+
 # #498 cross-component economic/evidence mutation protection — 2026-09-28
 
 ## Why / root cause

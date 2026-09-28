@@ -1,3 +1,22 @@
+# #455 BACKTEST spread provenance — 2026-09-28
+
+### Added
+- Explicit `MODEL_ESTIMATE` versus `MEASURED` spread status at both BACKTEST market-context boundaries.
+### Changed
+- Estimated BACKTEST spread retains numeric model input while carrying non-measured authority.
+### Fixed
+- Contradictory `MEASURED` status paired with `ESTIMATED_BACKTEST` source.
+### Removed
+- None.
+### Breaking Changes
+- No schema/API break. Consumers that treated estimated spread as measured will now receive the correct `MODEL_ESTIMATE` status.
+### Known Issues
+- #455 MTF signal/geometry parity and legacy score isolation remain open. LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
 # #498 cross-component safety mutation gate — 2026-09-28
 
 ### Added
@@ -13,10 +32,6 @@
 - None. Production runtime, lifecycle, schema, persistence, exports, thresholds, campaigns, and historical evidence are unchanged.
 ### Known Issues
 - Mutation coverage is targeted, not exhaustive. Exact-head CI remains required; LIVE NOT READY.
-
-## Historical changelog entries
-
-Entries below preserve the repository state at the time of each change.
 
 # #421 P2-D/P2-E completion and P2-F current-state cleanup — 2026-09-24
 

@@ -1,13 +1,20 @@
+# AlphaForge 0.1.0 — #455 BACKTEST spread provenance — 2026-09-28
+
+- Current phase: smallest safe #455 execution-provenance slice; BACKTEST/PAPER MTF candidate-generation parity remains open.
+- Runtime maturity/alignment: estimated historical BACKTEST spread is now `MODEL_ESTIMATE` with source `ESTIMATED_BACKTEST`; explicit historical bid/ask-derived input remains `MEASURED`. PAPER/LIVE behavior, thresholds, scoring, geometry, and authorization are unchanged.
+- Lifecycle/persistence: existing decision/lifecycle/export fields carry the corrected prospective status. No schema, migration, backfill, historical-row rewrite, or campaign mutation.
+- Validation: 4 focused provenance regressions and 177 adjacent BACKTEST/execution tests pass; exact-head CI remains required. Known critical risk: BACKTEST still uses legacy breakout geometry rather than PAPER's pure 1h/15m/1m MTF candidate-generation semantics. Last audit: 2026-09-28. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
 # AlphaForge 0.1.0 — #498 cross-component safety mutation gate — 2026-09-28
 
 - Current phase: P1 evidence-correctness hardening. The CI mutation gate now exercises 32 mutations, including all seven cross-component regressions required by #498.
 - Runtime maturity/alignment: no production runtime, threshold, sizing, execution-cost, stop-risk, qualification, parity, or authorization behavior changed. The gate proves that production-path tests detect dropped risk scaling, planned-entry stop checks, missing execution/drawdown evidence promotion, RR-stage swaps, sizing parity omissions, and semantic-validator bypass.
 - Lifecycle/persistence: no lifecycle, schema, export, migration, historical evidence, or campaign state changed. Mutations run only in disposable source/test copies.
 - Validation: 32/32 mutations killed with 0 survivors and 0 errors; 21 baseline nodes pass before mutation. Exact-head CI remains required. Last audit: 2026-09-28. LIVE NOT READY.
-
-## Historical version entries
-
-Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
 
 # AlphaForge 0.1.0 — #421 P2-F current-state documentation — 2026-09-24
 

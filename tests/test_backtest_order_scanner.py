@@ -757,6 +757,7 @@ def test_high_candle_range_alone_does_not_trigger_wide_spread():
     result = bo.select_symbol("AAAUSDT", out)
     assert out["candle_range_pct"] > 10.0
     assert out["spread_source"] == "ESTIMATED_BACKTEST"
+    assert out["spread_status"] == "MODEL_ESTIMATE"
     assert out["spread_pct"] <= 0.12
     assert "WIDE_SPREAD" not in result.reject_reasons
 
@@ -766,6 +767,7 @@ def test_explicit_high_actual_spread_triggers_wide_spread():
     out = bo._build_symbol_market_data({"quoteVolume": 80_000_000.0, "actual_spread_pct": 0.35}, candles, 2)
     result = bo.select_symbol("AAAUSDT", out)
     assert out["spread_source"] == "ACTUAL"
+    assert out["spread_status"] == "MEASURED"
     assert "WIDE_SPREAD" in result.reject_reasons
 
 
@@ -796,6 +798,7 @@ def test_spread_source_propagated_to_execution_context():
         recent=[bo.Candle(1, 99, 101, 98, 100, 1), bo.Candle(2, 100, 102, 99, 101, 1)],
     )
     assert ctx["spread_source"] == "ESTIMATED_BACKTEST"
+    assert ctx["spread_status"] == "MODEL_ESTIMATE"
 
 
 def test_lifecycle_export_reads_persisted_sql_events():
