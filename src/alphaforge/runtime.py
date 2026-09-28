@@ -2507,13 +2507,11 @@ class RuntimeOrchestrator:
                 rr_breakdown_complete
             ),
             "modes_compared": [mode.value for mode in modes],
-            "comparison_fields": list(
-                project_pre_submit_invariant(
-                    evaluations["paper"]
-                ).__dataclass_fields__.keys()
-            )
-            if evaluations
-            else [],
+            "comparison_fields": (
+                list(comparisons[0]["paper"].keys())
+                if comparisons
+                else []
+            ),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
         }
