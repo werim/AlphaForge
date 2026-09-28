@@ -43,6 +43,7 @@ from alphaforge.execution import (
     execution_context_is_unavailable,
     weighted_average_fill_price,
     adverse_expected_fill_price,
+    build_decision_rr_metrics,
     build_stop_risk_metrics,
     evaluate_stop_risk_policy,
 )
@@ -2278,58 +2279,15 @@ class RuntimeOrchestrator:
             else ExecutionMode(str(mode).upper()) if mode is not None
             else self.config.execution_mode
         )
-        candidate_rr = float(raw_rr or 0.0)
-        expected_fill, fill_slippage_pct = self._expected_fill_price(
-            market_ctx, execution_ctx, mode=mode_value,
+        return build_decision_rr_metrics(
+            raw_rr,
+            market_ctx,
+            execution_ctx,
+            mode=mode_value.value,
+            paper_slippage_bps=(
+                self.paper_slippage_bps if mode_value is ExecutionMode.PAPER else None
+            ),
         )
-        executable_raw_rr = self._fill_adjusted_raw_rr(
-            side=market_ctx.get("side"), fill=expected_fill,
-            stop=market_ctx.get("sl"), target=market_ctx.get("tp"),
-        )
-        model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
-        if executable_raw_rr is None:
-            executable_raw_rr = candidate_rr
-            remaining_penalty = model.total_penalty
-        else:
-            # Entry slippage is already represented by expected_fill. Keep only
-            # costs that the simulated/executable fill does not encode,
-            # including the modelled exit-slippage half.
-            remaining_penalty = max(model.total_penalty - model.slippage_penalty / 2.0, 0.0)
-        effective_rr = max(executable_raw_rr - remaining_penalty, 0.0)
-        cost_semantics = None
-        if expected_fill is not None:
-            try:
-                cost_semantics = build_execution_cost_semantics(
-                    entry=market_ctx.get("entry"),
-                    expected_fill=expected_fill,
-                    actual_fill=None,
-                    side=market_ctx.get("side"),
-                    expected_fill_provenance=(
-                        PROVENANCE_MODELLED
-                        if mode_value is ExecutionMode.PAPER
-                        else PROVENANCE_ESTIMATED
-                    ),
-                    decision_timestamp=market_ctx.get("decision_timestamp"),
-                ).decision_time_dict()
-            except ValueError:
-                # Canonical metrics are unavailable when side/price evidence is
-                # incomplete; existing effective-RR behavior remains authoritative.
-                cost_semantics = None
-        return {
-            "candidate_rr": round(candidate_rr, 6),
-            "expected_fill": expected_fill,
-            "fill_slippage_pct": fill_slippage_pct,
-            "expected_execution_cost_price": (
-                cost_semantics.get("expected_execution_cost_price") if cost_semantics else None),
-            "expected_execution_cost_pct": (
-                cost_semantics.get("expected_execution_cost_pct") if cost_semantics else None),
-            "expected_execution_cost_bps": (
-                cost_semantics.get("expected_execution_cost_bps") if cost_semantics else None),
-            "execution_cost_semantics": cost_semantics,
-            "executable_raw_rr": round(executable_raw_rr, 6),
-            "remaining_execution_penalty": round(remaining_penalty, 6),
-            "effective_rr": round(effective_rr, 6),
-        }
 
     def _build_mode_parity_evidence(
         self,

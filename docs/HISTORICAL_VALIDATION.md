@@ -74,6 +74,13 @@ BACKTEST outcomes only and requires persisted candidate RR, executable raw RR,
 remaining execution penalty, effective RR, RR basis, and execution-cost semantics.
 Legacy or incomplete economics fail closed; the adapter never reconstructs them.
 
+Current BACKTEST decisions obtain those RR-stage values at decision time from
+`build_decision_rr_metrics`, the same expected-fill geometry and residual-cost
+authority used by the runtime. The values are carried through the stable
+signal/lifecycle identity into terminal `decision_evidence` rows and the CSV
+export. The historical adapter only reads them; it does not recalculate or
+upgrade planned-entry legacy evidence.
+
 Generate a machine-readable report with:
 
 ```bash

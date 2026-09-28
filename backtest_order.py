@@ -472,6 +472,11 @@ class LifecycleRow:
     lifecycle_seq: int = 0
     shadow_outcome: str = ""
     cost_penalty: float = 0.0
+    candidate_raw_rr: Optional[float] = None
+    executable_raw_rr: Optional[float] = None
+    remaining_execution_penalty: Optional[float] = None
+    rr_basis: str = "PLANNED_ENTRY_LEGACY_BACKTEST"
+    execution_cost_semantics: Any = "BACKTEST_PLANNED_ENTRY_LEGACY"
     total_cost_pct: Any = "UNAVAILABLE_BACKTEST"
     total_explicit_cost_pct: Any = "UNAVAILABLE_BACKTEST"
     spread_source: str = "UNAVAILABLE"
@@ -1207,6 +1212,7 @@ def simulate_candidate(
     order_id = str(uuid5(NAMESPACE_URL, f"backtest:order:{signal_id}:{candidate.entry}:{candidate.sl}:{candidate.tp}"))
     position_id = str(uuid5(NAMESPACE_URL, f"backtest:position:{signal_id}:{candidate.side}"))
     def _finalize_rows(out_rows: List[LifecycleRow]) -> List[LifecycleRow]:
+        rr_stage = market_ctx.get("canonical_rr_stage")
         for seq, row in enumerate(out_rows, start=1):
             row.lifecycle_seq = seq
             row.accepted_reason = str(market_ctx.get("accepted_reason", row.accepted_reason) or row.accepted_reason)
@@ -1222,6 +1228,19 @@ def simulate_candidate(
                 row.order_id = order_id
             if row.status_after in {"POSITION_OPENED", "POSITION_CLOSED"} and row.position_id == "":
                 row.position_id = position_id
+            if (
+                isinstance(rr_stage, Mapping)
+                and rr_stage.get("rr_basis") == "EXPECTED_FILL_RUNTIME_PARITY"
+                and isinstance(rr_stage.get("execution_cost_semantics"), Mapping)
+            ):
+                row.candidate_raw_rr = _sql_nullable_number(rr_stage.get("candidate_rr"))
+                row.executable_raw_rr = _sql_nullable_number(rr_stage.get("executable_raw_rr"))
+                row.remaining_execution_penalty = _sql_nullable_number(
+                    rr_stage.get("remaining_execution_penalty")
+                )
+                row.effective_rr = _sql_nullable_number(rr_stage.get("effective_rr"))
+                row.rr_basis = str(rr_stage.get("rr_basis") or "UNAVAILABLE")
+                row.execution_cost_semantics = rr_stage.get("execution_cost_semantics")
         return out_rows
     rows: List[LifecycleRow] = [
         LifecycleRow(
@@ -1835,7 +1854,7 @@ def process_backtest_result(
             rescue_size_multiplier=rescue_size_multiplier, rescue_effective_rr=effective_rr_value,
             rescue_decision_context=json.dumps(context, sort_keys=True),
         )
-        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True)}
+        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True), "canonical_rr_stage": diagnostics.get("canonical_rr_stage") if isinstance(diagnostics, Mapping) else None}
         sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_size_multiplier, market_ctx=sim_ctx)
         if portfolio_state is not None:
             candidate_notional = portfolio_state.notional_for(entry=rescued.entry, balance=balance, risk_pct=risk_pct, risk_scale=rescue_size_multiplier, notional=mctx.get("notional"))
@@ -2121,7 +2140,13 @@ def process_backtest_result(
         return None
 
     risk_scale = min(1.0, max(0.0, _safe_float(diagnostics.get("risk_scale"), 1.0))) if isinstance(diagnostics, dict) else 1.0
-    sim_ctx = {**dict(mctx), "risk_scale": risk_scale}
+    sim_ctx = {
+        **dict(mctx),
+        "risk_scale": risk_scale,
+        "canonical_rr_stage": (
+            diagnostics.get("canonical_rr_stage") if isinstance(diagnostics, Mapping) else None
+        ),
+    }
     if isinstance(diagnostics, dict):
         for key in ("bypassed_reject_reasons", "disabled_filters", "disabled_filter_bypass_count", "filter_switch_experiment_active"):
             if key in diagnostics:
@@ -2468,11 +2493,15 @@ def _persist_lifecycle_rows(
                 decision=decision,
                 score=row.score,
                 raw_rr=row.rr,
-                candidate_raw_rr=row.rr,
-                executable_raw_rr=None,
-                remaining_execution_penalty=_sql_nullable_number(row.cost_penalty),
-                rr_basis="PLANNED_ENTRY_LEGACY_BACKTEST",
-                execution_cost_semantics="BACKTEST_PLANNED_ENTRY_LEGACY",
+                candidate_raw_rr=(
+                    _sql_nullable_number(row.candidate_raw_rr)
+                    if row.candidate_raw_rr is not None
+                    else row.rr
+                ),
+                executable_raw_rr=_sql_nullable_number(row.executable_raw_rr),
+                remaining_execution_penalty=_sql_nullable_number(row.remaining_execution_penalty),
+                rr_basis=row.rr_basis,
+                execution_cost_semantics=row.execution_cost_semantics,
                 effective_rr=effective_rr,
                 min_effective_rr=min_effective_rr,
                 expectancy=None,

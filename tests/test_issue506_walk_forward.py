@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import csv
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
 from alphaforge.execution import (
     PROVENANCE_ESTIMATED,
+    build_execution_context,
     build_execution_cost_breakdown,
     build_execution_cost_semantics,
 )
@@ -28,6 +32,15 @@ from alphaforge.walk_forward import (
     WalkForwardContract,
     build_validation_report,
 )
+from alphaforge.order import TradingMode, evaluate_signal_decision
+
+
+_BACKTEST_SPEC = importlib.util.spec_from_file_location(
+    "issue506_backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py"
+)
+assert _BACKTEST_SPEC is not None and _BACKTEST_SPEC.loader is not None
+bo = importlib.util.module_from_spec(_BACKTEST_SPEC)
+_BACKTEST_SPEC.loader.exec_module(bo)
 
 
 GIT_SHA = "a" * 40
@@ -403,3 +416,153 @@ def test_backtest_adapter_rejects_legacy_or_incomplete_economics():
                 }
             ]
         )
+
+
+def _recent_stats():
+    return {
+        "last_trade_ts_by_symbol": {},
+        "trades_today_by_symbol": {},
+        "global_trades_today": 0,
+        "symbol_loss_streak": {},
+        "global_loss_streak": 0,
+        "symbol_loss_block_until": {},
+        "global_loss_block_until": 0,
+        "consecutive_sl_count": 0,
+        "consecutive_tp_count": 0,
+        "rolling_winrate": 0.0,
+        "outcomes": [],
+        "accepted_trades_by_day": {},
+        "accepted_trades_by_symbol_day": {},
+        "accepted_trades_by_symbol_regime_day": {},
+        "high_vol_accepted_trades_by_day": {},
+    }
+
+
+def _production_backtest_lifecycle(timestamp_ms):
+    market = {
+        "symbol": "BTCUSDT",
+        "entry": 100.0,
+        "sl": 99.0,
+        "tp": 103.0,
+        "side": "LONG",
+        "score": 9.0,
+        "rr": 3.0,
+        "expectancy": 0.3,
+        "setup_type": "BREAKOUT_UP",
+        "setup_reason": "ISSUE506_REGRESSION",
+        "regime": "TREND",
+        "volatility_regime": "normal",
+        "spread_pct": 0.0005,
+        "expected_slippage_pct": 0.0005,
+        "latency_ms": 50.0,
+        "market_data_latency_ms": 50.0,
+        "liquidity_score": 0.9,
+        "funding_rate_pct": 0.00001,
+        "fee_pct": 0.0004,
+        "orderbook_imbalance": 0.1,
+        "spread_status": "ESTIMATED_BACKTEST",
+        "slippage_status": "ESTIMATED_BACKTEST",
+        "latency_status": "ESTIMATED_BACKTEST",
+        "market_data_latency_status": "ESTIMATED_BACKTEST",
+        "liquidity_status": "ESTIMATED_BACKTEST",
+        "funding_status": "ESTIMATED_BACKTEST",
+        "fee_status": "MODELLED",
+        "orderbook_status": "ESTIMATED_BACKTEST",
+        "volatility_status": "ESTIMATED_BACKTEST",
+    }
+    market["execution_ctx"] = build_execution_context(market)
+    decision = evaluate_signal_decision(
+        market,
+        {"MIN_EFFECTIVE_RR": 1.6},
+        {"balance": 1000.0, "risk_pct": 1.0},
+        market["execution_ctx"],
+        TradingMode.BACKTEST,
+    )
+    assert decision.decision == "ACCEPT"
+    assert decision.diagnostics["canonical_rr_stage"]["rr_basis"] == "EXPECTED_FILL_RUNTIME_PARITY"
+    candles = [
+        bo.Candle(timestamp_ms, 100.0, 100.5, 99.5, 100.0, 1000.0),
+        bo.Candle(timestamp_ms + 60_000, 100.0, 104.0, 99.5, 103.0, 1000.0),
+    ]
+    lifecycle = []
+    candidate = bo.process_backtest_result(
+        "BTCUSDT",
+        candles[0],
+        0,
+        candles,
+        {"status": "executed", "candidate": decision.candidate, "diagnostics": decision.diagnostics},
+        market,
+        1000.0,
+        1.0,
+        lifecycle,
+        [],
+        {},
+        [],
+        _recent_stats(),
+        strategy_guardrail_config=bo.StrategyQualityGuardrailConfig(enabled=False),
+    )
+    assert candidate is not None
+    assert any(row.status_after == "POSITION_CLOSED" for row in lifecycle)
+    return lifecycle
+
+
+def test_production_backtest_persistence_export_feeds_walk_forward_adapter(tmp_path):
+    timestamps = [
+        int(datetime(2026, 1, 15, tzinfo=timezone.utc).timestamp() * 1000),
+        int(datetime(2026, 2, 15, tzinfo=timezone.utc).timestamp() * 1000),
+    ]
+    lifecycle = [
+        row
+        for timestamp_ms in timestamps
+        for row in _production_backtest_lifecycle(timestamp_ms)
+    ]
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'backtest.sqlite'}"
+    bo._persist_lifecycle_rows(
+        lifecycle,
+        database_url=database_url,
+        run_id="issue506-e2e",
+        profile_name="issue506",
+        min_effective_rr=1.6,
+    )
+    decision_rows = bo._decision_evidence_rows(database_url, run_id="issue506-e2e")
+    terminal = [row for row in decision_rows if row["lifecycle_state_after"] == "POSITION_CLOSED"]
+    assert len(terminal) == 2
+    for row in terminal:
+        assert row["candidate_raw_rr"] is not None
+        assert row["executable_raw_rr"] is not None
+        assert row["remaining_execution_penalty"] is not None
+        assert row["rr_basis"] == "EXPECTED_FILL_RUNTIME_PARITY"
+        assert json.loads(row["execution_cost_semantics"])["sign_convention"] == "POSITIVE_IS_ADVERSE"
+
+    evidence_path = tmp_path / "decision_evidence.csv"
+    with evidence_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(decision_rows[0]))
+        writer.writeheader()
+        writer.writerows(decision_rows)
+    evidence_sha = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    contract = _contract()
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA,
+        "contract": {
+            "segments": [asdict(segment) for segment in contract.segments],
+            "universe": asdict(contract.universe),
+        },
+        "decision_evidence_csv": evidence_path.name,
+        "decision_evidence_sha256": evidence_sha,
+        "min_effective_rr": 1.6,
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+    output_path = tmp_path / "report.json"
+
+    report = generate_backtest_walk_forward_report(manifest_path, output_path)
+
+    assert report["historical_validation"] == "PASS"
+    assert report["contract_identity"] == contract.identity
+    assert report["source_artifact"]["sha256"] == evidence_sha
+    assert report["segments"][1]["git_sha"] == GIT_SHA
+    assert report["segments"][1]["config_hash"] == contract.segments[1].config_hash
+    assert report["segments"][1]["data_hash"] == contract.segments[1].data_hash
+    assert report["universe"]["identity"] == contract.universe.identity
+    assert report["promotion_evidence"]["future_paper"] == "REQUIRED_NOT_PROVIDED"
+    assert report["promotion_evidence"]["live_authorized"] is False
