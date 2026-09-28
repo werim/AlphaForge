@@ -675,6 +675,7 @@ def _build_market_ctx(
     candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     liq = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     spread_source = "ACTUAL" if symbol_meta.get("actual_spread_pct") not in (None, "") else "ESTIMATED_BACKTEST"
+    spread_status = "MEASURED" if spread_source == "ACTUAL" else "MODEL_ESTIMATE"
     raw_spread = symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct)
     spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
     base = {
@@ -692,6 +693,7 @@ def _build_market_ctx(
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
         "spread_unit_assumed": spread_unit_assumed,
+        "spread_status": spread_status,
         "spread_source": spread_source,
         "candle_range_pct": candle_range_pct,
         "volatility_pct": candle_range_pct,
@@ -728,6 +730,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     liquidity_score = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     actual_spread_pct = symbol_meta.get("actual_spread_pct")
     spread_source = "ACTUAL" if actual_spread_pct not in (None, "") else "ESTIMATED_BACKTEST"
+    spread_status = "MEASURED" if spread_source == "ACTUAL" else "MODEL_ESTIMATE"
     spread_unit_assumed = "fraction"
     if actual_spread_pct not in (None, ""):
         spread_pct, spread_unit_assumed = normalize_pct_input(actual_spread_pct, field="spread_pct")
@@ -754,6 +757,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     return {
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
+        "spread_status": spread_status,
         "spread_source": spread_source,
         "spread_unit_assumed": spread_unit_assumed,
         "actual_spread_pct": spread_pct if actual_spread_pct not in (None, "") else None,

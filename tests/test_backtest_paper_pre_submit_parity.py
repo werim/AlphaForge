@@ -152,6 +152,8 @@ def test_backtest_offline_funding_unavailable_not_fake_zero():
     prev = bo.Candle(1, 100, 101, 99, 100, 10)
     now = bo.Candle(2, 100, 102, 99, 101, 10)
     ctx = bo._build_market_ctx(now, prev, {}, [prev, now])
+    assert ctx["spread_source"] == "ESTIMATED_BACKTEST"
+    assert ctx["spread_status"] == "MODEL_ESTIMATE"
     assert ctx["funding_rate_pct"] is None
     assert ctx["funding_status"] == "UNAVAILABLE_BACKTEST"
 
