@@ -2306,61 +2306,214 @@ class RuntimeOrchestrator:
             "effective_rr": round(effective_rr, 6),
         }
 
-    def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
-        samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
+    def _build_mode_parity_evidence(
+        self,
+        *,
+        min_sample_count: int = 3,
+    ) -> dict[str, Any]:
+        """Compare protected BACKTEST/PAPER/LIVE_PRECHECK semantics fail closed.
+
+        BACKTEST is intentionally allowed to report incomplete legacy evidence;
+        incomplete is never promoted to parity PASS.  This prevents a pair of
+        healthy-looking PAPER/LIVE rows from proving a three-mode contract that
+        the BACKTEST evidence does not actually satisfy.
+        """
+        samples = list(
+            self._qualification_samples[: max(0, int(min_sample_count))]
+        )
         comparisons: list[dict[str, Any]] = []
         mismatch_count = 0
         missing_field_count = 0
-        compare_fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
+        semantic_violation_count = 0
+        modes = (
+            ExecutionMode.BACKTEST,
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        )
+
         for row in samples:
             sample = dict(row)
             sample_id = str(sample["sample_id"])
-            paper_signal_payload = {
+            execution_ctx = build_execution_context(sample)
+            normalized_market = {
+                **sample,
+                "execution_ctx": execution_ctx,
+            }
+            signal_base = {
                 "signal_id": f"precheck:{sample_id}",
                 "symbol": sample["symbol"],
-                "mode": "PAPER",
                 "side": sample.get("side", "LONG"),
                 "timeframe": sample.get("timeframe", "5m"),
                 "entry_price": float(sample.get("entry", 0.0) or 0.0),
+                "stop_loss": sample.get("sl"),
+                "take_profit": sample.get("tp"),
                 "risk_reward": float(sample.get("rr", 0.0) or 0.0),
+                "setup": sample.get("setup_type", "TREND_CONTINUATION"),
+                "setup_type": sample.get(
+                    "setup_type", "TREND_CONTINUATION"
+                ),
+                "setup_reason": sample.get("setup_reason", "PARITY_FIXTURE"),
+                "regime": sample.get("regime", "TRENDING"),
+                "expectancy": sample.get("expectancy"),
+                "setup_quality": sample.get("setup_quality", 0.9),
             }
-            live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
-            regime_ctx = {"alignment": 0.8}
-            stats_ctx: dict[str, Any] = {}
-            execution_ctx = build_execution_context(sample)
-            normalized_market = {**sample, "execution_ctx": execution_ctx}
-            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**normalized_market, "mode": "PAPER"}, regime_ctx, stats_ctx)
-            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**normalized_market, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
-            missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
-            mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
-            missing_field_count += len(missing)
-            mismatch_count += len(mismatch)
-            comparisons.append({
-                "sample_id": sample_id,
-                "paper": {k: paper_eval.get(k) for k in compare_fields},
-                "live_precheck": {k: live_eval.get(k) for k in compare_fields},
-                "missing_fields": missing,
-                "mismatch_fields": mismatch,
-                "input_snapshot_hash": self._snapshot_hash({"signal": paper_signal_payload, "market": normalized_market, "regime": regime_ctx, "stats": stats_ctx}),
-                "symbol": sample.get("symbol"),
-                "timestamp": canonical_utc_timestamp(sample.get("market_ts")),
-                "execution_context": execution_ctx,
-                "no_submit_verified": True,
-                "parity_result": "PASS" if not missing and not mismatch else "FAIL",
-            })
+            regime_ctx = {
+                "alignment": float(sample.get("regime_alignment", 0.8)),
+                "regime": sample.get("regime", "TRENDING"),
+            }
+            stats_ctx: dict[str, Any] = {
+                "sample_size": int(sample.get("sample_size", 100)),
+                "setup": {},
+                "regime": {},
+                "symbol": {},
+            }
+
+            evaluations: dict[str, dict[str, Any]] = {}
+            projections: dict[str, dict[str, Any]] = {}
+            missing_by_mode: dict[str, list[str]] = {}
+            for mode in modes:
+                key = mode.value.lower()
+                signal_payload = {**signal_base, "mode": mode.value}
+                mode_market = {
+                    **normalized_market,
+                    "mode": mode.value,
+                }
+                evaluation = self._evaluate_pre_submit(
+                    signal_payload,
+                    mode_market,
+                    regime_ctx,
+                    stats_ctx,
+                )
+                evaluations[key] = evaluation
+                projected = project_pre_submit_invariant(evaluation)
+                projections[key] = asdict(projected)
+                missing_by_mode[key] = list(
+                    incomplete_pre_submit_fields(projected)
+                )
+
+            reference = project_pre_submit_invariant(
+                evaluations["backtest"]
+            )
+            mismatch_by_mode: dict[str, list[str]] = {}
+            for key in ("paper", "live_precheck"):
+                observed = project_pre_submit_invariant(evaluations[key])
+                mismatch_by_mode[key] = [
+                    mismatch.field
+                    for mismatch in compare_pre_submit_invariants(
+                        reference, observed
+                    )
+                ]
+
+            sample_missing_count = sum(
+                len(fields) for fields in missing_by_mode.values()
+            )
+            sample_mismatch_count = sum(
+                len(fields) for fields in mismatch_by_mode.values()
+            )
+            missing_field_count += sample_missing_count
+            mismatch_count += sample_mismatch_count
+
+            semantic_error = ""
+            try:
+                assert_pre_submit_invariant_parity(
+                    evaluations["backtest"],
+                    evaluations["paper"],
+                    evaluations["live_precheck"],
+                )
+            except ValueError as exc:
+                semantic_error = str(exc)
+                if sample_missing_count == 0 and sample_mismatch_count == 0:
+                    semantic_violation_count += 1
+
+            comparisons.append(
+                {
+                    "sample_id": sample_id,
+                    "backtest": projections["backtest"],
+                    "paper": projections["paper"],
+                    "live_precheck": projections["live_precheck"],
+                    "missing_fields": missing_by_mode,
+                    "mismatch_fields": mismatch_by_mode,
+                    "semantic_error": semantic_error,
+                    "input_snapshot_hash": self._snapshot_hash(
+                        {
+                            "signal": signal_base,
+                            "market": normalized_market,
+                            "regime": regime_ctx,
+                            "stats": stats_ctx,
+                        }
+                    ),
+                    "symbol": sample.get("symbol"),
+                    "timestamp": canonical_utc_timestamp(
+                        sample.get("market_ts")
+                    ),
+                    "execution_context": execution_ctx,
+                    "no_submit_verified": True,
+                    "parity_result": (
+                        "PASS" if not semantic_error else "FAIL"
+                    ),
+                }
+            )
+
+        enough_samples = len(samples) >= int(min_sample_count)
+        complete = (
+            enough_samples
+            and mismatch_count == 0
+            and missing_field_count == 0
+            and semantic_violation_count == 0
+        )
+        execution_blocking = {
+            "",
+            "UNKNOWN",
+            "UNAVAILABLE",
+            "UNAVAILABLE_BLOCKING",
+            "INVALID_FAKE_ZERO",
+            "INCOMPLETE",
+        }
+        execution_context_complete = all(
+            str(
+                sample.get(mode, {}).get(
+                    "execution_evidence_status", "UNKNOWN"
+                )
+            ).upper()
+            not in execution_blocking
+            for sample in comparisons
+            for mode in ("backtest", "paper", "live_precheck")
+        )
+        rr_breakdown_complete = all(
+            sample.get(mode, {}).get("executable_raw_rr") is not None
+            and sample.get(mode, {}).get(
+                "remaining_execution_penalty"
+            ) is not None
+            and sample.get(mode, {}).get("effective_rr") is not None
+            for sample in comparisons
+            for mode in ("backtest", "paper", "live_precheck")
+        )
         return {
-            "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
+            "evidence_status": "COMPLETE" if complete else "INCOMPLETE",
             "sample_count": len(samples),
             "min_sample_count": int(min_sample_count),
             "mismatch_count": mismatch_count,
             "missing_field_count": missing_field_count,
+            "semantic_violation_count": semantic_violation_count,
             "no_order_submission_verified": True,
             "no_submit_verified": True,
-            "execution_context_complete": all(
-                not execution_context_is_unavailable(c.get("execution_context"))
-                for c in comparisons
+            "execution_context_complete": execution_context_complete,
+            "execution_evidence_status": (
+                "COMPLETE"
+                if execution_context_complete
+                else "INCOMPLETE"
             ),
-            "comparison_fields": list(compare_fields),
+            "effective_rr_penalty_breakdown_complete": (
+                rr_breakdown_complete
+            ),
+            "modes_compared": [mode.value for mode in modes],
+            "comparison_fields": list(
+                project_pre_submit_invariant(
+                    evaluations["paper"]
+                ).__dataclass_fields__.keys()
+            )
+            if evaluations
+            else [],
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
         }
