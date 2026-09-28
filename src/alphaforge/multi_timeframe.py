@@ -493,6 +493,128 @@ def evaluate_mtf_alignment(regime: Mapping[str, Any] | None, setup: Mapping[str,
         },
     }
 
+
+def build_mtf_candidate_context(
+    candles_by_layer: Mapping[str, list[dict[str, Any]]],
+    *,
+    execution_ctx: Mapping[str, Any],
+    decision_ts_ms: int,
+    regime_timeframe: str,
+    setup_timeframe: str,
+    execution_timeframe: str,
+    state_direction_resolution_enabled: bool = False,
+    regime_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD,
+    setup_direction_threshold: float = DEFAULT_SETUP_DIRECTION_THRESHOLD,
+    execution_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD,
+    guided_signal_generation_enabled: bool = True,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Build the exchange-independent closed-candle MTF candidate contract.
+
+    Callers own data acquisition. This function accepts only normalized candle
+    dictionaries and independently drops evidence closing after the decision
+    timestamp, so PAPER and BACKTEST can share generation without sharing I/O.
+    """
+    values: dict[str, list[dict[str, Any]]] = {}
+    for layer in ("regime", "setup", "execution"):
+        bounded: list[dict[str, Any]] = []
+        rows = candles_by_layer.get(layer, [])
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                close_ts = row.get("close_ts")
+                if isinstance(close_ts, int) and close_ts <= decision_ts_ms:
+                    bounded.append(dict(row))
+        values[layer] = sorted(bounded, key=lambda candle: int(candle.get("open_ts", 0)))
+
+    regime = build_regime_context(
+        values["regime"], regime_timeframe,
+        direction_threshold=regime_direction_threshold,
+    )
+    setup = build_setup_context(
+        values["setup"], setup_timeframe,
+        regime=regime if guided_signal_generation_enabled else None,
+        direction_threshold=setup_direction_threshold,
+    )
+    execution = build_execution_context(
+        values["execution"], execution_timeframe, execution_ctx,
+        trade_side=regime.get("direction") if guided_signal_generation_enabled else None,
+        direction_threshold=execution_direction_threshold,
+    )
+    alignment = evaluate_mtf_alignment(
+        regime,
+        setup,
+        execution,
+        decision_ts_ms=decision_ts_ms,
+        state_direction_resolution_enabled=state_direction_resolution_enabled,
+    )
+    generation: dict[str, Any] = {
+        "mode": "LEGACY_VETO",
+        "evidence_status": "NOT_APPLICABLE",
+        "candidate": None,
+        "reason": None,
+    }
+    if guided_signal_generation_enabled:
+        candidate: dict[str, Any] = {}
+        geometry_reason: str | None = None
+        if alignment.get("aligned") and values["execution"]:
+            phase = str(setup.get("phase") or "INVALID")
+            entry_zone = setup.get("entry_zone")
+            entry = values["execution"][-1].get("close")
+            within_entry_zone = (
+                isinstance(entry_zone, (list, tuple))
+                and len(entry_zone) == 2
+                and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in entry_zone)
+                and isinstance(entry, (int, float))
+                and math.isfinite(float(entry))
+                and float(entry_zone[0]) <= float(entry) <= float(entry_zone[1])
+            )
+            if not within_entry_zone:
+                geometry_reason = "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"
+            else:
+                candidate, geometry_reason = build_structural_geometry_with_diagnostics(
+                    entry=entry,
+                    side=str(regime.get("direction") or ""),
+                    setup_type=str(setup.get("setup_type") or "REGIME_GUIDED"),
+                    setup_phase=phase,
+                    structure=setup,
+                    setup_timeframe=setup_timeframe,
+                    execution_timeframe=execution_timeframe,
+                    entry_source="execution_close_within_setup_entry_zone",
+                )
+        elif alignment.get("aligned"):
+            geometry_reason = "KLINE_INSUFFICIENT_ROWS"
+        generation = {
+            "mode": "REGIME_GUIDED",
+            "evidence_status": "COMPLETE" if candidate else "INCOMPLETE",
+            "candidate": candidate or None,
+            "reason": geometry_reason,
+            "trade_side_source": "1h_regime",
+            "setup_phase_source": "15m_regime_guided",
+            "timing_source": "1m_execution_confirmation",
+            "geometry_source": "15m_setup_structure",
+        }
+        if alignment.get("aligned") and not candidate:
+            alignment = {
+                **alignment,
+                "aligned": False,
+                "direction": None,
+                "reasons": list(dict.fromkeys([
+                    *(alignment.get("reasons") or []),
+                    geometry_reason or "MTF_GUIDED_GEOMETRY_UNAVAILABLE",
+                ])),
+            }
+    return {
+        "regime": regime,
+        "setup": setup,
+        "execution": execution,
+        "alignment": alignment,
+        "generation": generation,
+        "decision_timestamp": _iso(decision_ts_ms),
+        "provider": provider,
+    }
+
 @dataclass
 class BinanceMTFProvider:
     base_url: str = "https://fapi.binance.com"
@@ -523,62 +645,17 @@ class BinanceMTFProvider:
             values = dict(await asyncio.gather(*(one(layer, tf) for layer, tf in layers)))
         except Exception:
             values = {}
-        regime = build_regime_context(values.get("regime", []), regime_timeframe, direction_threshold=self.regime_direction_threshold)
-        setup = build_setup_context(values.get("setup", []), setup_timeframe,
-            regime=regime if self.guided_signal_generation_enabled else None,
-            direction_threshold=self.setup_direction_threshold)
-        # Runtime's canonical execution builder owns normalization and modelling.
-        # Do not re-read raw scanner aliases or manufacture a second cost model.
-        execution = build_execution_context(values.get("execution", []), execution_timeframe, execution_ctx,
-            trade_side=regime.get("direction") if self.guided_signal_generation_enabled else None,
-            direction_threshold=self.execution_direction_threshold)
-        alignment = evaluate_mtf_alignment(
-            regime,
-            setup,
-            execution,
+        return build_mtf_candidate_context(
+            values,
+            execution_ctx=execution_ctx,
             decision_ts_ms=decision_ts_ms,
+            regime_timeframe=regime_timeframe,
+            setup_timeframe=setup_timeframe,
+            execution_timeframe=execution_timeframe,
             state_direction_resolution_enabled=state_direction_resolution_enabled,
+            regime_direction_threshold=self.regime_direction_threshold,
+            setup_direction_threshold=self.setup_direction_threshold,
+            execution_direction_threshold=self.execution_direction_threshold,
+            guided_signal_generation_enabled=self.guided_signal_generation_enabled,
+            provider="BINANCE_FUTURES_CLOSED_KLINES",
         )
-        generation: dict[str, Any] = {"mode": "LEGACY_VETO", "evidence_status": "NOT_APPLICABLE",
-                                      "candidate": None, "reason": None}
-        if self.guided_signal_generation_enabled:
-            candidate: dict[str, Any] = {}
-            geometry_reason: str | None = None
-            if alignment.get("aligned") and values.get("execution"):
-                phase = str(setup.get("phase") or "INVALID")
-                entry_zone = setup.get("entry_zone")
-                entry = values["execution"][-1].get("close")
-                within_entry_zone = (
-                    isinstance(entry_zone, (list, tuple)) and len(entry_zone) == 2
-                    and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in entry_zone)
-                    and isinstance(entry, (int, float)) and math.isfinite(float(entry))
-                    and float(entry_zone[0]) <= float(entry) <= float(entry_zone[1])
-                )
-                if not within_entry_zone:
-                    geometry_reason = "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"
-                else:
-                    candidate, geometry_reason = build_structural_geometry_with_diagnostics(
-                        entry=entry,
-                        side=str(regime.get("direction") or ""),
-                        setup_type=str(setup.get("setup_type") or "REGIME_GUIDED"),
-                        setup_phase=phase,
-                        structure=setup,
-                        setup_timeframe=setup_timeframe,
-                        execution_timeframe=execution_timeframe,
-                        entry_source="execution_close_within_setup_entry_zone",
-                    )
-            elif alignment.get("aligned"):
-                geometry_reason = "KLINE_INSUFFICIENT_ROWS"
-            generation = {"mode": "REGIME_GUIDED",
-                          "evidence_status": "COMPLETE" if candidate else "INCOMPLETE",
-                          "candidate": candidate or None, "reason": geometry_reason,
-                          "trade_side_source": "1h_regime", "setup_phase_source": "15m_regime_guided",
-                          "timing_source": "1m_execution_confirmation",
-                          "geometry_source": "15m_setup_structure"}
-            if alignment.get("aligned") and not candidate:
-                alignment = {**alignment, "aligned": False, "direction": None,
-                    "reasons": list(dict.fromkeys([*(alignment.get("reasons") or []),
-                                                    geometry_reason or "MTF_GUIDED_GEOMETRY_UNAVAILABLE"]))}
-        return {"regime": regime, "setup": setup, "execution": execution,
-                "alignment": alignment, "generation": generation,
-                "decision_timestamp": _iso(decision_ts_ms), "provider": "BINANCE_FUTURES_CLOSED_KLINES"}
