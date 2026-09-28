@@ -5961,6 +5961,7 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         max_latency_ms=cfg.runtime.max_latency_ms,
         paper_fee_bps=cfg.runtime.paper_fee_bps,
         paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms,
+        paper_candidate_notional=cfg.runtime.paper_candidate_notional,
         market_data_base_url=cfg.exchange.binance.market_data_base_url,
         regime_timeframe=cfg.runtime.regime_timeframe,
         setup_timeframe=cfg.runtime.setup_timeframe,
