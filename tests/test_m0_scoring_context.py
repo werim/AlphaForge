@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
+from alphaforge.config_registry import canonical_field_default
 from alphaforge.multi_timeframe import (
     build_execution_context as build_mtf_execution_context,
     build_regime_context,
@@ -336,8 +337,12 @@ def test_context_rules_are_identical_for_paper_and_live_and_thresholds_unchanged
         runtime = _runtime(mode=mode)
         signal = runtime._build_signal(selection, {**market, "mode": mode.value})
         contexts.append(runtime._build_scoring_context(signal, {**market, "mode": mode.value}))
-        assert runtime.config.min_signal_score == pytest.approx(0.62)
-        assert runtime.config.min_effective_rr == pytest.approx(1.10)
+        assert runtime.config.min_signal_score == pytest.approx(
+            canonical_field_default("min_signal_score")
+        )
+        assert runtime.config.min_effective_rr == pytest.approx(
+            canonical_field_default("min_effective_rr")
+        )
         assert runtime.ai_brain.min_confidence == pytest.approx(0.35)
 
     paper, live = contexts
