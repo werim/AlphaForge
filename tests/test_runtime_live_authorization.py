@@ -41,7 +41,7 @@ def _runtime() -> tuple[RuntimeOrchestrator, _Adapter, _ControlStore]:
         ai_brain=None,
         market_scanner=None,
         real_execution_adapter=adapter,
-        persistence_engine=init_db("sqlite+pysqlite:///:memory:"),
+        execution_ownership_engine=init_db("sqlite+pysqlite:///:memory:"),
         control_store=control,  # type: ignore[arg-type]
     )
     return runtime, adapter, control
