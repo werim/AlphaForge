@@ -65,7 +65,73 @@ def _seed_valid(session: Session) -> None:
 
 
 def _parity() -> dict[str, object]:
-    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True, "effective_rr_penalty_breakdown_complete": True}
+    return {
+        "evidence_status": "COMPLETE",
+        "sample_count": 5,
+        "min_sample_count": 3,
+        "mismatch_count": 0,
+        "missing_field_count": 0,
+        "semantic_violation_count": 0,
+        "no_order_submission_verified": True,
+        "no_submit_verified": True,
+        "execution_context_complete": True,
+        "execution_evidence_status": "COMPLETE",
+        "effective_rr_penalty_breakdown_complete": True,
+        "modes_compared": ["BACKTEST", "PAPER", "LIVE_PRECHECK"],
+        "comparison_fields": [
+            "decision",
+            "primary_reject_reason",
+            "failed_gates",
+            "score",
+            "candidate_rr",
+            "executable_raw_rr",
+            "remaining_execution_penalty",
+            "effective_rr",
+            "rr_basis",
+            "execution_cost_semantics",
+            "threshold_provenance",
+            "execution_evidence_status",
+            "portfolio_decision",
+            "original_notional",
+            "risk_scale",
+            "effective_notional",
+            "stop_distance_basis",
+            "geometry_status",
+            "geometry_source",
+            "lifecycle_pre_submit_terminal_state",
+        ],
+    }
+
+
+def test_mode_parity_rejects_legacy_weak_contract() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    weak = _parity()
+    weak.pop("modes_compared")
+    weak.pop("comparison_fields")
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(weak, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert "MODE_PARITY_REQUIRED_MODES_MISSING" in checks["mode_parity"].details
+
+
+def test_mode_parity_rejects_missing_protected_field_contract() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    incomplete = _parity()
+    incomplete["comparison_fields"] = [
+        field
+        for field in incomplete["comparison_fields"]
+        if field != "risk_scale"
+    ]
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(incomplete, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert "MODE_PARITY_PROTECTED_FIELDS_MISSING:risk_scale" in checks["mode_parity"].details
 
 
 def _reconciliation() -> dict[str, object]:
