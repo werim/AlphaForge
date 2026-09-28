@@ -44,7 +44,7 @@ def _runtime(
         ai_brain=None,
         market_scanner=None,
         real_execution_adapter=adapter,
-        persistence_engine=engine,
+        execution_ownership_engine=engine,
     )
 
 
