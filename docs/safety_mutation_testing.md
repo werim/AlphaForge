@@ -25,6 +25,13 @@ each execution hard gate, expected-fill geometry, entry-slippage accounting,
 campaign/run/release and readiness mode scope, diagnostic shadow authority,
 accepted-position candle-window completeness, reconciliation CLEAN, final
 kill-switch reread, runtime portfolio-risk inputs, and future market timestamps.
+Issue #498 also protects cross-component economic/evidence relationships:
+risk-scale must reach final sizing; stop risk must use executable expected-fill
+geometry; missing execution or drawdown measurements must remain fail-closed;
+candidate and executable RR stages must not swap in persistence; protected
+sizing fields must remain in mode parity; and semantic validation must reject
+identically wrong surfaces. The missing-execution mutation is killed through the
+full qualification path, not by calling the helper alone.
 The coverage is intentionally targeted; it is not a global mutation score or
 a claim of LIVE readiness. P2-C seeded property contracts live in
 `tests/test_issue421_safety_properties.py`. P2-D replays all 23 frozen golden
