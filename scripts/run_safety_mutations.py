@@ -75,7 +75,7 @@ def mutations() -> list[Mutation]:
         Mutation("missing_execution_metrics_pass", "src/alphaforge/burnin_qualification.py",
                  "if missing or invalid_numeric:\n            evidence_gaps",
                  'if missing or invalid_numeric:\n            return "PASS"\n        if False:\n            evidence_gaps',
-                 "tests/test_phase7_qualification.py::test_execution_metrics_missing_measurements_are_insufficient"),
+                 "tests/test_phase7_qualification.py::test_execution_metrics_one_missing_mandatory_field_blocks_canary"),
         Mutation("missing_drawdown_coalesced_resolved", "src/alphaforge/burnin_qualification.py",
                  'if missing:\n                gaps.append(f"{event_id}:" + ",".join(sorted(set(missing))))\n                continue\n            valid_rows.append({',
                  'if False:\n                gaps.append(f"{event_id}:" + ",".join(sorted(set(missing))))\n                continue\n            valid_rows.append({',
