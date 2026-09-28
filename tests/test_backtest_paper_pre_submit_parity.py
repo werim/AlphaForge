@@ -173,10 +173,9 @@ def test_accepted_shared_decision_does_not_emit_order_audit():
     assert storage["audit"] == []
 
 
-def test_shared_decision_boundary_score_varies_from_market_snapshot_shape():
+def test_raw_backtest_geometry_diagnostic_cannot_masquerade_as_decision_score():
     import importlib.util
     from pathlib import Path
-    from alphaforge.order import evaluate_signal_decision
 
     spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
     bo = importlib.util.module_from_spec(spec)
@@ -190,10 +189,9 @@ def test_shared_decision_boundary_score_varies_from_market_snapshot_shape():
     calm_ctx = bo._build_market_ctx(calm_now, calm_prev, {"quoteVolume": 100000000, "fundingRate": 0.00001}, [calm_prev, calm_now])
     breakout_ctx = bo._build_market_ctx(breakout_now, breakout_prev, {"quoteVolume": 100000000, "fundingRate": 0.00001}, [breakout_prev, breakout_now])
 
-    calm = evaluate_signal_decision(calm_ctx, {}, {"balance": 1000, "risk_pct": 1}, calm_ctx.get("execution_ctx"), TradingMode.BACKTEST)
-    breakout = evaluate_signal_decision(breakout_ctx, {}, {"balance": 1000, "risk_pct": 1}, breakout_ctx.get("execution_ctx"), TradingMode.BACKTEST)
-    assert calm_ctx["score"] != breakout_ctx["score"]
-    assert calm.score != breakout.score
+    assert calm_ctx["legacy_geometry_score"] != breakout_ctx["legacy_geometry_score"]
+    assert "score" not in calm_ctx and "score" not in breakout_ctx
+    assert "expectancy" not in calm_ctx and "expectancy" not in breakout_ctx
 
 
 def test_backtest_scan_fails_closed_when_runtime_would_ignore_boundary(monkeypatch):

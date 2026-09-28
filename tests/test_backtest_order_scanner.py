@@ -43,9 +43,13 @@ def test_scan_creates_virtual_candidate(monkeypatch):
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
     monkeypatch.setattr(bo, "_historical_authoritative_score", lambda *_args, **_kwargs: {"score": .9, "expectancy": .2, "expectancy_bucket": "HIGH", "accepted": True, "reject_reason": "", "diagnostics": {}})
     candles = [bo.Candle(1, 104, 104, 103.6, 104.0, 100), bo.Candle(2, 104, 104, 103.6, 104.0, 100), bo.Candle(3, 100.0, 105.5, 104.5, 105.0, 100)]
-    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}})
+    context = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}}
+    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, context)
     assert c is not None
-    assert c.score > 0
+    assert c.score == pytest.approx(.9)
+    assert context["market_ctx"]["score"] == pytest.approx(.9)
+    assert context["market_ctx"]["expectancy"] == pytest.approx(.2)
+    assert context["market_ctx"]["legacy_geometry_score"] != pytest.approx(.9)
 
 
 def test_scan_with_portfolio_state_uses_shared_decision_candidate():
@@ -194,10 +198,13 @@ def test_same_candle_ambiguity_is_conservative_sl():
     assert rows[-1].close_reason == "SL_HIT"
 
 
-def test_score_varies_by_market_conditions():
+def test_legacy_geometry_diagnostic_is_variable_but_not_decision_authority():
     low = bo._build_market_ctx(bo.Candle(3, 100, 101, 99.5, 100.2, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     high = bo._build_market_ctx(bo.Candle(3, 100, 105, 99.5, 104.8, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
-    assert high["score"] != low["score"]
+    assert high["legacy_geometry_score"] != low["legacy_geometry_score"]
+    assert high["legacy_geometry_expectancy"] != low["legacy_geometry_expectancy"]
+    assert "score" not in high and "score" not in low
+    assert "expectancy" not in high and "expectancy" not in low
 
 
 def test_build_market_ctx_can_emit_short_candidate():

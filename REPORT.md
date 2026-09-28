@@ -1,3 +1,19 @@
+# #455 BACKTEST canonical score authority isolation — 2026-09-28
+
+## Why / root cause
+
+`_build_market_ctx(...)` published a local breakout-strength heuristic under the canonical `score` and derived `expectancy` names. `scan_symbol_backtest(...)` replaced both with historical AIBrain output before production decision evaluation, but the raw builder contract still made the diagnostic values look authoritative and allowed direct consumers or tests to treat them as decision evidence.
+
+## Change / behavior
+
+The raw builder now exposes those values only as `legacy_geometry_score`, `legacy_geometry_expectancy`, and `legacy_geometry_expectancy_bucket`. Canonical `score`, `expectancy`, and `expectancy_bucket` are absent until `_historical_authoritative_score(...)` returns AIBrain evidence, after which the scanner installs them before both `evaluate_signal_decision(...)` and `run_order_cycle(...)`. A scanner regression proves the runtime candidate and market context receive the AIBrain value, while raw-builder regressions prove the legacy diagnostic cannot masquerade as decision authority.
+
+No score threshold, scoring formula, geometry, RR, execution-cost gate, lifecycle transition, persistence/export shape, PAPER/LIVE path, or authorization behavior changed. No schema migration, backfill, active campaign access, or historical evidence mutation occurred.
+
+## Validation / risks / recommendation
+
+Focused builder, scanner, shared-boundary, and historical AIBrain scoring tests pass. Adjacent BACKTEST tests, compile/diff checks, PR CI, and exact merged-dev CI remain required. This resolves the legacy-score sub-scope of #455 but does not close it: shared pure 1h/15m/1m MTF candidate generation remains unresolved. LIVE remains NOT READY.
+
 # #455 BACKTEST estimated-spread provenance correction — 2026-09-28
 
 ## Why / root cause
