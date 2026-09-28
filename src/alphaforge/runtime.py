@@ -647,7 +647,7 @@ class RuntimeOrchestrator:
     ) -> dict[str, Any]:
         """Load only the expectancy statistics already consumed by AIBrain."""
         stats: dict[str, Any] = {"setup": {}, "regime": {}, "symbol": {}, "sample_size": 0}
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return stats
         keys = (
@@ -960,7 +960,7 @@ class RuntimeOrchestrator:
             return None
 
     def _load_recovery_state(self) -> None:
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             self._recovery_required = True; self._fail_closed_reason = "RUNTIME_DB_UNAVAILABLE"; return
         provider = self.live_reconciliation_provider or self.exchange_snapshot_provider
@@ -1140,7 +1140,7 @@ class RuntimeOrchestrator:
         campaign_id = campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         if not campaign_id:
             return
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_UNAVAILABLE"
             raise RuntimeError(self._fail_closed_reason)
@@ -1234,7 +1234,7 @@ class RuntimeOrchestrator:
     def _start_or_resume_burnin_run(self) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK} or self._burnin_run_id:
             return
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             self._burnin_evidence_incomplete = True
             if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
@@ -1601,7 +1601,7 @@ class RuntimeOrchestrator:
     def _persist_burnin_periodic_metrics(self) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK} or not self._burnin_run_id:
             return
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return
         now = canonical_utc_timestamp()
@@ -1655,7 +1655,7 @@ class RuntimeOrchestrator:
         if reason == "periodic" and time.time() - self._last_burnin_snapshot_ts < self.config.phase7_burnin_snapshot_interval_sec:
             return
         self._persist_burnin_periodic_metrics()
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             self._burnin_evidence_incomplete = True
             return
@@ -1682,7 +1682,7 @@ class RuntimeOrchestrator:
     def _finalize_burnin_run(self, *, status: str) -> None:
         if not self._burnin_run_id:
             return
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return
         try:
@@ -1727,7 +1727,7 @@ class RuntimeOrchestrator:
             await self._reject_real_live_in_phase6()
         self._live_order_submission_enabled = False
         self._mutation_trap_active = True
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
         readiness_campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
@@ -4020,7 +4020,7 @@ class RuntimeOrchestrator:
                 "valid": True,
                 "reason": "LOCAL_EPHEMERAL_ISOLATED",
             }
-        engine = self._resolve_persistence_engine()
+        engine = self._resolve_execution_ownership_engine()
         if engine is None or not self._execution_account_scope:
             return {
                 **identity,
@@ -4448,7 +4448,7 @@ class RuntimeOrchestrator:
                 "risk_state_missing_fields": missing,
             }
 
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             missing.append("persistence_engine")
             return {
@@ -4689,7 +4689,7 @@ class RuntimeOrchestrator:
     def _sync_resolved_paper_positions(self) -> None:
         if self.config.execution_mode != ExecutionMode.PAPER or not self._campaign_id:
             return
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return
         with engine.connect() as conn:
@@ -4702,7 +4702,7 @@ class RuntimeOrchestrator:
             self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_CLOSED.value
 
     async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> None:
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return
         from alphaforge.persistence import save_order_decision
@@ -5499,7 +5499,7 @@ class RuntimeOrchestrator:
         """
         if self.config.execution_mode is not ExecutionMode.PAPER:
             return False
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return False
         try:
@@ -5570,7 +5570,7 @@ class RuntimeOrchestrator:
                   else self._canonical_setup_reject_ids)
         if setup_identity in memory:
             return True
-        engine = self._resolve_execution_ownership_engine()
+        engine = self._resolve_persistence_engine()
         if engine is None:
             return False
         observation_id = self._setup_observation_id(setup_identity, normalized)
