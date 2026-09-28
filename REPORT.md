@@ -1,3 +1,19 @@
+# #498 cross-component economic/evidence mutation protection — 2026-09-28
+
+## Why / root cause
+
+The existing mutation gate protected local guards but could remain green when relationships between production components regressed. The uncovered contracts were risk-scale consumption, expected-fill stop basis, missing execution and drawdown evidence, explicit RR stages, protected sizing parity, and internal semantic validation.
+
+## Change / behavior
+
+`scripts/run_safety_mutations.py` adds six missing mutations to the already-present risk-scale mutation, completing all seven #498 requirements. Each mutation changes a real production boundary in a disposable copy and is paired with a production-path regression. `tests/test_issue498_cross_component_mutations.py` protects the required manifest and source/test routing. The PR workflow runs that manifest test before the mutation runner.
+
+Production runtime behavior is unchanged. No thresholds, scoring, cost formulas, sizing rules, stop policy, decision authority, or LIVE gates changed. There is no lifecycle, schema, persistence, export, migration, compatibility, campaign, or historical-evidence impact.
+
+## Validation / risks / recommendation
+
+The mutation runner passed with 32 KILLED, 0 SURVIVED, 0 ERROR across 21 baseline nodes. Focused manifest, compile, diff, and exact-head CI are required before merge. The gate remains targeted rather than exhaustive; it proves the named relationships are test-detectable, not that every possible cross-component mutation is covered. LIVE remains NOT READY. Push recommendation: open a focused PR, qualify its exact SHA, and merge only when required checks pass.
+
 # #421 P2-D/P2-E completion and P2-F documentation consistency — 2026-09-24
 
 ## Why / root cause

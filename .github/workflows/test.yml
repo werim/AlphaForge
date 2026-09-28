@@ -172,7 +172,9 @@ jobs:
           pytest -q tests/test_live_readiness.py -k "phase3_execution_gate_blocks_when_each_required_check_fails or final_gate_missing_each_individual_gate_blocks_real_orders"
 
       - name: Protected safety mutation gate
-        run: python scripts/run_safety_mutations.py
+        run: |
+          pytest -q tests/test_issue498_cross_component_mutations.py
+          python scripts/run_safety_mutations.py
 
       - name: Run offline backtest
         run: |

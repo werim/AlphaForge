@@ -1,3 +1,23 @@
+# #498 cross-component safety mutation gate — 2026-09-28
+
+### Added
+- Six cross-component mutations covering expected-fill stop risk, missing execution and drawdown evidence, RR-stage persistence, protected sizing parity, and semantic-validation bypass; together with the existing risk-scale mutation, all seven #498 cases are CI-enforced.
+- A manifest regression that binds every required mutation to its production source and focused production-path test.
+### Changed
+- The protected mutation CI step now verifies the #498 manifest before running disposable mutations.
+### Fixed
+- False confidence where local-guard mutations passed while economic/evidence relationships between components were not mutation-tested.
+### Removed
+- None.
+### Breaking Changes
+- None. Production runtime, lifecycle, schema, persistence, exports, thresholds, campaigns, and historical evidence are unchanged.
+### Known Issues
+- Mutation coverage is targeted, not exhaustive. Exact-head CI remains required; LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
 # #421 P2-D/P2-E completion and P2-F current-state cleanup — 2026-09-24
 
 ### Added
@@ -15,10 +35,6 @@
 - None. No production threshold, lifecycle, schema, export, migration, cost or LIVE-authorization change.
 ### Known Issues
 - Fresh FAST and public six-hour SOAK must pass on the exact final `dev` SHA before #421 is complete. LIVE NOT READY.
-
-## Historical changelog entries
-
-Entries below preserve the repository state at the time of each change.
 
 # #421 P2-D full-chain replay expansion — 2026-09-24
 
