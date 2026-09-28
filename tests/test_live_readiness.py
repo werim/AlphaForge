@@ -103,6 +103,37 @@ def _parity() -> dict[str, object]:
     }
 
 
+def test_mode_parity_rejects_legacy_weak_contract() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    weak = _parity()
+    weak.pop("modes_compared")
+    weak.pop("comparison_fields")
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(weak, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert "MODE_PARITY_REQUIRED_MODES_MISSING" in checks["mode_parity"].details
+
+
+def test_mode_parity_rejects_missing_protected_field_contract() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    incomplete = _parity()
+    incomplete["comparison_fields"] = [
+        field
+        for field in incomplete["comparison_fields"]
+        if field != "risk_scale"
+    ]
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(incomplete, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert "MODE_PARITY_PROTECTED_FIELDS_MISSING:risk_scale" in checks["mode_parity"].details
+
+
 def _reconciliation() -> dict[str, object]:
     return {"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0, "exchange_connectivity_healthy": True, "authenticated": True}
 
