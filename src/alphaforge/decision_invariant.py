@@ -399,7 +399,12 @@ def compare_pre_submit_invariants(
     return tuple(mismatches)
 
 
-def _incomplete_fields(value: PreSubmitInvariant) -> tuple[str, ...]:
+def incomplete_pre_submit_fields(
+    value: PreSubmitInvariant | Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return missing protected authority fields for one pre-submit surface."""
+    if isinstance(value, Mapping):
+        value = project_pre_submit_invariant(value)
     missing: list[str] = []
     for field in (
         "score", "candidate_rr", "executable_raw_rr",
@@ -436,7 +441,7 @@ def assert_pre_submit_invariant_parity(
 
     assert_pre_submit_semantics(reference, numeric_abs_tol=numeric_abs_tol)
     expected = project_pre_submit_invariant(reference)
-    expected_missing = _incomplete_fields(expected)
+    expected_missing = incomplete_pre_submit_fields(expected)
     if expected_missing:
         raise ValueError(
             "DECISION_PARITY_EVIDENCE_INCOMPLETE: " + ",".join(expected_missing)
@@ -444,7 +449,7 @@ def assert_pre_submit_invariant_parity(
     for payload in surfaces:
         assert_pre_submit_semantics(payload, numeric_abs_tol=numeric_abs_tol)
         observed = project_pre_submit_invariant(payload)
-        observed_missing = _incomplete_fields(observed)
+        observed_missing = incomplete_pre_submit_fields(observed)
         if observed_missing:
             raise ValueError(
                 "DECISION_PARITY_EVIDENCE_INCOMPLETE: " + ",".join(observed_missing)
