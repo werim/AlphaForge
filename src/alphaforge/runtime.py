@@ -13,7 +13,7 @@ import time
 import uuid
 import subprocess
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Protocol
@@ -27,6 +27,7 @@ from alphaforge.order import (
     OrderRejection,
     TradingMode,
     build_order_candidate,
+    evaluate_signal_decision,
     evaluate_trade_quality,
     validate_live_order_authorization,
 )
@@ -48,6 +49,8 @@ from alphaforge.execution import (
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.decision_invariant import (
     assert_pre_submit_invariant_parity,
+    compare_pre_submit_invariants,
+    incomplete_pre_submit_fields,
     project_pre_submit_invariant,
 )
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
