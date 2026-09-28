@@ -1,13 +1,20 @@
+# AlphaForge 0.1.0 — #455 shared MTF candidate generation — 2026-09-28
+
+- Current phase: BACKTEST and PAPER now share one pure, exchange-independent 1h/15m/1m candidate builder. BACKTEST supplies only complete closed 1m-derived layers at or before the decision timestamp; future candles are discarded.
+- Runtime maturity/alignment: regime, setup phase, execution confirmation, structural entry/SL/TP/raw RR, normalized MTF scoring inputs, and AIBrain authority now share the PAPER path. Historical latency/orderbook evidence is not invented: incomplete MTF evidence rejects before scoring with null score and explicit `NOT_SCORED_MTF_REJECT`. PAPER/LIVE authorization and thresholds are unchanged.
+- Lifecycle/persistence: MTF rejects retain canonical `SIGNAL_CREATED -> SIGNAL_REJECTED` evidence and concrete reasons; unscored rows persist null rather than fake zero. Existing schema/export shapes remain compatible; no migration, backfill, historical rewrite, or campaign mutation.
+- Validation: 208 focused MTF, BACKTEST scanner, lifecycle/export, no-look-ahead, scoring, and parity tests plus compile/diff checks pass. Known risk: exchange-native higher-timeframe candles should be compared against 1m aggregation in external qualification; unavailable historical execution evidence correctly reduces candidate availability. Last audit: 2026-09-28. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
 # AlphaForge 0.1.0 — #455 BACKTEST score authority isolation — 2026-09-28
 
 - Current phase: bounded #455 authority cleanup; BACKTEST/PAPER MTF candidate-generation parity remains open.
 - Runtime maturity/alignment: raw breakout geometry now exposes its heuristic only as `legacy_geometry_score` / `legacy_geometry_expectancy` diagnostics. Only historical AIBrain output populates canonical `score`, `expectancy`, and `expectancy_bucket` before the shared decision boundary. PAPER/LIVE behavior, thresholds, geometry, and authorization are unchanged.
 - Lifecycle/persistence: accepted/rejected lifecycle and export shapes are unchanged; canonical persisted decision evidence remains AIBrain-derived. No schema, migration, backfill, historical-row rewrite, or campaign mutation.
 - Validation: focused authority and historical-scoring regressions pass; adjacent BACKTEST verification and exact-head CI remain required. Known critical risk: BACKTEST still uses legacy breakout geometry rather than PAPER's pure 1h/15m/1m MTF candidate-generation semantics. Last audit: 2026-09-28. LIVE NOT READY.
-
-## Historical version entries
-
-Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
 
 # AlphaForge 0.1.0 — #455 BACKTEST spread provenance — 2026-09-28
 

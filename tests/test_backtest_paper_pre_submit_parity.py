@@ -194,6 +194,64 @@ def test_raw_backtest_geometry_diagnostic_cannot_masquerade_as_decision_score():
     assert "expectancy" not in calm_ctx and "expectancy" not in breakout_ctx
 
 
+def test_backtest_uses_shared_paper_mtf_geometry_without_lookahead():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
+    bo = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bo)
+
+    start = 3_600_000
+    source = []
+    for minute in range(24 * 60):
+        hour = minute // 60
+        if hour < 20:
+            close = 120.0 - hour * .8 - (minute % 60) * (.2 / 59)
+        else:
+            quarter = (minute - 20 * 60) // 15
+            close = 100.0 + quarter * .1 + (minute % 15) * (.04 / 14)
+        source.append(bo.Candle(
+            start + minute * 60_000, close, close + .08, close - .08, close, 100.0,
+        ))
+    for offset, close in enumerate([102.15, 102.05, 101.95, 101.85, 101.75, 101.65, 101.55, 101.45]):
+        candle = source[-8 + offset]
+        source[-8 + offset] = bo.Candle(
+            candle.timestamp, close + .02, close + .08, close - .08, close, 100.0,
+        )
+
+    canonical = {
+        "spread_pct": .0002, "expected_slippage_pct": .0004,
+        "market_data_latency_ms": 20.0, "liquidity_score": .9,
+    }
+    context = {
+        "symbol_meta": {"quoteVolume": 100_000_000.0},
+        "mtf_source_candles": source,
+        "mtf_execution_ctx": canonical,
+        "simulation_timeframe": "1m",
+        "regime_timeframe": "1h", "setup_timeframe": "15m", "execution_timeframe": "1m",
+    }
+    bo.scan_symbol_backtest("BTCUSDT", source, len(source) - 1, context)
+    market = context["market_ctx"]
+    paper_candidate = market["mtf"]["generation"]["candidate"]
+
+    assert market["mtf"]["provider"] == "BACKTEST_HISTORICAL_CLOSED_1M"
+    assert market["mtf"]["alignment"]["aligned"] is True
+    for field in ("side", "setup_type", "entry", "sl", "tp", "rr"):
+        assert market[field] == paper_candidate[field]
+
+    future = bo.Candle(
+        source[-1].timestamp + 60_000, 1.0, 2_000.0, .1, 1_900.0, 999_999.0,
+    )
+    future_context = {**context, "mtf_source_candles": [*source, future]}
+    bo.scan_symbol_backtest("BTCUSDT", source, len(source) - 1, future_context)
+    future_market = future_context["market_ctx"]
+    assert future_market["mtf"] == market["mtf"]
+    for field in ("side", "setup_type", "entry", "sl", "tp", "rr", "score", "expectancy"):
+        assert future_market[field] == market[field]
+
+
 def test_backtest_scan_fails_closed_when_runtime_would_ignore_boundary(monkeypatch):
     import importlib.util
     from pathlib import Path

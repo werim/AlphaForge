@@ -1,3 +1,19 @@
+# #455 BACKTEST ↔ PAPER pure MTF candidate parity — 2026-09-28
+
+## Why / root cause
+
+PAPER built regime-guided candidates from closed 1h regime, 15m setup structure, and 1m execution confirmation inside `BinanceMTFProvider`, while BACKTEST independently generated breakout geometry from the current and previous simulation candle. Shared scoring could therefore evaluate different side, setup, entry, stop, target, and raw RR. The provider also combined exchange I/O with pure generation, preventing direct reuse.
+
+## Change / behavior
+
+`build_mtf_candidate_context(...)` is now the single exchange-independent MTF authority. The Binance PAPER provider performs only timestamp-bounded acquisition and delegates regime/setup/execution/alignment/structural geometry to it. BACKTEST aggregates complete 1m evidence into the configured layers, drops every candle closing after the decision instant, calls the same builder, and replaces legacy breakout geometry only when shared MTF evidence is aligned and complete. Historical AIBrain scoring preserves that exact MTF context instead of reconstructing a same-timeframe substitute.
+
+BACKTEST loads one 1m evidence stream when the simulation interval differs, avoiding three parallel historical fetches. Missing latency or other required historical execution evidence remains unavailable and fails closed at MTF alignment. Such pre-score rejects persist a null score with `NOT_SCORED_MTF_REJECT`, never fabricated zero, while retaining concrete reject lifecycle/export evidence. No threshold, cost formula, portfolio gate, parity guard, PAPER behavior, LIVE path, authorization, schema, migration, backfill, or campaign state changed.
+
+## Validation / risks / recommendation
+
+208 focused tests pass across MTF provider/pure equivalence, structural geometry, future/incomplete-candle exclusion, BACKTEST scanner, AIBrain scoring, shared pre-submit parity, offline lifecycle/reject persistence, and CSV/SQL export integrity. Compile and diff checks pass. External qualification should still compare exchange-native 1h/15m candles against deterministic 1m aggregation for provider-specific boundary anomalies; missing historical execution evidence intentionally lowers candidate availability. LIVE remains NOT READY.
+
 # #455 BACKTEST canonical score authority isolation — 2026-09-28
 
 ## Why / root cause
