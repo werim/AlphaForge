@@ -13,7 +13,7 @@ import time
 import uuid
 import subprocess
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Protocol
@@ -27,6 +27,7 @@ from alphaforge.order import (
     OrderRejection,
     TradingMode,
     build_order_candidate,
+    evaluate_signal_decision,
     evaluate_trade_quality,
     validate_live_order_authorization,
 )
@@ -46,6 +47,12 @@ from alphaforge.execution import (
     evaluate_stop_risk_policy,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
+from alphaforge.decision_invariant import (
+    assert_pre_submit_invariant_parity,
+    compare_pre_submit_invariants,
+    incomplete_pre_submit_fields,
+    project_pre_submit_invariant,
+)
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import is_sqlite_busy_error, save_runtime_heartbeat
 from alphaforge.runtime_control import RuntimeControlStore
@@ -378,37 +385,166 @@ class RuntimeOrchestrator:
         {
             "sample_id": "qp-001-btc-long",
             "symbol": "BTCUSDT",
-            "entry": 67250.0,
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp": 102.0,
             "market_ts": 1716200000.0,
             "side": "LONG",
-            "rr": 2.15,
-            "spread_pct": 0.0009,
+            "rr": 2.0,
+            "score": 0.91,
+            "expectancy": 0.30,
+            "setup_type": "TREND_CONTINUATION",
+            "setup_reason": "PARITY_FIXTURE",
+            "regime": "TRENDING",
+            "geometry_status": "COMPLETE",
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "notional": 10.0,
+            "quantity": 0.1,
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "risk_state_complete": True,
+            "daily_realized_pnl": 0.0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "spread_pct": 0.0005,
+            "spread_status": "MEASURED",
+            "spread_source": "PARITY_FIXTURE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MEASURED",
+            "slippage_source": "PARITY_FIXTURE",
+            "latency_ms": 25.0,
+            "latency_status": "MEASURED",
+            "latency_source": "PARITY_FIXTURE",
             "funding_rate_pct": 0.00005,
-            "liquidity_score": 0.86,
+            "funding_status": "MEASURED",
+            "funding_source": "PARITY_FIXTURE",
+            "liquidity_score": 0.90,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "PARITY_FIXTURE",
+            "orderbook_imbalance": 0.10,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "PARITY_FIXTURE",
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+            "volatility_source": "PARITY_FIXTURE",
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "PARITY_FIXTURE",
+            "atr_pct": 1.0,
             "timeframe": "5m",
         },
         {
             "sample_id": "qp-002-eth-short",
             "symbol": "ETHUSDT",
-            "entry": 3450.0,
+            "entry": 200.0,
+            "sl": 202.0,
+            "tp": 196.0,
             "market_ts": 1716200060.0,
             "side": "SHORT",
-            "rr": 1.95,
-            "spread_pct": 0.0008,
+            "rr": 2.0,
+            "score": 0.91,
+            "expectancy": 0.30,
+            "setup_type": "TREND_CONTINUATION",
+            "setup_reason": "PARITY_FIXTURE",
+            "regime": "TRENDING",
+            "geometry_status": "COMPLETE",
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "notional": 10.0,
+            "quantity": 0.05,
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "risk_state_complete": True,
+            "daily_realized_pnl": 0.0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "spread_pct": 0.0005,
+            "spread_status": "MEASURED",
+            "spread_source": "PARITY_FIXTURE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MEASURED",
+            "slippage_source": "PARITY_FIXTURE",
+            "latency_ms": 25.0,
+            "latency_status": "MEASURED",
+            "latency_source": "PARITY_FIXTURE",
             "funding_rate_pct": 0.00004,
-            "liquidity_score": 0.82,
+            "funding_status": "MEASURED",
+            "funding_source": "PARITY_FIXTURE",
+            "liquidity_score": 0.90,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "PARITY_FIXTURE",
+            "orderbook_imbalance": 0.10,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "PARITY_FIXTURE",
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+            "volatility_source": "PARITY_FIXTURE",
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "PARITY_FIXTURE",
+            "atr_pct": 1.0,
             "timeframe": "5m",
         },
         {
             "sample_id": "qp-003-sol-long",
             "symbol": "SOLUSDT",
-            "entry": 155.0,
+            "entry": 150.0,
+            "sl": 148.5,
+            "tp": 153.0,
             "market_ts": 1716200120.0,
             "side": "LONG",
-            "rr": 2.05,
-            "spread_pct": 0.0011,
+            "rr": 2.0,
+            "score": 0.91,
+            "expectancy": 0.30,
+            "setup_type": "TREND_CONTINUATION",
+            "setup_reason": "PARITY_FIXTURE",
+            "regime": "TRENDING",
+            "geometry_status": "COMPLETE",
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "notional": 10.0,
+            "quantity": 0.0666666667,
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "risk_state_complete": True,
+            "daily_realized_pnl": 0.0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "spread_pct": 0.0005,
+            "spread_status": "MEASURED",
+            "spread_source": "PARITY_FIXTURE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MEASURED",
+            "slippage_source": "PARITY_FIXTURE",
+            "latency_ms": 25.0,
+            "latency_status": "MEASURED",
+            "latency_source": "PARITY_FIXTURE",
             "funding_rate_pct": 0.00003,
-            "liquidity_score": 0.78,
+            "funding_status": "MEASURED",
+            "funding_source": "PARITY_FIXTURE",
+            "liquidity_score": 0.90,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "PARITY_FIXTURE",
+            "orderbook_imbalance": 0.10,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "PARITY_FIXTURE",
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+            "volatility_source": "PARITY_FIXTURE",
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "PARITY_FIXTURE",
+            "atr_pct": 1.0,
             "timeframe": "5m",
         },
     ), init=False)
@@ -1669,26 +1805,363 @@ class RuntimeOrchestrator:
             payload.update({"evidence_status": "INCOMPLETE", "blocking_reasons": reasons})
         return payload
 
-    def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
-        order_plan = self.ai_brain.choose_order_plan(signal_payload, market_ctx, score_ctx)
-        explanation = self.ai_brain.explain_decision(signal_payload, score_ctx, order_plan)
-        raw_rr = signal_payload.get("risk_reward", signal_payload.get("rr", 0.0))
-        rr_metrics = self._execution_rr_metrics(
-            raw_rr, market_ctx, market_ctx.get("execution_ctx", market_ctx),
+    def _evaluate_pre_submit(
+        self,
+        signal_payload: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+        regime_ctx: Mapping[str, Any],
+        stats_ctx: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build a non-mutating protected pre-submit semantic projection.
+
+        This path exists only for parity/readiness evidence. It composes the
+        same authoritative candidate-quality, execution-safety, sizing and
+        portfolio-risk helpers as production, but never submits or persists an
+        order.
+        """
+        mode_text = str(
+            market_ctx.get("mode")
+            or signal_payload.get("mode")
+            or self.config.execution_mode.value
+        ).upper()
+        mode_enum = ExecutionMode(mode_text)
+        filter_config = self._canonical_filter_config(mode=mode_enum)
+        execution_ctx = (
+            dict(market_ctx.get("execution_ctx"))
+            if isinstance(market_ctx.get("execution_ctx"), Mapping)
+            else build_execution_context(market_ctx)
         )
+        original_notional = market_ctx.get("notional")
+        original_quantity = market_ctx.get(
+            "quantity", market_ctx.get("qty")
+        )
+        if original_notional is None:
+            try:
+                original_notional = abs(
+                    float(market_ctx.get("entry")) * float(original_quantity)
+                )
+            except (TypeError, ValueError):
+                original_notional = None
+
+        threshold_provenance = {
+            key: f"runtime_filter_config:{filter_config.get(key)!r}"
+            for key in (
+                "MIN_RR",
+                "MIN_EFFECTIVE_RR",
+                "MIN_SL_PCT",
+                "MAX_SL_PCT",
+                "MAX_SPREAD_PCT",
+                "MAX_EXPECTED_SLIPPAGE_PCT",
+                "MAX_TOTAL_COST_PCT",
+            )
+        }
+        disabled = filter_config.get("DISABLED_BACKTEST_FILTERS")
+        if disabled:
+            threshold_provenance["DISABLED_BACKTEST_FILTERS"] = json.dumps(
+                sorted(str(item) for item in disabled),
+                separators=(",", ":"),
+            )
+
+        if mode_enum is ExecutionMode.BACKTEST:
+            # BACKTEST currently persists planned-entry RR semantics. Preserve
+            # that truth here rather than manufacturing expected-fill parity.
+            backtest_market = {
+                **dict(market_ctx),
+                "execution_ctx": execution_ctx,
+            }
+            backtest_market.setdefault("score", market_ctx.get("score"))
+            decision = evaluate_signal_decision(
+                backtest_market,
+                filter_config,
+                {
+                    "balance": market_ctx.get("equity"),
+                    "risk_pct": market_ctx.get("risk_pct", 0.01),
+                    "recent_stats": {},
+                },
+                execution_ctx,
+                TradingMode.BACKTEST,
+            )
+            diagnostics = dict(decision.diagnostics or {})
+            risk_scale = diagnostics.get("risk_scale")
+            require_scale = bool(diagnostics.get("stop_too_wide_softened"))
+            sizing = scale_candidate_exposure(
+                original_notional=original_notional,
+                risk_scale=risk_scale,
+                original_quantity=original_quantity,
+                require_scale=require_scale,
+            )
+            if sizing.get("status") == "COMPLETE" and sizing.get("risk_scale") is None:
+                sizing["risk_scale"] = 1.0
+            execution_safety = evaluate_execution_safety(
+                execution_ctx,
+                effective_rr=decision.effective_rr,
+                min_effective_rr=self.config.min_effective_rr,
+                thresholds=filter_config,
+                require_measured=False,
+            )
+            candidate = decision.candidate
+            candidate_side = (
+                getattr(candidate, "side", None)
+                or market_ctx.get("side")
+                or signal_payload.get("side")
+                or "LONG"
+            )
+            snapshot = snapshot_from_state(
+                mode=mode_enum.value,
+                symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+                side=str(candidate_side),
+                candidate_notional=sizing.get("effective_notional"),
+                equity=market_ctx.get("equity"),
+                available_balance=market_ctx.get("available_balance"),
+                open_positions=market_ctx.get("open_positions", {}),
+                config=self.config,
+                now=market_ctx.get("market_ts"),
+                cooldown_until=market_ctx.get("symbol_cooldown_until"),
+                daily_realized_pnl=market_ctx.get("daily_realized_pnl"),
+                trades_today_symbol=market_ctx.get("trades_today_symbol"),
+                trades_today_global=market_ctx.get("trades_today_global"),
+                consecutive_loss_count=market_ctx.get("consecutive_loss_count"),
+                symbol_consecutive_loss_count=market_ctx.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                rolling_peak_equity=market_ctx.get("rolling_peak_equity"),
+                rolling_drawdown_pct=market_ctx.get("rolling_drawdown_pct"),
+                risk_state_complete=market_ctx.get("risk_state_complete"),
+                risk_state_source="PARITY_FIXTURE",
+            )
+            portfolio = evaluate_portfolio_risk(
+                {
+                    "symbol": signal_payload.get("symbol"),
+                    "side": candidate_side,
+                    "entry": market_ctx.get("entry"),
+                    "notional": sizing.get("effective_notional"),
+                    "quantity": sizing.get("effective_quantity"),
+                },
+                snapshot,
+                self.config,
+                mode=mode_enum.value,
+            )
+            primary = str(decision.reject_reason or "")
+            failed_gates = [primary] if primary else []
+            if not primary and sizing.get("status") != "COMPLETE":
+                primary = str(sizing.get("reason") or "INVALID_POSITION_SIZE")
+                failed_gates = [primary]
+            if not primary and not portfolio.accepted:
+                primary = str(portfolio.reject_reason or "UNKNOWN_PORTFOLIO_RISK")
+                failed_gates = list(portfolio.risk_flags or [primary])
+            final_decision = "REJECT" if primary else "ACCEPT"
+            return {
+                "decision": final_decision,
+                "primary_reject_reason": primary,
+                "reject_reason": primary,
+                "all_failed_gates": failed_gates,
+                "score": decision.score,
+                "candidate_rr": decision.raw_rr,
+                # #529 deliberately marks persisted BACKTEST execution-stage
+                # RR as legacy/non-authoritative. Missing is safer than an
+                # invented executable value.
+                "executable_raw_rr": None,
+                "remaining_execution_penalty": None,
+                "effective_rr": decision.effective_rr,
+                "rr_basis": "PLANNED_ENTRY_LEGACY_BACKTEST",
+                "execution_cost_semantics": "PLANNED_ENTRY_LEGACY_BACKTEST",
+                "threshold_provenance": threshold_provenance,
+                "execution_evidence_status": execution_safety.get(
+                    "execution_evidence_status"
+                ),
+                "execution_safety": execution_safety,
+                "portfolio_decision": {
+                    "accepted": bool(portfolio.accepted),
+                    "decision": "ACCEPT" if portfolio.accepted else "REJECT",
+                },
+                "original_notional": sizing.get("original_notional"),
+                "risk_scale": sizing.get("risk_scale"),
+                "effective_notional": sizing.get("effective_notional"),
+                "stop_distance_basis": str(
+                    diagnostics.get("stop_distance_basis") or "PLANNED_ENTRY"
+                ),
+                "geometry_status": str(
+                    market_ctx.get("geometry_status") or "UNKNOWN"
+                ),
+                "geometry_source": str(
+                    market_ctx.get("geometry_source") or "UNKNOWN"
+                ),
+                "lifecycle_pre_submit_terminal_state": (
+                    LifecycleState.ORDER_PLACED.value
+                    if final_decision == "ACCEPT"
+                    else LifecycleState.SIGNAL_REJECTED.value
+                ),
+                "order_type": "",
+                "confidence": None,
+                "explanation": "canonical_backtest_pre_submit",
+            }
+
+        score_ctx = self.ai_brain.score_signal(
+            signal_payload, market_ctx, regime_ctx, stats_ctx
+        )
+        order_plan = self.ai_brain.choose_order_plan(
+            signal_payload, market_ctx, score_ctx
+        )
+        explanation = self.ai_brain.explain_decision(
+            signal_payload, score_ctx, order_plan
+        )
+        raw_rr = signal_payload.get(
+            "risk_reward", signal_payload.get("rr", market_ctx.get("rr"))
+        )
+        rr_metrics = self._execution_rr_metrics(
+            raw_rr,
+            market_ctx,
+            execution_ctx,
+            mode=mode_enum,
+        )
+        effective_rr = float(rr_metrics.get("effective_rr") or 0.0)
+        quality_market = {
+            **dict(market_ctx),
+            **rr_metrics,
+            "execution_ctx": execution_ctx,
+            "mode": mode_enum.value,
+        }
+        quality = self._evaluate_authoritative_trade_quality(
+            symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+            market_ctx=quality_market,
+            signal_payload=signal_payload,
+            score_ctx=score_ctx,
+            effective_rr=effective_rr,
+            mode=mode_enum,
+        )
+        diagnostics = dict(quality.get("diagnostics") or {})
+        execution_safety = evaluate_execution_safety(
+            execution_ctx,
+            effective_rr=effective_rr,
+            min_effective_rr=self.config.min_effective_rr,
+            thresholds=filter_config,
+            require_measured=mode_enum is ExecutionMode.LIVE_PRECHECK,
+        )
+        risk_scale = diagnostics.get("risk_scale")
+        require_scale = bool(diagnostics.get("stop_too_wide_softened"))
+        sizing = scale_candidate_exposure(
+            original_notional=original_notional,
+            risk_scale=risk_scale,
+            original_quantity=original_quantity,
+            require_scale=require_scale,
+        )
+        candidate = quality.get("candidate")
+        candidate_side = (
+            getattr(candidate, "side", None)
+            or signal_payload.get("side")
+            or market_ctx.get("side")
+            or "LONG"
+        )
+        snapshot = snapshot_from_state(
+            mode=mode_enum.value,
+            symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+            side=str(candidate_side),
+            candidate_notional=sizing.get("effective_notional"),
+            equity=market_ctx.get("equity"),
+            available_balance=market_ctx.get("available_balance"),
+            open_positions=market_ctx.get("open_positions", {}),
+            config=self.config,
+            now=market_ctx.get("market_ts"),
+            cooldown_until=market_ctx.get("symbol_cooldown_until"),
+            daily_realized_pnl=market_ctx.get("daily_realized_pnl"),
+            trades_today_symbol=market_ctx.get("trades_today_symbol"),
+            trades_today_global=market_ctx.get("trades_today_global"),
+            consecutive_loss_count=market_ctx.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=market_ctx.get(
+                "symbol_consecutive_loss_count"
+            ),
+            rolling_peak_equity=market_ctx.get("rolling_peak_equity"),
+            rolling_drawdown_pct=market_ctx.get("rolling_drawdown_pct"),
+            risk_state_complete=market_ctx.get("risk_state_complete"),
+            risk_state_source="PARITY_FIXTURE",
+        )
+        portfolio = evaluate_portfolio_risk(
+            {
+                "symbol": signal_payload.get("symbol"),
+                "side": candidate_side,
+                "entry": market_ctx.get("entry"),
+                "notional": sizing.get("effective_notional"),
+                "quantity": sizing.get("effective_quantity"),
+            },
+            snapshot,
+            self.config,
+            mode=mode_enum.value,
+        )
+
+        primary = ""
+        failed_gates: list[str] = []
+        if order_plan.decision != "ACCEPTED":
+            primary = canonical_reject_reason(order_plan.reason)
+            failed_gates = [primary]
+        elif not bool(quality.get("accepted")):
+            primary = str(quality.get("reject_reason") or "UNKNOWN")
+            failed_gates = [primary]
+        elif not bool(execution_safety.get("accepted")):
+            primary = str(
+                execution_safety.get("primary_reject_reason")
+                or "BAD_EXECUTION"
+            )
+            failed_gates = list(
+                execution_safety.get("all_failed_gates") or [primary]
+            )
+        elif sizing.get("status") != "COMPLETE":
+            primary = str(sizing.get("reason") or "INVALID_POSITION_SIZE")
+            failed_gates = [primary]
+        elif not portfolio.accepted:
+            primary = str(portfolio.reject_reason or "UNKNOWN_PORTFOLIO_RISK")
+            failed_gates = list(portfolio.risk_flags or [primary])
+
+        final_decision = "REJECT" if primary else "ACCEPT"
         return {
-            "decision": order_plan.decision,
-            "reason": order_plan.reason,
+            "decision": final_decision,
+            "primary_reject_reason": primary,
+            "reject_reason": primary,
+            "all_failed_gates": failed_gates,
+            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
+            "candidate_rr": rr_metrics.get("candidate_rr"),
+            "executable_raw_rr": rr_metrics.get("executable_raw_rr"),
+            "remaining_execution_penalty": rr_metrics.get(
+                "remaining_execution_penalty"
+            ),
+            "effective_rr": rr_metrics.get("effective_rr"),
+            "rr_basis": (
+                "EXPECTED_FILL_RUNTIME_PARITY"
+                if rr_metrics.get("expected_fill") is not None
+                else "UNAVAILABLE"
+            ),
+            "execution_cost_semantics": rr_metrics.get(
+                "execution_cost_semantics"
+            ),
+            "threshold_provenance": threshold_provenance,
+            "execution_evidence_status": execution_safety.get(
+                "execution_evidence_status"
+            ),
+            "execution_safety": execution_safety,
+            "portfolio_decision": {
+                "accepted": bool(portfolio.accepted),
+                "decision": "ACCEPT" if portfolio.accepted else "REJECT",
+            },
+            "original_notional": sizing.get("original_notional"),
+            "risk_scale": sizing.get("risk_scale"),
+            "effective_notional": sizing.get("effective_notional"),
+            "stop_distance_basis": str(
+                diagnostics.get("stop_distance_basis") or ""
+            ),
+            "geometry_status": str(
+                market_ctx.get("geometry_status") or "UNKNOWN"
+            ),
+            "geometry_source": str(
+                market_ctx.get("geometry_source") or "UNKNOWN"
+            ),
+            "lifecycle_pre_submit_terminal_state": (
+                LifecycleState.ORDER_PLACED.value
+                if final_decision == "ACCEPT"
+                else LifecycleState.SIGNAL_REJECTED.value
+            ),
             "order_type": order_plan.order_type,
             "confidence": float(order_plan.confidence),
-            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
-            "reject_reason": canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
-            "raw_rr": float(raw_rr or 0.0),
-            "executable_raw_rr": rr_metrics["executable_raw_rr"],
-            "expected_fill": rr_metrics["expected_fill"],
-            "effective_rr": rr_metrics["effective_rr"],
             "explanation": explanation,
+            "trade_quality": diagnostics,
         }
 
     @staticmethod
@@ -1721,14 +2194,25 @@ class RuntimeOrchestrator:
         executable_rr = reward_distance / risk_distance
         return executable_rr if math.isfinite(executable_rr) else 0.0
 
-    def _expected_fill_price(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float | None, float | None]:
+    def _expected_fill_price(
+        self,
+        market_ctx: Mapping[str, Any],
+        execution_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> tuple[float | None, float | None]:
+        mode_value = (
+            mode if isinstance(mode, ExecutionMode)
+            else ExecutionMode(str(mode).upper()) if mode is not None
+            else self.config.execution_mode
+        )
         try:
             entry = float(market_ctx.get("entry"))
         except (TypeError, ValueError):
             return None, None
         if not math.isfinite(entry) or entry <= 0:
             return None, None
-        if self.config.execution_mode is ExecutionMode.PAPER:
+        if mode_value is ExecutionMode.PAPER:
             try:
                 if self.paper_slippage_bps is not None:
                     slippage_pct = max(float(self.paper_slippage_bps), 0.0) / 10_000.0
@@ -1756,9 +2240,23 @@ class RuntimeOrchestrator:
             return None, None
         return round(fill, 8), slippage_pct
 
-    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
+    def _execution_rr_metrics(
+        self,
+        raw_rr: Any,
+        market_ctx: Mapping[str, Any],
+        execution_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        mode_value = (
+            mode if isinstance(mode, ExecutionMode)
+            else ExecutionMode(str(mode).upper()) if mode is not None
+            else self.config.execution_mode
+        )
         candidate_rr = float(raw_rr or 0.0)
-        expected_fill, fill_slippage_pct = self._expected_fill_price(market_ctx, execution_ctx)
+        expected_fill, fill_slippage_pct = self._expected_fill_price(
+            market_ctx, execution_ctx, mode=mode_value,
+        )
         executable_raw_rr = self._fill_adjusted_raw_rr(
             side=market_ctx.get("side"), fill=expected_fill,
             stop=market_ctx.get("sl"), target=market_ctx.get("tp"),
@@ -1783,7 +2281,7 @@ class RuntimeOrchestrator:
                     side=market_ctx.get("side"),
                     expected_fill_provenance=(
                         PROVENANCE_MODELLED
-                        if self.config.execution_mode is ExecutionMode.PAPER
+                        if mode_value is ExecutionMode.PAPER
                         else PROVENANCE_ESTIMATED
                     ),
                     decision_timestamp=market_ctx.get("decision_timestamp"),
@@ -1808,61 +2306,212 @@ class RuntimeOrchestrator:
             "effective_rr": round(effective_rr, 6),
         }
 
-    def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
-        samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
+    def _build_mode_parity_evidence(
+        self,
+        *,
+        min_sample_count: int = 3,
+    ) -> dict[str, Any]:
+        """Compare protected BACKTEST/PAPER/LIVE_PRECHECK semantics fail closed.
+
+        BACKTEST is intentionally allowed to report incomplete legacy evidence;
+        incomplete is never promoted to parity PASS.  This prevents a pair of
+        healthy-looking PAPER/LIVE rows from proving a three-mode contract that
+        the BACKTEST evidence does not actually satisfy.
+        """
+        samples = list(
+            self._qualification_samples[: max(0, int(min_sample_count))]
+        )
         comparisons: list[dict[str, Any]] = []
         mismatch_count = 0
         missing_field_count = 0
-        compare_fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
+        semantic_violation_count = 0
+        modes = (
+            ExecutionMode.BACKTEST,
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        )
+
         for row in samples:
             sample = dict(row)
             sample_id = str(sample["sample_id"])
-            paper_signal_payload = {
+            execution_ctx = build_execution_context(sample)
+            normalized_market = {
+                **sample,
+                "execution_ctx": execution_ctx,
+            }
+            signal_base = {
                 "signal_id": f"precheck:{sample_id}",
                 "symbol": sample["symbol"],
-                "mode": "PAPER",
                 "side": sample.get("side", "LONG"),
                 "timeframe": sample.get("timeframe", "5m"),
                 "entry_price": float(sample.get("entry", 0.0) or 0.0),
+                "stop_loss": sample.get("sl"),
+                "take_profit": sample.get("tp"),
                 "risk_reward": float(sample.get("rr", 0.0) or 0.0),
+                "setup": sample.get("setup_type", "TREND_CONTINUATION"),
+                "setup_type": sample.get(
+                    "setup_type", "TREND_CONTINUATION"
+                ),
+                "setup_reason": sample.get("setup_reason", "PARITY_FIXTURE"),
+                "regime": sample.get("regime", "TRENDING"),
+                "expectancy": sample.get("expectancy"),
+                "setup_quality": sample.get("setup_quality", 0.9),
             }
-            live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
-            regime_ctx = {"alignment": 0.8}
-            stats_ctx: dict[str, Any] = {}
-            execution_ctx = build_execution_context(sample)
-            normalized_market = {**sample, "execution_ctx": execution_ctx}
-            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**normalized_market, "mode": "PAPER"}, regime_ctx, stats_ctx)
-            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**normalized_market, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
-            missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
-            mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
-            missing_field_count += len(missing)
-            mismatch_count += len(mismatch)
-            comparisons.append({
-                "sample_id": sample_id,
-                "paper": {k: paper_eval.get(k) for k in compare_fields},
-                "live_precheck": {k: live_eval.get(k) for k in compare_fields},
-                "missing_fields": missing,
-                "mismatch_fields": mismatch,
-                "input_snapshot_hash": self._snapshot_hash({"signal": paper_signal_payload, "market": normalized_market, "regime": regime_ctx, "stats": stats_ctx}),
-                "symbol": sample.get("symbol"),
-                "timestamp": canonical_utc_timestamp(sample.get("market_ts")),
-                "execution_context": execution_ctx,
-                "no_submit_verified": True,
-                "parity_result": "PASS" if not missing and not mismatch else "FAIL",
-            })
+            regime_ctx = {
+                "alignment": float(sample.get("regime_alignment", 0.8)),
+                "regime": sample.get("regime", "TRENDING"),
+            }
+            stats_ctx: dict[str, Any] = {
+                "sample_size": int(sample.get("sample_size", 100)),
+                "setup": {},
+                "regime": {},
+                "symbol": {},
+            }
+
+            evaluations: dict[str, dict[str, Any]] = {}
+            projections: dict[str, dict[str, Any]] = {}
+            missing_by_mode: dict[str, list[str]] = {}
+            for mode in modes:
+                key = mode.value.lower()
+                signal_payload = {**signal_base, "mode": mode.value}
+                mode_market = {
+                    **normalized_market,
+                    "mode": mode.value,
+                }
+                evaluation = self._evaluate_pre_submit(
+                    signal_payload,
+                    mode_market,
+                    regime_ctx,
+                    stats_ctx,
+                )
+                evaluations[key] = evaluation
+                projected = project_pre_submit_invariant(evaluation)
+                projections[key] = asdict(projected)
+                missing_by_mode[key] = list(
+                    incomplete_pre_submit_fields(projected)
+                )
+
+            reference = project_pre_submit_invariant(
+                evaluations["backtest"]
+            )
+            mismatch_by_mode: dict[str, list[str]] = {}
+            for key in ("paper", "live_precheck"):
+                observed = project_pre_submit_invariant(evaluations[key])
+                mismatch_by_mode[key] = [
+                    mismatch.field
+                    for mismatch in compare_pre_submit_invariants(
+                        reference, observed
+                    )
+                ]
+
+            sample_missing_count = sum(
+                len(fields) for fields in missing_by_mode.values()
+            )
+            sample_mismatch_count = sum(
+                len(fields) for fields in mismatch_by_mode.values()
+            )
+            missing_field_count += sample_missing_count
+            mismatch_count += sample_mismatch_count
+
+            semantic_error = ""
+            try:
+                assert_pre_submit_invariant_parity(
+                    evaluations["backtest"],
+                    evaluations["paper"],
+                    evaluations["live_precheck"],
+                )
+            except ValueError as exc:
+                semantic_error = str(exc)
+                if sample_missing_count == 0 and sample_mismatch_count == 0:
+                    semantic_violation_count += 1
+
+            comparisons.append(
+                {
+                    "sample_id": sample_id,
+                    "backtest": projections["backtest"],
+                    "paper": projections["paper"],
+                    "live_precheck": projections["live_precheck"],
+                    "missing_fields": missing_by_mode,
+                    "mismatch_fields": mismatch_by_mode,
+                    "semantic_error": semantic_error,
+                    "input_snapshot_hash": self._snapshot_hash(
+                        {
+                            "signal": signal_base,
+                            "market": normalized_market,
+                            "regime": regime_ctx,
+                            "stats": stats_ctx,
+                        }
+                    ),
+                    "symbol": sample.get("symbol"),
+                    "timestamp": canonical_utc_timestamp(
+                        sample.get("market_ts")
+                    ),
+                    "execution_context": execution_ctx,
+                    "no_submit_verified": True,
+                    "parity_result": (
+                        "PASS" if not semantic_error else "FAIL"
+                    ),
+                }
+            )
+
+        enough_samples = len(samples) >= int(min_sample_count)
+        complete = (
+            enough_samples
+            and mismatch_count == 0
+            and missing_field_count == 0
+            and semantic_violation_count == 0
+        )
+        execution_blocking = {
+            "",
+            "UNKNOWN",
+            "UNAVAILABLE",
+            "UNAVAILABLE_BLOCKING",
+            "INVALID_FAKE_ZERO",
+            "INCOMPLETE",
+        }
+        execution_context_complete = all(
+            str(
+                sample.get(mode, {}).get(
+                    "execution_evidence_status", "UNKNOWN"
+                )
+            ).upper()
+            not in execution_blocking
+            for sample in comparisons
+            for mode in ("backtest", "paper", "live_precheck")
+        )
+        rr_breakdown_complete = all(
+            sample.get(mode, {}).get("executable_raw_rr") is not None
+            and sample.get(mode, {}).get(
+                "remaining_execution_penalty"
+            ) is not None
+            and sample.get(mode, {}).get("effective_rr") is not None
+            for sample in comparisons
+            for mode in ("backtest", "paper", "live_precheck")
+        )
         return {
-            "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
+            "evidence_status": "COMPLETE" if complete else "INCOMPLETE",
             "sample_count": len(samples),
             "min_sample_count": int(min_sample_count),
             "mismatch_count": mismatch_count,
             "missing_field_count": missing_field_count,
+            "semantic_violation_count": semantic_violation_count,
             "no_order_submission_verified": True,
             "no_submit_verified": True,
-            "execution_context_complete": all(
-                not execution_context_is_unavailable(c.get("execution_context"))
-                for c in comparisons
+            "execution_context_complete": execution_context_complete,
+            "execution_evidence_status": (
+                "COMPLETE"
+                if execution_context_complete
+                else "INCOMPLETE"
             ),
-            "comparison_fields": list(compare_fields),
+            "effective_rr_penalty_breakdown_complete": (
+                rr_breakdown_complete
+            ),
+            "modes_compared": [mode.value for mode in modes],
+            "comparison_fields": (
+                list(comparisons[0]["paper"].keys())
+                if comparisons
+                else []
+            ),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
         }
@@ -1888,8 +2537,17 @@ class RuntimeOrchestrator:
             logger.exception("MARKET_SCAN_LOOP_FAILED")
             raise
 
-    def _canonical_filter_config(self) -> dict[str, Any]:
-        return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
+    def _canonical_filter_config(
+        self,
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        mode_value = (
+            mode.value if isinstance(mode, ExecutionMode)
+            else str(mode).upper() if mode is not None
+            else self.config.execution_mode.value
+        )
+        return runtime_filter_config(self.config, mode=mode_value)
 
     def _evaluate_authoritative_trade_quality(
         self,
@@ -1899,6 +2557,7 @@ class RuntimeOrchestrator:
         signal_payload: Mapping[str, Any],
         score_ctx: Any,
         effective_rr: float,
+        mode: ExecutionMode | str | None = None,
     ) -> dict[str, Any]:
         """Project RuntimeOrchestrator inputs into the shared quality authority.
 
@@ -1966,7 +2625,7 @@ class RuntimeOrchestrator:
         candidate = build_order_candidate(
             symbol,
             quality_market_ctx,
-            self._canonical_filter_config(),
+            self._canonical_filter_config(mode=mode),
         )
         if isinstance(candidate, OrderRejection):
             return {
@@ -1981,8 +2640,12 @@ class RuntimeOrchestrator:
             }
 
         config = {
-            **self._canonical_filter_config(),
-            "MODE": self.config.execution_mode.value,
+            **self._canonical_filter_config(mode=mode),
+            "MODE": (
+                mode.value if isinstance(mode, ExecutionMode)
+                else str(mode).upper() if mode is not None
+                else self.config.execution_mode.value
+            ),
             # AIBrain already owns score/expectancy acceptance and reject
             # precedence in RuntimeOrchestrator. Re-running those gates here
             # would create duplicate authority. Direct/backtest callers keep
