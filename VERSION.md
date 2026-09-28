@@ -1,13 +1,20 @@
+# AlphaForge 0.1.0 — #455 BACKTEST score authority isolation — 2026-09-28
+
+- Current phase: bounded #455 authority cleanup; BACKTEST/PAPER MTF candidate-generation parity remains open.
+- Runtime maturity/alignment: raw breakout geometry now exposes its heuristic only as `legacy_geometry_score` / `legacy_geometry_expectancy` diagnostics. Only historical AIBrain output populates canonical `score`, `expectancy`, and `expectancy_bucket` before the shared decision boundary. PAPER/LIVE behavior, thresholds, geometry, and authorization are unchanged.
+- Lifecycle/persistence: accepted/rejected lifecycle and export shapes are unchanged; canonical persisted decision evidence remains AIBrain-derived. No schema, migration, backfill, historical-row rewrite, or campaign mutation.
+- Validation: focused authority and historical-scoring regressions pass; adjacent BACKTEST verification and exact-head CI remain required. Known critical risk: BACKTEST still uses legacy breakout geometry rather than PAPER's pure 1h/15m/1m MTF candidate-generation semantics. Last audit: 2026-09-28. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
 # AlphaForge 0.1.0 — #455 BACKTEST spread provenance — 2026-09-28
 
 - Current phase: smallest safe #455 execution-provenance slice; BACKTEST/PAPER MTF candidate-generation parity remains open.
 - Runtime maturity/alignment: estimated historical BACKTEST spread is now `MODEL_ESTIMATE` with source `ESTIMATED_BACKTEST`; explicit historical bid/ask-derived input remains `MEASURED`. PAPER/LIVE behavior, thresholds, scoring, geometry, and authorization are unchanged.
 - Lifecycle/persistence: existing decision/lifecycle/export fields carry the corrected prospective status. No schema, migration, backfill, historical-row rewrite, or campaign mutation.
 - Validation: 4 focused provenance regressions and 177 adjacent BACKTEST/execution tests pass; exact-head CI remains required. Known critical risk: BACKTEST still uses legacy breakout geometry rather than PAPER's pure 1h/15m/1m MTF candidate-generation semantics. Last audit: 2026-09-28. LIVE NOT READY.
-
-## Historical version entries
-
-Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
 
 # AlphaForge 0.1.0 — #498 cross-component safety mutation gate — 2026-09-28
 

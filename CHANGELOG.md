@@ -1,3 +1,22 @@
+# #455 BACKTEST score authority isolation — 2026-09-28
+
+### Added
+- Explicit `legacy_geometry_*` diagnostic names for the raw breakout heuristic.
+### Changed
+- Canonical BACKTEST `score`, `expectancy`, and bucket now appear only after historical AIBrain scoring.
+### Fixed
+- A raw geometry-builder contract that exposed a non-authoritative heuristic under canonical decision-evidence names.
+### Removed
+- Canonical-looking `score` and `expectancy` fields from the pre-AIBrain market context.
+### Breaking Changes
+- Direct callers of the private `_build_market_ctx(...)` helper must use `legacy_geometry_*` for diagnostics; production scanner consumers remain unchanged.
+### Known Issues
+- #455 pure 1h/15m/1m MTF candidate-generation parity remains open. LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
 # #455 BACKTEST spread provenance — 2026-09-28
 
 ### Added
@@ -12,10 +31,6 @@
 - No schema/API break. Consumers that treated estimated spread as measured will now receive the correct `MODEL_ESTIMATE` status.
 ### Known Issues
 - #455 MTF signal/geometry parity and legacy score isolation remain open. LIVE NOT READY.
-
-## Historical changelog entries
-
-Entries below preserve the repository state at the time of each change.
 
 # #498 cross-component safety mutation gate — 2026-09-28
 

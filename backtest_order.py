@@ -667,8 +667,8 @@ def _build_market_ctx(
     rr = geometry["rr"]
     breakout_strength = geometry["breakout_strength"]
     range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
-    score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
-    expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
+    legacy_geometry_score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
+    legacy_geometry_expectancy = ((legacy_geometry_score / 10.0) - 0.5) * (rr - 1.0)
     quote_volume = symbol_meta.get("quoteVolume")
     if quote_volume in (None, "", 0, 0.0):
         quote_volume = now.volume * now.close * 1440.0
@@ -683,12 +683,15 @@ def _build_market_ctx(
         "sl": sl,
         "tp": tp,
         "rr": rr,
-        "score": score,
+        # Geometry-only diagnostics are deliberately not canonical decision
+        # authority. scan_symbol_backtest installs the AIBrain score and
+        # expectancy before either shared pre-submit boundary is evaluated.
+        "legacy_geometry_score": legacy_geometry_score,
         "setup_type": "BREAKOUT_UP" if side == "LONG" else "BREAKDOWN_DOWN",
         "setup_reason": "CLOSE_ABOVE_PREV_HIGH" if side == "LONG" else "CLOSE_BELOW_PREV_LOW",
         "regime": "BREAKOUT" if breakout_strength > 0.002 else "TREND",
-        "expectancy": expectancy,
-        "expectancy_bucket": _bucket_expectancy(expectancy),
+        "legacy_geometry_expectancy": legacy_geometry_expectancy,
+        "legacy_geometry_expectancy_bucket": _bucket_expectancy(legacy_geometry_expectancy),
         "side": side,
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
