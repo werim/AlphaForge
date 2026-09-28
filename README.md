@@ -155,6 +155,12 @@ Readiness is an **evidence gate**, not a profitability guarantee and not LIVE au
 
 [`src/alphaforge/live_readiness.py`](src/alphaforge/live_readiness.py) evaluates scoped lifecycle, reject, execution, portfolio-risk, reconciliation, no-submit, rollback and operational evidence. Current runtime code still blocks real LIVE mutation even when non-mutating readiness evidence is strong.
 
+Historical strategy evidence must satisfy the [walk-forward/OOS validation
+contract](docs/HISTORICAL_VALIDATION.md): immutable train/calibration, OOS and
+optional untouched-test segments; explicit universe provenance; canonical
+execution economics; and role-separated reporting. Historical OOS success never
+replaces fresh PAPER evidence or authorizes LIVE.
+
 The isolated [autonomous qualification harness](docs/AUTONOMOUS_QUALIFICATION_HARNESS.md) provides:
 
 - **FAST** — deterministic accelerated PAPER qualification suitable for CI;

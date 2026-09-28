@@ -9,7 +9,7 @@ from typing import Any, Callable, Literal, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING, adverse_expected_fill_price, build_stop_risk_metrics, evaluate_stop_risk_policy
+from alphaforge.execution import build_decision_rr_metrics, build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING, adverse_expected_fill_price, build_stop_risk_metrics, evaluate_stop_risk_policy
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
@@ -669,11 +669,31 @@ def evaluate_signal_decision(
     if mode_enum == TradingMode.BACKTEST:
         execution_flags = [flag for flag in execution_flags if flag != "UNKNOWN_EXECUTION_CONTEXT"]
 
+    canonical_rr_stage = build_decision_rr_metrics(
+        candidate.rr,
+        {
+            **market_ctx,
+            "entry": candidate.entry,
+            "sl": candidate.sl,
+            "tp": candidate.tp,
+            "side": candidate.side,
+        },
+        execution_ctx,
+        mode=mode_enum.value,
+    )
+    canonical_rr_stage["rr_basis"] = (
+        "EXPECTED_FILL_RUNTIME_PARITY"
+        if canonical_rr_stage.get("expected_fill") is not None
+        and canonical_rr_stage.get("execution_cost_semantics") is not None
+        else "UNAVAILABLE"
+    )
+
     diagnostics = {
         **quality.diagnostics,
         "effective_rr": effective_rr,
         "execution_flags": execution_flags,
         "effective_rr_breakdown": rr_breakdown,
+        "canonical_rr_stage": canonical_rr_stage,
         "shared_decision_boundary": "evaluate_signal_decision",
     }
     reject_reason = ""

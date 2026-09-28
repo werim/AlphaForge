@@ -227,6 +227,114 @@ def adverse_expected_fill_price(*, entry: Any, side: Any, slippage_pct: Any) -> 
     return _finite_positive_price(fill, field="expected_fill")
 
 
+def build_decision_rr_metrics(
+    raw_rr: Any,
+    market_ctx: Mapping[str, Any],
+    execution_ctx: Mapping[str, Any],
+    *,
+    mode: str,
+    paper_slippage_bps: float | None = None,
+) -> dict[str, Any]:
+    """Canonical decision-time candidate/executable/effective RR authority."""
+
+    mode_value = str(getattr(mode, "value", mode) or "").upper()
+    try:
+        candidate_rr = float(raw_rr or 0.0)
+    except (TypeError, ValueError):
+        candidate_rr = 0.0
+    expected_fill = None
+    fill_slippage_pct = None
+    try:
+        entry = float(market_ctx.get("entry"))
+        if not math.isfinite(entry) or entry <= 0:
+            raise ValueError("invalid entry")
+        if mode_value == "PAPER" and paper_slippage_bps is not None:
+            fill_slippage_pct = max(float(paper_slippage_bps), 0.0) / 10_000.0
+        else:
+            raw_slippage = execution_ctx.get("expected_slippage_pct")
+            if raw_slippage is None:
+                raise ValueError("missing expected slippage")
+            fill_slippage_pct = max(float(raw_slippage), 0.0)
+        expected_fill = round(
+            adverse_expected_fill_price(
+                entry=entry,
+                side=market_ctx.get("side") or "LONG",
+                slippage_pct=fill_slippage_pct,
+            ),
+            8,
+        )
+    except (TypeError, ValueError):
+        expected_fill = None
+        fill_slippage_pct = None
+
+    executable_raw_rr = None
+    try:
+        fill_price = float(expected_fill)
+        stop_price = float(market_ctx.get("sl"))
+        target_price = float(market_ctx.get("tp"))
+        if not all(math.isfinite(value) for value in (fill_price, stop_price, target_price)):
+            raise ValueError("invalid geometry")
+        side = str(market_ctx.get("side") or "").strip().upper()
+        if side == "LONG":
+            risk_distance = fill_price - stop_price
+            reward_distance = target_price - fill_price
+        elif side == "SHORT":
+            risk_distance = stop_price - fill_price
+            reward_distance = fill_price - target_price
+        else:
+            raise ValueError("invalid side")
+        executable_raw_rr = (
+            0.0 if risk_distance <= 0 or reward_distance <= 0 else reward_distance / risk_distance
+        )
+        if not math.isfinite(executable_raw_rr):
+            executable_raw_rr = 0.0
+    except (TypeError, ValueError):
+        executable_raw_rr = None
+
+    model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+    if executable_raw_rr is None:
+        executable_raw_rr = candidate_rr
+        remaining_penalty = model.total_penalty
+    else:
+        # Expected fill already includes entry slippage. Preserve only costs not
+        # represented by that fill, including the modelled exit-slippage half.
+        remaining_penalty = max(model.total_penalty - model.slippage_penalty / 2.0, 0.0)
+    effective_rr = max(executable_raw_rr - remaining_penalty, 0.0)
+    cost_semantics = None
+    if expected_fill is not None:
+        try:
+            cost_semantics = build_execution_cost_semantics(
+                entry=market_ctx.get("entry"),
+                expected_fill=expected_fill,
+                actual_fill=None,
+                side=market_ctx.get("side"),
+                expected_fill_provenance=(
+                    PROVENANCE_MODELLED if mode_value == "PAPER" else PROVENANCE_ESTIMATED
+                ),
+                decision_timestamp=market_ctx.get("decision_timestamp"),
+            ).decision_time_dict()
+        except ValueError:
+            cost_semantics = None
+    return {
+        "candidate_rr": round(candidate_rr, 6),
+        "expected_fill": expected_fill,
+        "fill_slippage_pct": fill_slippage_pct,
+        "expected_execution_cost_price": (
+            cost_semantics.get("expected_execution_cost_price") if cost_semantics else None
+        ),
+        "expected_execution_cost_pct": (
+            cost_semantics.get("expected_execution_cost_pct") if cost_semantics else None
+        ),
+        "expected_execution_cost_bps": (
+            cost_semantics.get("expected_execution_cost_bps") if cost_semantics else None
+        ),
+        "execution_cost_semantics": cost_semantics,
+        "executable_raw_rr": round(executable_raw_rr, 6),
+        "remaining_execution_penalty": round(remaining_penalty, 6),
+        "effective_rr": round(effective_rr, 6),
+    }
+
+
 def build_stop_risk_metrics(
     *,
     planned_entry: Any,
