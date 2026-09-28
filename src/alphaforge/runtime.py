@@ -1784,26 +1784,363 @@ class RuntimeOrchestrator:
             payload.update({"evidence_status": "INCOMPLETE", "blocking_reasons": reasons})
         return payload
 
-    def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
-        order_plan = self.ai_brain.choose_order_plan(signal_payload, market_ctx, score_ctx)
-        explanation = self.ai_brain.explain_decision(signal_payload, score_ctx, order_plan)
-        raw_rr = signal_payload.get("risk_reward", signal_payload.get("rr", 0.0))
-        rr_metrics = self._execution_rr_metrics(
-            raw_rr, market_ctx, market_ctx.get("execution_ctx", market_ctx),
+    def _evaluate_pre_submit(
+        self,
+        signal_payload: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+        regime_ctx: Mapping[str, Any],
+        stats_ctx: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build a non-mutating protected pre-submit semantic projection.
+
+        This path exists only for parity/readiness evidence. It composes the
+        same authoritative candidate-quality, execution-safety, sizing and
+        portfolio-risk helpers as production, but never submits or persists an
+        order.
+        """
+        mode_text = str(
+            market_ctx.get("mode")
+            or signal_payload.get("mode")
+            or self.config.execution_mode.value
+        ).upper()
+        mode_enum = ExecutionMode(mode_text)
+        filter_config = self._canonical_filter_config(mode=mode_enum)
+        execution_ctx = (
+            dict(market_ctx.get("execution_ctx"))
+            if isinstance(market_ctx.get("execution_ctx"), Mapping)
+            else build_execution_context(market_ctx)
         )
+        original_notional = market_ctx.get("notional")
+        original_quantity = market_ctx.get(
+            "quantity", market_ctx.get("qty")
+        )
+        if original_notional is None:
+            try:
+                original_notional = abs(
+                    float(market_ctx.get("entry")) * float(original_quantity)
+                )
+            except (TypeError, ValueError):
+                original_notional = None
+
+        threshold_provenance = {
+            key: f"runtime_filter_config:{filter_config.get(key)!r}"
+            for key in (
+                "MIN_RR",
+                "MIN_EFFECTIVE_RR",
+                "MIN_SL_PCT",
+                "MAX_SL_PCT",
+                "MAX_SPREAD_PCT",
+                "MAX_EXPECTED_SLIPPAGE_PCT",
+                "MAX_TOTAL_COST_PCT",
+            )
+        }
+        disabled = filter_config.get("DISABLED_BACKTEST_FILTERS")
+        if disabled:
+            threshold_provenance["DISABLED_BACKTEST_FILTERS"] = json.dumps(
+                sorted(str(item) for item in disabled),
+                separators=(",", ":"),
+            )
+
+        if mode_enum is ExecutionMode.BACKTEST:
+            # BACKTEST currently persists planned-entry RR semantics. Preserve
+            # that truth here rather than manufacturing expected-fill parity.
+            backtest_market = {
+                **dict(market_ctx),
+                "execution_ctx": execution_ctx,
+            }
+            backtest_market.setdefault("score", market_ctx.get("score"))
+            decision = evaluate_signal_decision(
+                backtest_market,
+                filter_config,
+                {
+                    "balance": market_ctx.get("equity"),
+                    "risk_pct": market_ctx.get("risk_pct", 0.01),
+                    "recent_stats": {},
+                },
+                execution_ctx,
+                TradingMode.BACKTEST,
+            )
+            diagnostics = dict(decision.diagnostics or {})
+            risk_scale = diagnostics.get("risk_scale")
+            require_scale = bool(diagnostics.get("stop_too_wide_softened"))
+            sizing = scale_candidate_exposure(
+                original_notional=original_notional,
+                risk_scale=risk_scale,
+                original_quantity=original_quantity,
+                require_scale=require_scale,
+            )
+            if sizing.get("status") == "COMPLETE" and sizing.get("risk_scale") is None:
+                sizing["risk_scale"] = 1.0
+            execution_safety = evaluate_execution_safety(
+                execution_ctx,
+                effective_rr=decision.effective_rr,
+                min_effective_rr=self.config.min_effective_rr,
+                thresholds=filter_config,
+                require_measured=False,
+            )
+            candidate = decision.candidate
+            candidate_side = (
+                getattr(candidate, "side", None)
+                or market_ctx.get("side")
+                or signal_payload.get("side")
+                or "LONG"
+            )
+            snapshot = snapshot_from_state(
+                mode=mode_enum.value,
+                symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+                side=str(candidate_side),
+                candidate_notional=sizing.get("effective_notional"),
+                equity=market_ctx.get("equity"),
+                available_balance=market_ctx.get("available_balance"),
+                open_positions=market_ctx.get("open_positions", {}),
+                config=self.config,
+                now=market_ctx.get("market_ts"),
+                cooldown_until=market_ctx.get("symbol_cooldown_until"),
+                daily_realized_pnl=market_ctx.get("daily_realized_pnl"),
+                trades_today_symbol=market_ctx.get("trades_today_symbol"),
+                trades_today_global=market_ctx.get("trades_today_global"),
+                consecutive_loss_count=market_ctx.get("consecutive_loss_count"),
+                symbol_consecutive_loss_count=market_ctx.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                rolling_peak_equity=market_ctx.get("rolling_peak_equity"),
+                rolling_drawdown_pct=market_ctx.get("rolling_drawdown_pct"),
+                risk_state_complete=market_ctx.get("risk_state_complete"),
+                risk_state_source="PARITY_FIXTURE",
+            )
+            portfolio = evaluate_portfolio_risk(
+                {
+                    "symbol": signal_payload.get("symbol"),
+                    "side": candidate_side,
+                    "entry": market_ctx.get("entry"),
+                    "notional": sizing.get("effective_notional"),
+                    "quantity": sizing.get("effective_quantity"),
+                },
+                snapshot,
+                self.config,
+                mode=mode_enum.value,
+            )
+            primary = str(decision.reject_reason or "")
+            failed_gates = [primary] if primary else []
+            if not primary and sizing.get("status") != "COMPLETE":
+                primary = str(sizing.get("reason") or "INVALID_POSITION_SIZE")
+                failed_gates = [primary]
+            if not primary and not portfolio.accepted:
+                primary = str(portfolio.reject_reason or "UNKNOWN_PORTFOLIO_RISK")
+                failed_gates = list(portfolio.risk_flags or [primary])
+            final_decision = "REJECT" if primary else "ACCEPT"
+            return {
+                "decision": final_decision,
+                "primary_reject_reason": primary,
+                "reject_reason": primary,
+                "all_failed_gates": failed_gates,
+                "score": decision.score,
+                "candidate_rr": decision.raw_rr,
+                # #529 deliberately marks persisted BACKTEST execution-stage
+                # RR as legacy/non-authoritative. Missing is safer than an
+                # invented executable value.
+                "executable_raw_rr": None,
+                "remaining_execution_penalty": None,
+                "effective_rr": decision.effective_rr,
+                "rr_basis": "PLANNED_ENTRY_LEGACY_BACKTEST",
+                "execution_cost_semantics": "PLANNED_ENTRY_LEGACY_BACKTEST",
+                "threshold_provenance": threshold_provenance,
+                "execution_evidence_status": execution_safety.get(
+                    "execution_evidence_status"
+                ),
+                "execution_safety": execution_safety,
+                "portfolio_decision": {
+                    "accepted": bool(portfolio.accepted),
+                    "decision": "ACCEPT" if portfolio.accepted else "REJECT",
+                },
+                "original_notional": sizing.get("original_notional"),
+                "risk_scale": sizing.get("risk_scale"),
+                "effective_notional": sizing.get("effective_notional"),
+                "stop_distance_basis": str(
+                    diagnostics.get("stop_distance_basis") or "PLANNED_ENTRY"
+                ),
+                "geometry_status": str(
+                    market_ctx.get("geometry_status") or "UNKNOWN"
+                ),
+                "geometry_source": str(
+                    market_ctx.get("geometry_source") or "UNKNOWN"
+                ),
+                "lifecycle_pre_submit_terminal_state": (
+                    LifecycleState.ORDER_PLACED.value
+                    if final_decision == "ACCEPT"
+                    else LifecycleState.SIGNAL_REJECTED.value
+                ),
+                "order_type": "",
+                "confidence": None,
+                "explanation": "canonical_backtest_pre_submit",
+            }
+
+        score_ctx = self.ai_brain.score_signal(
+            signal_payload, market_ctx, regime_ctx, stats_ctx
+        )
+        order_plan = self.ai_brain.choose_order_plan(
+            signal_payload, market_ctx, score_ctx
+        )
+        explanation = self.ai_brain.explain_decision(
+            signal_payload, score_ctx, order_plan
+        )
+        raw_rr = signal_payload.get(
+            "risk_reward", signal_payload.get("rr", market_ctx.get("rr"))
+        )
+        rr_metrics = self._execution_rr_metrics(
+            raw_rr,
+            market_ctx,
+            execution_ctx,
+            mode=mode_enum,
+        )
+        effective_rr = float(rr_metrics.get("effective_rr") or 0.0)
+        quality_market = {
+            **dict(market_ctx),
+            **rr_metrics,
+            "execution_ctx": execution_ctx,
+            "mode": mode_enum.value,
+        }
+        quality = self._evaluate_authoritative_trade_quality(
+            symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+            market_ctx=quality_market,
+            signal_payload=signal_payload,
+            score_ctx=score_ctx,
+            effective_rr=effective_rr,
+            mode=mode_enum,
+        )
+        diagnostics = dict(quality.get("diagnostics") or {})
+        execution_safety = evaluate_execution_safety(
+            execution_ctx,
+            effective_rr=effective_rr,
+            min_effective_rr=self.config.min_effective_rr,
+            thresholds=filter_config,
+            require_measured=mode_enum is ExecutionMode.LIVE_PRECHECK,
+        )
+        risk_scale = diagnostics.get("risk_scale")
+        require_scale = bool(diagnostics.get("stop_too_wide_softened"))
+        sizing = scale_candidate_exposure(
+            original_notional=original_notional,
+            risk_scale=risk_scale,
+            original_quantity=original_quantity,
+            require_scale=require_scale,
+        )
+        candidate = quality.get("candidate")
+        candidate_side = (
+            getattr(candidate, "side", None)
+            or signal_payload.get("side")
+            or market_ctx.get("side")
+            or "LONG"
+        )
+        snapshot = snapshot_from_state(
+            mode=mode_enum.value,
+            symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+            side=str(candidate_side),
+            candidate_notional=sizing.get("effective_notional"),
+            equity=market_ctx.get("equity"),
+            available_balance=market_ctx.get("available_balance"),
+            open_positions=market_ctx.get("open_positions", {}),
+            config=self.config,
+            now=market_ctx.get("market_ts"),
+            cooldown_until=market_ctx.get("symbol_cooldown_until"),
+            daily_realized_pnl=market_ctx.get("daily_realized_pnl"),
+            trades_today_symbol=market_ctx.get("trades_today_symbol"),
+            trades_today_global=market_ctx.get("trades_today_global"),
+            consecutive_loss_count=market_ctx.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=market_ctx.get(
+                "symbol_consecutive_loss_count"
+            ),
+            rolling_peak_equity=market_ctx.get("rolling_peak_equity"),
+            rolling_drawdown_pct=market_ctx.get("rolling_drawdown_pct"),
+            risk_state_complete=market_ctx.get("risk_state_complete"),
+            risk_state_source="PARITY_FIXTURE",
+        )
+        portfolio = evaluate_portfolio_risk(
+            {
+                "symbol": signal_payload.get("symbol"),
+                "side": candidate_side,
+                "entry": market_ctx.get("entry"),
+                "notional": sizing.get("effective_notional"),
+                "quantity": sizing.get("effective_quantity"),
+            },
+            snapshot,
+            self.config,
+            mode=mode_enum.value,
+        )
+
+        primary = ""
+        failed_gates: list[str] = []
+        if order_plan.decision != "ACCEPTED":
+            primary = canonical_reject_reason(order_plan.reason)
+            failed_gates = [primary]
+        elif not bool(quality.get("accepted")):
+            primary = str(quality.get("reject_reason") or "UNKNOWN")
+            failed_gates = [primary]
+        elif not bool(execution_safety.get("accepted")):
+            primary = str(
+                execution_safety.get("primary_reject_reason")
+                or "BAD_EXECUTION"
+            )
+            failed_gates = list(
+                execution_safety.get("all_failed_gates") or [primary]
+            )
+        elif sizing.get("status") != "COMPLETE":
+            primary = str(sizing.get("reason") or "INVALID_POSITION_SIZE")
+            failed_gates = [primary]
+        elif not portfolio.accepted:
+            primary = str(portfolio.reject_reason or "UNKNOWN_PORTFOLIO_RISK")
+            failed_gates = list(portfolio.risk_flags or [primary])
+
+        final_decision = "REJECT" if primary else "ACCEPT"
         return {
-            "decision": order_plan.decision,
-            "reason": order_plan.reason,
+            "decision": final_decision,
+            "primary_reject_reason": primary,
+            "reject_reason": primary,
+            "all_failed_gates": failed_gates,
+            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
+            "candidate_rr": rr_metrics.get("candidate_rr"),
+            "executable_raw_rr": rr_metrics.get("executable_raw_rr"),
+            "remaining_execution_penalty": rr_metrics.get(
+                "remaining_execution_penalty"
+            ),
+            "effective_rr": rr_metrics.get("effective_rr"),
+            "rr_basis": (
+                "EXPECTED_FILL_RUNTIME_PARITY"
+                if rr_metrics.get("expected_fill") is not None
+                else "UNAVAILABLE"
+            ),
+            "execution_cost_semantics": rr_metrics.get(
+                "execution_cost_semantics"
+            ),
+            "threshold_provenance": threshold_provenance,
+            "execution_evidence_status": execution_safety.get(
+                "execution_evidence_status"
+            ),
+            "execution_safety": execution_safety,
+            "portfolio_decision": {
+                "accepted": bool(portfolio.accepted),
+                "decision": "ACCEPT" if portfolio.accepted else "REJECT",
+            },
+            "original_notional": sizing.get("original_notional"),
+            "risk_scale": sizing.get("risk_scale"),
+            "effective_notional": sizing.get("effective_notional"),
+            "stop_distance_basis": str(
+                diagnostics.get("stop_distance_basis") or ""
+            ),
+            "geometry_status": str(
+                market_ctx.get("geometry_status") or "UNKNOWN"
+            ),
+            "geometry_source": str(
+                market_ctx.get("geometry_source") or "UNKNOWN"
+            ),
+            "lifecycle_pre_submit_terminal_state": (
+                LifecycleState.ORDER_PLACED.value
+                if final_decision == "ACCEPT"
+                else LifecycleState.SIGNAL_REJECTED.value
+            ),
             "order_type": order_plan.order_type,
             "confidence": float(order_plan.confidence),
-            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
-            "reject_reason": canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
-            "raw_rr": float(raw_rr or 0.0),
-            "executable_raw_rr": rr_metrics["executable_raw_rr"],
-            "expected_fill": rr_metrics["expected_fill"],
-            "effective_rr": rr_metrics["effective_rr"],
             "explanation": explanation,
+            "trade_quality": diagnostics,
         }
 
     @staticmethod
