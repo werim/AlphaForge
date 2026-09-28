@@ -17,13 +17,26 @@ def _surface(**overrides):
         "score": 8.75,
         "candidate_rr": 1.42,
         "executable_raw_rr": 1.31,
+        "remaining_execution_penalty": 0.07,
         "effective_rr": 1.24,
+        "rr_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+        "execution_cost_semantics": {
+            "reference_price": "STRATEGY_ENTRY",
+            "percentage_denominator": "STRATEGY_ENTRY",
+            "sign_convention": "POSITIVE_IS_ADVERSE",
+        },
         "threshold_provenance": {
             "min_score": "CONFIG_REGISTRY:MIN_TRADE_SCORE",
             "min_effective_rr": "CONFIG_REGISTRY:MIN_EFFECTIVE_RR",
         },
         "execution_evidence_status": "COMPLETE",
         "portfolio_decision": {"accepted": True},
+        "original_notional": 10.0,
+        "risk_scale": 0.5,
+        "effective_notional": 5.0,
+        "stop_distance_basis": "EXPECTED_FILL",
+        "geometry_status": "COMPLETE",
+        "geometry_source": "MTF_SETUP_STRUCTURE",
         "lifecycle_pre_submit_terminal_state": "ORDER_PLACED",
     }
     base.update(overrides)
@@ -39,8 +52,17 @@ def _surface(**overrides):
         ("score", 8.0),
         ("candidate_rr", 1.41),
         ("executable_raw_rr", 1.30),
+        ("remaining_execution_penalty", 0.08),
         ("effective_rr", 1.23),
+        ("rr_basis", "PLANNED_ENTRY_LEGACY"),
+        ("execution_cost_semantics", {"reference_price": "EXPECTED_FILL"}),
         ("threshold_provenance", {"min_effective_rr": "HARDCODED"}),
+        ("original_notional", 11.0),
+        ("risk_scale", 0.4),
+        ("effective_notional", 4.0),
+        ("stop_distance_basis", "PLANNED_ENTRY"),
+        ("geometry_status", "UNAVAILABLE"),
+        ("geometry_source", "LEGACY_SCANNER"),
         ("execution_evidence_status", "INCOMPLETE"),
         ("portfolio_decision", {"accepted": False}),
         ("lifecycle_pre_submit_terminal_state", "SIGNAL_REJECTED"),
@@ -49,11 +71,22 @@ def _surface(**overrides):
 def test_each_protected_dimension_is_fail_closed(field, value):
     reference = _surface()
     drifted = _surface(**{field: value})
+    semantic_fields = {
+        "decision",
+        "all_failed_gates",
+        "executable_raw_rr",
+        "remaining_execution_penalty",
+        "effective_rr",
+        "original_notional",
+        "risk_scale",
+        "effective_notional",
+        "geometry_status",
+    }
     expected_error = (
         "DECISION_PARITY_EVIDENCE_INCOMPLETE"
         if field == "execution_evidence_status" and value == "INCOMPLETE"
         else "DECISION_SEMANTIC_INVARIANT_VIOLATION"
-        if field in {"decision", "all_failed_gates"}
+        if field in semantic_fields
         else "DECISION_PARITY_MISMATCH"
     )
     with pytest.raises(ValueError, match=expected_error):
@@ -133,7 +166,11 @@ def test_identically_missing_required_evidence_still_fails_closed():
         ("score", None),
         ("candidate_rr", None),
         ("executable_raw_rr", None),
+        ("remaining_execution_penalty", None),
         ("effective_rr", None),
+        ("original_notional", None),
+        ("risk_scale", None),
+        ("effective_notional", None),
         ("execution_evidence_status", "INCOMPLETE"),
         ("portfolio_decision", None),
         ("lifecycle_pre_submit_terminal_state", ""),
@@ -143,3 +180,19 @@ def test_missing_required_authority_never_passes_by_symmetry(field, value):
     payload = _surface(**{field: value})
     with pytest.raises(ValueError, match="DECISION_PARITY_EVIDENCE_INCOMPLETE"):
         assert_pre_submit_invariant_parity(payload, payload)
+
+
+
+def test_risk_scale_drift_fails_even_when_decision_and_rr_match():
+    reference = _surface()
+    drifted = _surface(risk_scale=1.0, effective_notional=10.0)
+    with pytest.raises(ValueError, match="DECISION_PARITY_MISMATCH"):
+        assert_pre_submit_invariant_parity(reference, drifted)
+
+
+def test_identically_wrong_sizing_semantics_fail_internal_validation():
+    wrong = _surface(original_notional=10.0, risk_scale=0.5, effective_notional=10.0)
+    with pytest.raises(
+        ValueError, match="EFFECTIVE_NOTIONAL_SCALING_MISMATCH"
+    ):
+        assert_pre_submit_invariant_parity(wrong, wrong)
