@@ -46,6 +46,7 @@ from alphaforge.execution import (
     build_stop_risk_metrics,
     evaluate_stop_risk_policy,
 )
+from alphaforge.execution_ownership import acquire_execution_ownership, release_execution_ownership, validate_execution_ownership
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.decision_invariant import (
     assert_pre_submit_invariant_parity,
@@ -191,6 +192,10 @@ class RuntimeConfig:
     enable_canary_mode: bool= field(default_factory=lambda: canonical_field_default("enable_canary_mode"))
     operator_live_acknowledged: bool= field(default_factory=lambda: canonical_field_default("operator_live_acknowledged"))
     allow_live_orders: bool= field(default_factory=lambda: canonical_field_default("allow_live_orders"))
+    execution_account_scope: str= field(default_factory=lambda: canonical_field_default("execution_account_scope"))
+    paper_account_model: str= field(default_factory=lambda: canonical_field_default("paper_account_model"))
+    execution_lease_ttl_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_ttl_sec"))
+    execution_lease_min_validity_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_min_validity_sec"))
     live_trading_enabled: bool = field(default_factory=lambda: bool(canonical_field_default("live_enabled")))
     reconciliation_interval_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_interval_sec"))
     reconciliation_timeout_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_timeout_sec"))
@@ -221,6 +226,12 @@ class RuntimeConfig:
         )
         if int(self.max_clock_skew_ms) < 0:
             raise ValueError("max_clock_skew_ms must be >= 0")
+        self.execution_account_scope = str(self.execution_account_scope or "").strip()
+        self.paper_account_model = str(self.paper_account_model or "").strip().upper()
+        if self.paper_account_model != "ISOLATED_CAMPAIGN":
+            raise ValueError("PAPER_ACCOUNT_MODEL must be ISOLATED_CAMPAIGN")
+        if float(self.execution_lease_min_validity_sec) >= float(self.execution_lease_ttl_sec):
+            raise ValueError("execution_lease_min_validity_sec must be < execution_lease_ttl_sec")
         if (self.mtf_execution_confirmation_mode == "SHADOW"
                 and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
             raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
@@ -363,6 +374,11 @@ class RuntimeOrchestrator:
     _qualification_report: QualificationReport | None = field(default=None, init=False)
     _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
     _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _execution_account_scope: str | None = field(default=None, init=False)
+    _execution_account_model: str | None = field(default=None, init=False)
+    _execution_fencing_token: int | None = field(default=None, init=False)
+    _execution_lease_expires_at: float | None = field(default=None, init=False)
+    _last_execution_ownership: dict[str, Any] = field(default_factory=dict, init=False)
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_advisory_summary: dict[str, int] = field(default_factory=dict, init=False)
@@ -6001,6 +6017,10 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         enable_canary_mode=cfg.runtime.enable_canary_mode,
         operator_live_acknowledged=cfg.runtime.operator_live_acknowledged,
         allow_live_orders=cfg.runtime.allow_live_orders,
+        execution_account_scope=cfg.runtime.execution_account_scope,
+        paper_account_model=cfg.runtime.paper_account_model,
+        execution_lease_ttl_sec=cfg.runtime.execution_lease_ttl_sec,
+        execution_lease_min_validity_sec=cfg.runtime.execution_lease_min_validity_sec,
         live_trading_enabled=cfg.runtime.live_enabled,
         reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec,
         reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
