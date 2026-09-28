@@ -1165,7 +1165,7 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
         ai_brain=_AlwaysAcceptBrain(),
         market_scanner=scanner,
         real_execution_adapter=_Adapter(),
-        persistence_engine=init_db("sqlite+pysqlite:///:memory:"),
+        execution_ownership_engine=init_db("sqlite+pysqlite:///:memory:"),
         on_lifecycle_event=lambda e: events.append(e),
     )
     orchestrator._qualification_report = type("Qualified", (), {"qualified": True, "verdict": "LIVE_READY"})()
@@ -1481,7 +1481,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=scanner,
-        persistence_engine=init_db(f"sqlite+pysqlite:///{tmp_path / 'paper-ownership.db'}"),
+        execution_ownership_engine=init_db(f"sqlite+pysqlite:///{tmp_path / 'paper-ownership.db'}"),
     )
     orchestrator._campaign_id = "campaign"
     orchestrator._burnin_run_id = "run"
