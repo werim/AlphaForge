@@ -977,6 +977,13 @@ def test_mode_parity_cannot_treat_unavailable_blocking_context_as_complete() -> 
         ai_brain=AIBrain.for_stateless_scoring(),
         market_scanner=lambda: asyncio.sleep(0, result=[]),
     )
+    samples = [dict(row) for row in runtime._qualification_samples]
+    samples[-1].update({
+        "latency_ms": None,
+        "latency_status": "UNAVAILABLE",
+        "latency_source": "UNAVAILABLE",
+    })
+    runtime._qualification_samples = tuple(samples)
 
     parity = runtime._build_mode_parity_evidence(min_sample_count=3)
 
