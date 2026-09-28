@@ -1,4 +1,4 @@
-"""Run focused #421 safety mutations against disposable source/test copies.
+"""Run focused #421/#498 safety mutations against disposable source/test copies.
 
 No production file or campaign database is edited. A mutation counts as killed
 only when a previously passing selected test fails an assertion.
@@ -68,6 +68,30 @@ def mutations() -> list[Mutation]:
                  'candidate_notional = float(sizing_projection["effective_notional"])',
                  'candidate_notional = float(sizing_projection["original_notional"])',
                  "tests/test_issue489_risk_scale_sizing.py::test_paper_softened_wide_stop_executes_scaled_notional_and_quantity"),
+        Mutation("planned_entry_stop_basis", "src/alphaforge/order.py",
+                 "planned_entry=candidate.entry,\n        expected_fill=expected_fill_for_stop,\n        stop=candidate.sl,",
+                 "planned_entry=candidate.entry,\n        expected_fill=candidate.entry,\n        stop=candidate.sl,",
+                 "tests/test_issue492_executable_stop_risk.py::test_trade_quality_uses_expected_fill_not_planned_entry_for_stop_gate"),
+        Mutation("missing_execution_metrics_pass", "src/alphaforge/burnin_qualification.py",
+                 "if missing or invalid_numeric:\n            evidence_gaps",
+                 'if missing or invalid_numeric:\n            return "PASS"\n        if False:\n            evidence_gaps',
+                 "tests/test_phase7_qualification.py::test_execution_metrics_missing_measurements_are_insufficient"),
+        Mutation("missing_drawdown_coalesced_resolved", "src/alphaforge/burnin_qualification.py",
+                 'if missing:\n                gaps.append(f"{event_id}:" + ",".join(sorted(set(missing))))\n                continue\n            valid_rows.append({',
+                 'if False:\n                gaps.append(f"{event_id}:" + ",".join(sorted(set(missing))))\n                continue\n            valid_rows.append({',
+                 "tests/test_phase7_qualification.py::test_synthetic_zero_drawdown_placeholder_is_insufficient"),
+        Mutation("rr_stage_writer_swap", "src/alphaforge/persistence.py",
+                 "payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}\n    # Compatibility contract:",
+                 'payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}\n    payload["candidate_raw_rr"], payload["executable_raw_rr"] = (\n        payload["executable_raw_rr"], payload["candidate_raw_rr"]\n    )\n    # Compatibility contract:',
+                 "tests/test_issue495_rr_stage_evidence.py::test_raw_rr_is_candidate_alias_and_rr_stages_round_trip"),
+        Mutation("sizing_removed_from_parity_projection", "src/alphaforge/decision_invariant.py",
+                 'risk_scale=_number(payload.get("risk_scale")),\n        effective_notional=_number(payload.get("effective_notional")),',
+                 'risk_scale=1.0,\n        effective_notional=_number(payload.get("original_notional")),',
+                 "tests/test_issue490_protected_mode_parity.py::test_mode_parity_fails_on_capital_sizing_drift"),
+        Mutation("semantic_validation_bypass", "src/alphaforge/decision_invariant.py",
+                 "violations = validate_pre_submit_semantics(\n        payload, numeric_abs_tol=numeric_abs_tol\n    )",
+                 "return project_pre_submit_invariant(payload)\n    violations = validate_pre_submit_semantics(\n        payload, numeric_abs_tol=numeric_abs_tol\n    )",
+                 "tests/test_issue486_semantic_decision_invariants.py::test_identically_wrong_surfaces_do_not_pass_parity"),
     ])
     for field in ("run_id", "campaign_id", "release_id"):
         cases.append(Mutation(field + "_scope", SCOPE,
