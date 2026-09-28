@@ -69,7 +69,7 @@ jobs:
       - name: RR-stage evidence semantics gate
         if: github.event_name == 'pull_request'
         run: |
-          pytest -q tests/test_issue495_rr_stage_evidence.py
+          pytest -q tests/test_issue495_rr_stage_evidence.py tests/test_issue391_decision_evidence_writer.py
           pytest -q tests/test_live_readiness.py -k "phase3"
 
       - name: System audit fabric gate
