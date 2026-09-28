@@ -1895,8 +1895,17 @@ class RuntimeOrchestrator:
             logger.exception("MARKET_SCAN_LOOP_FAILED")
             raise
 
-    def _canonical_filter_config(self) -> dict[str, Any]:
-        return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
+    def _canonical_filter_config(
+        self,
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        mode_value = (
+            mode.value if isinstance(mode, ExecutionMode)
+            else str(mode).upper() if mode is not None
+            else self.config.execution_mode.value
+        )
+        return runtime_filter_config(self.config, mode=mode_value)
 
     def _evaluate_authoritative_trade_quality(
         self,
@@ -1906,6 +1915,7 @@ class RuntimeOrchestrator:
         signal_payload: Mapping[str, Any],
         score_ctx: Any,
         effective_rr: float,
+        mode: ExecutionMode | str | None = None,
     ) -> dict[str, Any]:
         """Project RuntimeOrchestrator inputs into the shared quality authority.
 
@@ -1973,7 +1983,7 @@ class RuntimeOrchestrator:
         candidate = build_order_candidate(
             symbol,
             quality_market_ctx,
-            self._canonical_filter_config(),
+            self._canonical_filter_config(mode=mode),
         )
         if isinstance(candidate, OrderRejection):
             return {
@@ -1988,8 +1998,12 @@ class RuntimeOrchestrator:
             }
 
         config = {
-            **self._canonical_filter_config(),
-            "MODE": self.config.execution_mode.value,
+            **self._canonical_filter_config(mode=mode),
+            "MODE": (
+                mode.value if isinstance(mode, ExecutionMode)
+                else str(mode).upper() if mode is not None
+                else self.config.execution_mode.value
+            ),
             # AIBrain already owns score/expectancy acceptance and reject
             # precedence in RuntimeOrchestrator. Re-running those gates here
             # would create duplicate authority. Direct/backtest callers keep
