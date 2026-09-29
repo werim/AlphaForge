@@ -187,7 +187,9 @@ def test_guided_outside_zone_reject_preserves_exact_reproducible_geometry(monkey
     )
 
     assert canonical["forward_label_subject"] == "GUIDED_GEOMETRY_REJECT"
-    assert canonical["reject_quality_attributable"] is True
+    assert canonical["reject_quality_attributable"] is bool(
+        evidence["forward_geometry_valid"]
+    )
     assert canonical["entry"] == evidence["execution_entry"]
     assert canonical["sl"] == evidence["structural_stop"]
     assert canonical["tp"] == evidence["structural_target"]
@@ -230,7 +232,27 @@ def test_incomplete_guided_reject_geometry_remains_non_attributable(monkeypatch)
 def test_persisted_guided_geometry_reject_carries_exact_gate_provenance(tmp_path, monkeypatch):
     engine, _campaign, _run, runtime = _campaign_runtime(tmp_path)
     mtf, execution_ctx = _outside_zone_mtf(monkeypatch)
+    mtf = copy.deepcopy(mtf)
     evidence = mtf["generation"]["geometry_evidence"]
+    evidence.update(
+        {
+            "evidence_status": "COMPLETE",
+            "reason": "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE",
+            "execution_entry": 102.0,
+            "entry_zone_low": 100.0,
+            "entry_zone_high": 101.0,
+            "structural_stop": 103.0,
+            "structural_target": 99.0,
+            "side": "SHORT",
+            "regime_direction": "SHORT",
+            "setup_type": "SHORT_PULLBACK",
+            "setup_phase": "PULLBACK",
+            "setup_observed_direction": "LONG",
+            "setup_recent_direction": "LONG",
+            "execution_direction": "SHORT",
+            "forward_geometry_valid": True,
+        }
+    )
 
     asyncio.run(
         runtime._persist_reject(
