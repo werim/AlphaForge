@@ -607,16 +607,28 @@ def build_mtf_candidate_context(
                 and float(value) > 0.0
                 for value in structural_values
             )
+            side = str(regime.get("direction") or "").upper()
+            forward_geometry_valid = False
+            if entry_complete and structure_complete and side in {"LONG", "SHORT"}:
+                entry_value = float(entry)
+                stop_value = float(setup.get("structural_stop"))
+                target_value = float(setup.get("structural_target"))
+                forward_geometry_valid = (
+                    stop_value < entry_value < target_value
+                    if side == "LONG"
+                    else target_value < entry_value < stop_value
+                )
             geometry_evidence.update({
                 "execution_entry": float(entry) if entry_complete else None,
                 "entry_zone_low": float(entry_zone[0]) if zone_complete else None,
                 "entry_zone_high": float(entry_zone[1]) if zone_complete else None,
+                "forward_geometry_valid": forward_geometry_valid,
                 "evidence_status": (
                     "COMPLETE"
                     if entry_complete
                     and zone_complete
                     and structure_complete
-                    and str(regime.get("direction") or "").upper() in {"LONG", "SHORT"}
+                    and side in {"LONG", "SHORT"}
                     and bool(setup.get("setup_type"))
                     else "INCOMPLETE"
                 ),
