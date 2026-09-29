@@ -4764,7 +4764,7 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         canonical_persisted_count: int | None = None
         if engine is not None:
-            def persist_atomic(conn: Any) -> int:
+            def persist_atomic(conn: Any) -> int | None:
                 if not record_rejected_signal_review(conn, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload):
                     raise RuntimeError("rejected_signal_review_persistence_failed")
                 self._persist_burnin_decision(
@@ -4775,7 +4775,7 @@ class RuntimeOrchestrator:
                     persisted = self.on_reject_persist_atomic(conn, payload)
                     if persisted is None or persisted is False:
                         raise RuntimeError("rejected_decision_artifact_persistence_failed")
-                return self._canonical_persisted_reject_count(conn) if self._burnin_run_id else 0
+                return self._canonical_persisted_reject_count(conn) if self._burnin_run_id else None
 
             for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
                 conn = engine.connect()
@@ -4842,6 +4842,9 @@ class RuntimeOrchestrator:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+            if engine is None:
+                self._persisted_reject_decision_ids.add(str(payload["reject_decision_id"]))
+                self.metrics.rejects_persisted = len(self._persisted_reject_decision_ids)
         self._record_state_direction_shadow(payload, actual_decision="REJECTED")
         self._schedule_agent_shadow(payload)
 
