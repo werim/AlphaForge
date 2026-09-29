@@ -385,6 +385,8 @@ class RuntimeOrchestrator:
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
     _active_position_sides: dict[str, str] = field(default_factory=dict, init=False)
+    _active_position_episode_ids: dict[str, str] = field(default_factory=dict, init=False)
+    _canonical_duplicate_position_keys: set[str] = field(default_factory=set, init=False)
     _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
     _qualification_report: QualificationReport | None = field(default=None, init=False)
     _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
@@ -1233,12 +1235,15 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
-            open_positions = conn.execute(text("SELECT signal_id,symbol,side,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
+            open_positions = conn.execute(text("SELECT trade_id,signal_id,symbol,side,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
             for position in open_positions:
                 symbol = str(position.get("symbol") or "").upper()
                 if symbol:
                     self._active_positions[symbol] = float(position.get("notional") or 0.0)
                     self._active_position_sides[symbol] = str(position.get("side") or "UNKNOWN").upper()
+                    episode_id = str(position.get("trade_id") or position.get("signal_id") or "").strip()
+                    if episode_id:
+                        self._active_position_episode_ids[symbol] = episode_id
                     self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_OPENED.value
                     signal_id = str(position.get("signal_id") or "").strip()
                     if signal_id:
@@ -1392,6 +1397,8 @@ class RuntimeOrchestrator:
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
+                                "active_position_episode_id": payload.get("active_position_episode_id"),
+                                "guided_reject_geometry": payload.get("guided_reject_geometry"),
                                 "campaign_id": campaign_id, "runtime_identity": runtime_identity,
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
@@ -3310,6 +3317,22 @@ class RuntimeOrchestrator:
                 return
 
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
+        if risk_reject == "DUPLICATE_POSITION":
+            setup_identity = str(market_ctx.get("setup_identity") or "").strip()
+            active_position_episode_id = str(
+                self._active_position_episode_ids.get(selection.symbol) or ""
+            ).strip()
+            if setup_identity and active_position_episode_id:
+                if self._duplicate_position_reject_recorded(
+                    setup_identity, active_position_episode_id
+                ) and not self._kill_switch_active():
+                    return
+                market_ctx["active_position_episode_id"] = active_position_episode_id
+            else:
+                # The exposure guard stays fail-closed. Incomplete identity may
+                # be audited, but it cannot become qualification-quality evidence.
+                market_ctx["reject_quality_attributable"] = False
+                market_ctx["non_attributable_reason"] = "DUPLICATE_POSITION_IDENTITY_UNAVAILABLE"
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": None, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
@@ -3319,6 +3342,8 @@ class RuntimeOrchestrator:
         if risk_reject is not None:
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": None, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
+            # Do not cache success speculatively: the next scan proves durable
+            # canonical persistence before suppressing another evidence row.
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         legacy_pre_ai_execution_reason = None
@@ -4229,6 +4254,9 @@ class RuntimeOrchestrator:
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._active_position_sides[symbol] = str(market_ctx.get("side") or "UNKNOWN").upper()
+        # The episode identity must equal the durable pending-position trade_id
+        # so restart/continuation reconstructs the exact same dedupe boundary.
+        self._active_position_episode_ids[symbol] = order_id
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
     def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float:
@@ -4670,6 +4698,7 @@ class RuntimeOrchestrator:
         for symbol in set(self._active_positions) - open_symbols:
             self._active_positions.pop(symbol, None)
             self._active_position_sides.pop(symbol, None)
+            self._active_position_episode_ids.pop(symbol, None)
             self._pending_orders.pop(symbol, None)
             self._symbol_cooldown_until.pop(symbol, None)
             self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_CLOSED.value
@@ -5056,56 +5085,103 @@ class RuntimeOrchestrator:
                                  "LEGACY_CANDIDATE")
         all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         if guided_without_candidate:
-            shadow_geometry = {key: result.get(key) for key in (
-                "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
-                "take_profit", "rr", "raw_rr", "risk_reward", "effective_rr", "setup_type",
-                "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
-            )}
-            result["legacy_shadow_geometry"] = {
-                **shadow_geometry,
-                "attributable": False,
-                "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
-                "all_failed_gates": list(all_failed_gates),
-                "failed_gate_evidence": list(failed_gate_evidence),
-            }
-            # The scanner-shadow gates are diagnostic only. Do not leak them
-            # back into canonical multi-gate evidence for a missing guided candidate.
-            all_failed_gates = []
-            failed_gate_evidence = []
-            # Drop packaged upstream audit evidence before the canonical re-audit.
-            # Otherwise execution_safety.failed_gate_evidence can resurrect
-            # geometry-dependent gates (for example LOW_EFFECTIVE_RR) after the
-            # corresponding canonical geometry/effective_rr fields are scrubbed.
-            result.pop("execution_safety", None)
-            result.pop("all_failed_gates", None)
-            result.pop("failed_gate_evidence", None)
-            for key in (
-                "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
-                "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
-                "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
-                "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
-                "setup_type", "setup_reason", "geometry_source",
-            ):
-                result[key] = None
-            result["geometry_status"] = "UNAVAILABLE"
-            result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
-            result["reject_quality_attributable"] = False
-            result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
-            if primary_reject_reason == "LOW_EFFECTIVE_RR":
-                # LOW_EFFECTIVE_RR requires attributable canonical guided geometry.
-                # Preserve the legacy scanner diagnosis only as shadow evidence.
-                result["legacy_shadow_geometry"]["reject_reason"] = primary_reject_reason
-                result["source_primary_reject_reason"] = primary_reject_reason
-                primary_reject_reason = "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
-                reject_reasons = [
-                    primary_reject_reason,
-                    *[reason for reason in reject_reasons if reason != "LOW_EFFECTIVE_RR"],
-                ]
-                reject_reasons = list(dict.fromkeys(reject_reasons))
-                result["reason"] = primary_reject_reason
-                if result.get("reject_reason") is not None:
-                    result["reject_reason"] = primary_reject_reason
-                result["authoritative_reject_reason"] = primary_reject_reason
+            guided_geometry = (
+                generation.get("geometry_evidence")
+                if isinstance(generation.get("geometry_evidence"), Mapping)
+                else {}
+            )
+            guided_geometry_reason = canonical_reject_reason(
+                guided_geometry.get("reason")
+            )
+            guided_geometry_complete = (
+                str(guided_geometry.get("evidence_status") or "").upper() == "COMPLETE"
+                and guided_geometry_reason == primary_reject_reason
+                and primary_reject_reason != "UNKNOWN"
+            )
+            if guided_geometry_complete:
+                # Persist the exact guided decision-time geometry that produced
+                # the reject. Scanner geometry remains excluded.
+                result.update({
+                    "side": guided_geometry.get("side"),
+                    "entry": guided_geometry.get("execution_entry"),
+                    "sl": guided_geometry.get("structural_stop"),
+                    "tp": guided_geometry.get("structural_target"),
+                    "setup_type": guided_geometry.get("setup_type"),
+                    "geometry_status": "REJECTED",
+                    "geometry_reason": primary_reject_reason,
+                    "geometry_source": guided_geometry.get("geometry_source")
+                        or "MTF_SETUP_STRUCTURE",
+                    "guided_reject_geometry": dict(guided_geometry),
+                    "reject_quality_attributable": bool(
+                        guided_geometry.get("forward_geometry_valid")
+                    ),
+                    "non_attributable_reason": (
+                        None
+                        if guided_geometry.get("forward_geometry_valid")
+                        else "GUIDED_REJECT_FORWARD_GEOMETRY_INVALID"
+                    ),
+                    "rr": None,
+                    "raw_rr": None,
+                    "risk_reward": None,
+                    "candidate_rr": None,
+                    "expected_fill": None,
+                    "executable_raw_rr": None,
+                    "remaining_execution_penalty": None,
+                    "effective_rr": None,
+                    "execution_cost_semantics": None,
+                })
+                forward_label_subject = "GUIDED_GEOMETRY_REJECT"
+            else:
+                shadow_geometry = {key: result.get(key) for key in (
+                    "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
+                    "take_profit", "rr", "raw_rr", "risk_reward", "effective_rr", "setup_type",
+                    "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
+                )}
+                result["legacy_shadow_geometry"] = {
+                    **shadow_geometry,
+                    "attributable": False,
+                    "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+                    "all_failed_gates": list(all_failed_gates),
+                    "failed_gate_evidence": list(failed_gate_evidence),
+                }
+                # The scanner-shadow gates are diagnostic only. Do not leak them
+                # back into canonical multi-gate evidence for a missing guided candidate.
+                all_failed_gates = []
+                failed_gate_evidence = []
+                # Drop packaged upstream audit evidence before the canonical re-audit.
+                # Otherwise execution_safety.failed_gate_evidence can resurrect
+                # geometry-dependent gates (for example LOW_EFFECTIVE_RR) after the
+                # corresponding canonical geometry/effective_rr fields are scrubbed.
+                result.pop("execution_safety", None)
+                result.pop("all_failed_gates", None)
+                result.pop("failed_gate_evidence", None)
+                for key in (
+                    "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
+                    "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
+                    "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
+                    "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
+                    "setup_type", "setup_reason", "geometry_source",
+                ):
+                    result[key] = None
+                result["geometry_status"] = "UNAVAILABLE"
+                result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
+                result["reject_quality_attributable"] = False
+                result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
+                if primary_reject_reason == "LOW_EFFECTIVE_RR":
+                    # LOW_EFFECTIVE_RR requires attributable canonical guided geometry.
+                    # Preserve the legacy scanner diagnosis only as shadow evidence.
+                    result["legacy_shadow_geometry"]["reject_reason"] = primary_reject_reason
+                    result["source_primary_reject_reason"] = primary_reject_reason
+                    primary_reject_reason = "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+                    reject_reasons = [
+                        primary_reject_reason,
+                        *[reason for reason in reject_reasons if reason != "LOW_EFFECTIVE_RR"],
+                    ]
+                    reject_reasons = list(dict.fromkeys(reject_reasons))
+                    result["reason"] = primary_reject_reason
+                    if result.get("reject_reason") is not None:
+                        result["reject_reason"] = primary_reject_reason
+                    result["authoritative_reject_reason"] = primary_reject_reason
         all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
@@ -5184,6 +5260,17 @@ class RuntimeOrchestrator:
         if engine is None or campaign_id is None:
             return None
         execution_ctx = dict(payload.get("execution_ctx") or {})
+        mtf_payload = payload.get("mtf") if isinstance(payload.get("mtf"), Mapping) else {}
+        generation_payload = (
+            mtf_payload.get("generation")
+            if isinstance(mtf_payload.get("generation"), Mapping)
+            else {}
+        )
+        guided_geometry_evidence = (
+            generation_payload.get("geometry_evidence")
+            if isinstance(generation_payload.get("geometry_evidence"), Mapping)
+            else {}
+        )
         costs = self._phase7_costs_from_execution_ctx(execution_ctx)
         signal_id = str(payload.get("signal_id") or "")
         shadow_geometry = (payload.get("legacy_shadow_geometry")
@@ -5291,6 +5378,17 @@ class RuntimeOrchestrator:
                                        "all_failed_gates": payload.get("all_failed_gates"),
                                        "failed_gate_evidence": payload.get("failed_gate_evidence"),
                                        "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),
+                                       "active_position_episode_id": payload.get("active_position_episode_id"),
+                                       "guided_geometry_evidence": dict(guided_geometry_evidence),
+                                       "decision_execution_entry": guided_geometry_evidence.get("execution_entry"),
+                                       "entry_zone_low": guided_geometry_evidence.get("entry_zone_low"),
+                                       "entry_zone_high": guided_geometry_evidence.get("entry_zone_high"),
+                                       "structural_stop": guided_geometry_evidence.get("structural_stop"),
+                                       "structural_target": guided_geometry_evidence.get("structural_target"),
+                                       "setup_phase": guided_geometry_evidence.get("setup_phase"),
+                                       "setup_observed_direction": guided_geometry_evidence.get("setup_observed_direction"),
+                                       "setup_recent_direction": guided_geometry_evidence.get("setup_recent_direction"),
+                                       "execution_direction": guided_geometry_evidence.get("execution_direction"),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,
@@ -5621,6 +5719,67 @@ class RuntimeOrchestrator:
             return False
         if exists:
             memory.add(setup_identity)
+            return True
+        return False
+
+    def _duplicate_position_reject_key(
+        self, setup_identity: str, active_position_episode_id: str
+    ) -> str:
+        scope = self._reject_campaign_id() or self.runtime_instance_id
+        return "duplicate-position:" + canonical_hash({
+            "scope": scope,
+            "setup_identity": setup_identity,
+            "active_position_episode_id": active_position_episode_id,
+        })[:24]
+
+    def _duplicate_position_reject_recorded(
+        self, setup_identity: str, active_position_episode_id: str
+    ) -> bool:
+        """Return whether this setup already produced a reject in this position episode.
+
+        This helper controls evidence identity only. The active-position guard
+        itself remains fail-closed and continues to reject every duplicate order
+        attempt.
+        """
+        if not setup_identity or not active_position_episode_id:
+            return False
+        key = self._duplicate_position_reject_key(
+            setup_identity, active_position_episode_id
+        )
+        if key in self._canonical_duplicate_position_keys:
+            return True
+        engine = self._resolve_persistence_engine()
+        campaign_id = self._reject_campaign_id()
+        if engine is None or campaign_id is None:
+            return False
+        try:
+            with engine.connect() as conn:
+                exists = conn.execute(text(f"""SELECT 1
+                    FROM burnin_observations o
+                    WHERE o.burnin_run_id IN (
+                        SELECT burnin_run_id FROM burnin_campaign_runs
+                        WHERE campaign_id=:campaign_id
+                    )
+                      AND UPPER(COALESCE(o.decision,''))='REJECTED'
+                      AND UPPER(COALESCE(
+                          json_extract(o.metrics_json,'$.primary_reject_reason'),''
+                      ))='DUPLICATE_POSITION'
+                      AND json_extract(o.metrics_json,'$.setup_identity')=:setup_identity
+                      AND json_extract(
+                          o.metrics_json,'$.active_position_episode_id'
+                      )=:episode_id
+                      AND {canonical_decision_sql('o')}
+                    LIMIT 1"""), {
+                        "campaign_id": campaign_id,
+                        "setup_identity": setup_identity,
+                        "episode_id": active_position_episode_id,
+                    }).first()
+        except Exception:
+            # Persistence lookup failure never weakens the position guard.
+            # At worst it permits another reject artifact for later audit.
+            return False
+        if exists:
+            self._canonical_duplicate_position_keys.add(key)
             return True
         return False
 

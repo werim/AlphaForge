@@ -558,16 +558,84 @@ def build_mtf_candidate_context(
     if guided_signal_generation_enabled:
         candidate: dict[str, Any] = {}
         geometry_reason: str | None = None
+        geometry_evidence: dict[str, Any] = {
+            "evidence_status": "INCOMPLETE",
+            "execution_entry": None,
+            "entry_zone_low": None,
+            "entry_zone_high": None,
+            "structural_stop": setup.get("structural_stop"),
+            "structural_target": setup.get("structural_target"),
+            "setup_type": setup.get("setup_type"),
+            "setup_phase": setup.get("phase"),
+            "side": regime.get("direction"),
+            "regime_direction": regime.get("direction"),
+            "setup_observed_direction": setup.get("observed_direction", setup.get("direction")),
+            "setup_recent_direction": setup.get("recent_direction"),
+            "execution_direction": execution.get("direction"),
+            "regime_timeframe": regime_timeframe,
+            "setup_timeframe": setup_timeframe,
+            "execution_timeframe": execution_timeframe,
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "reason": None,
+        }
         if alignment.get("aligned") and values["execution"]:
             phase = str(setup.get("phase") or "INVALID")
             entry_zone = setup.get("entry_zone")
             entry = values["execution"][-1].get("close")
-            within_entry_zone = (
+            zone_complete = (
                 isinstance(entry_zone, (list, tuple))
                 and len(entry_zone) == 2
-                and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in entry_zone)
-                and isinstance(entry, (int, float))
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    and float(value) > 0.0
+                    for value in entry_zone
+                )
+            )
+            entry_complete = (
+                isinstance(entry, (int, float))
+                and not isinstance(entry, bool)
                 and math.isfinite(float(entry))
+                and float(entry) > 0.0
+            )
+            structural_values = (setup.get("structural_stop"), setup.get("structural_target"))
+            structure_complete = all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(value) > 0.0
+                for value in structural_values
+            )
+            side = str(regime.get("direction") or "").upper()
+            forward_geometry_valid = False
+            if entry_complete and structure_complete and side in {"LONG", "SHORT"}:
+                entry_value = float(entry)
+                stop_value = float(setup.get("structural_stop"))
+                target_value = float(setup.get("structural_target"))
+                forward_geometry_valid = (
+                    stop_value < entry_value < target_value
+                    if side == "LONG"
+                    else target_value < entry_value < stop_value
+                )
+            geometry_evidence.update({
+                "execution_entry": float(entry) if entry_complete else None,
+                "entry_zone_low": float(entry_zone[0]) if zone_complete else None,
+                "entry_zone_high": float(entry_zone[1]) if zone_complete else None,
+                "forward_geometry_valid": forward_geometry_valid,
+                "evidence_status": (
+                    "COMPLETE"
+                    if entry_complete
+                    and zone_complete
+                    and structure_complete
+                    and side in {"LONG", "SHORT"}
+                    and bool(setup.get("setup_type"))
+                    else "INCOMPLETE"
+                ),
+            })
+            within_entry_zone = (
+                zone_complete
+                and entry_complete
                 and float(entry_zone[0]) <= float(entry) <= float(entry_zone[1])
             )
             if not within_entry_zone:
@@ -585,6 +653,7 @@ def build_mtf_candidate_context(
                 )
         elif alignment.get("aligned"):
             geometry_reason = "KLINE_INSUFFICIENT_ROWS"
+        geometry_evidence["reason"] = geometry_reason
         generation = {
             "mode": "REGIME_GUIDED",
             "evidence_status": "COMPLETE" if candidate else "INCOMPLETE",
@@ -594,6 +663,7 @@ def build_mtf_candidate_context(
             "setup_phase_source": "15m_regime_guided",
             "timing_source": "1m_execution_confirmation",
             "geometry_source": "15m_setup_structure",
+            "geometry_evidence": geometry_evidence,
         }
         if alignment.get("aligned") and not candidate:
             alignment = {
