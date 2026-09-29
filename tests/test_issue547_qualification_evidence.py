@@ -11,7 +11,7 @@ from alphaforge.burnin_resolver import (
     persist_pending_position,
     resolve_position_closure,
 )
-from alphaforge.multi_timeframe import BinanceMTFProvider
+from alphaforge.multi_timeframe import BinanceMTFProvider, REGIME_GUIDED_SETUP_PHASES
 from alphaforge.persistence import init_db
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -369,3 +369,10 @@ def test_position_closure_clamps_external_negative_excursions(tmp_path):
         ).one()
     assert row.mfe == 0.0
     assert row.mae == 0.0
+
+
+def test_issue547_does_not_tune_pullback_entry_policy_without_oos_evidence():
+    # The 10/10 SHORT_PULLBACK loss cluster is diagnostic evidence, not an
+    # admissible untouched-OOS basis for changing production behavior.
+    assert "PULLBACK" in REGIME_GUIDED_SETUP_PHASES
+    assert {"CONTINUATION", "REENTRY_READY"}.issubset(REGIME_GUIDED_SETUP_PHASES)
