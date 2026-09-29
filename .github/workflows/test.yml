@@ -54,7 +54,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           pytest -q tests/test_issue437_system_verification_router.py
-          python -m alphaforge.system_verification plan \
+          PYTHONPATH=src python -m alphaforge.system_verification plan \
             --base "origin/${GITHUB_BASE_REF}" \
             --head HEAD \
             --output artifacts/system-verification-plan.json
