@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
+from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import (
     evaluate_forward_outcome,
     persist_pending_position,
@@ -376,3 +377,30 @@ def test_issue547_does_not_tune_pullback_entry_policy_without_oos_evidence():
     # admissible untouched-OOS basis for changing production behavior.
     assert "PULLBACK" in REGIME_GUIDED_SETUP_PHASES
     assert {"CONTINUATION", "REENTRY_READY"}.issubset(REGIME_GUIDED_SETUP_PHASES)
+
+
+def test_guided_geometry_subject_is_qualification_attributable_only_when_explicitly_valid():
+    assert BurnInQualificationEngine._reject_quality_attributable(
+        {
+            "reject_reason": "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE",
+            "payload_json": json.dumps(
+                {
+                    "forward_label_subject": "GUIDED_GEOMETRY_REJECT",
+                    "reject_quality_attributable": True,
+                    "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+                }
+            ),
+        }
+    )
+    assert not BurnInQualificationEngine._reject_quality_attributable(
+        {
+            "reject_reason": "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE",
+            "payload_json": json.dumps(
+                {
+                    "forward_label_subject": "GUIDED_GEOMETRY_REJECT",
+                    "reject_quality_attributable": False,
+                    "non_attributable_reason": "GUIDED_REJECT_FORWARD_GEOMETRY_INVALID",
+                }
+            ),
+        }
+    )
