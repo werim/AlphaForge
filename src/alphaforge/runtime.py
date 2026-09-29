@@ -3326,7 +3326,7 @@ class RuntimeOrchestrator:
             if setup_identity and active_position_episode_id:
                 if self._duplicate_position_reject_recorded(
                     setup_identity, active_position_episode_id
-                ):
+                ) and not self._kill_switch_active():
                     return
                 market_ctx["active_position_episode_id"] = active_position_episode_id
                 duplicate_position_key = self._duplicate_position_reject_key(
@@ -4258,9 +4258,9 @@ class RuntimeOrchestrator:
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._active_position_sides[symbol] = str(market_ctx.get("side") or "UNKNOWN").upper()
-        self._active_position_episode_ids[symbol] = str(
-            result.get("position_id") or order_id
-        )
+        # The episode identity must equal the durable pending-position trade_id
+        # so restart/continuation reconstructs the exact same dedupe boundary.
+        self._active_position_episode_ids[symbol] = order_id
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
     def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float:
