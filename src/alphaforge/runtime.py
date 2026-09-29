@@ -56,14 +56,24 @@ from alphaforge.decision_invariant import (
     project_pre_submit_invariant,
 )
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
-from alphaforge.runtime_heartbeat import is_sqlite_busy_error, save_runtime_heartbeat
+from alphaforge.runtime_heartbeat import (
+    SQLITE_BUSY_RETRY_ATTEMPTS,
+    SQLITE_BUSY_RETRY_BASE_SECONDS,
+    is_sqlite_busy_error,
+    save_runtime_heartbeat,
+)
 from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
+from alphaforge.persistence import (
+    fetch_expectancy_stat_detail,
+    init_db,
+    save_decision_evidence,
+    save_rejected_decision_artifact,
+)
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
@@ -301,6 +311,8 @@ class RuntimeMetrics:
     heartbeat_persistence_failures: int = 0
     heartbeat_persistence_recoveries: int = 0
     heartbeat_persistence_degraded: bool = False
+    reject_persistence_failures: int = 0
+    reject_persistence_degraded: bool = False
     persistence_enabled: bool = False
 
 
@@ -318,6 +330,7 @@ class RuntimeOrchestrator:
     reject_candle_provider: Callable[[str, str, str], Any] | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+    on_reject_persist_atomic: Callable[[Any, dict[str, Any]], Any] | None = None
     state_direction_shadow_enabled: bool = False
     state_direction_shadow_store: StateDirectionShadowStore | None = None
     paper_slippage_bps: float = 2.0
@@ -839,6 +852,8 @@ class RuntimeOrchestrator:
                 "heartbeat_persistence_degraded": self.metrics.heartbeat_persistence_degraded,
                 "heartbeat_persistence_failure_streak": self._heartbeat_persistence_failure_streak,
                 "heartbeat_persistence_failure_threshold": self._heartbeat_persistence_failure_threshold,
+                "reject_persistence_failures": self.metrics.reject_persistence_failures,
+                "reject_persistence_degraded": self.metrics.reject_persistence_degraded,
             },
         )
 
@@ -4749,15 +4764,62 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         canonical_persisted_count: int | None = None
         if engine is not None:
-            with engine.begin() as conn:
+            def persist_atomic(conn: Any) -> int:
                 if not record_rejected_signal_review(conn, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload):
                     raise RuntimeError("rejected_signal_review_persistence_failed")
                 self._persist_burnin_decision(
                     {**payload, "decision": "REJECTED"},
                     lifecycle_state=LifecycleState.SIGNAL_REJECTED.value, conn=conn)
                 self._persist_pending_reject(payload, conn=conn)
-                if self._burnin_run_id:
-                    canonical_persisted_count = self._canonical_persisted_reject_count(conn)
+                if self.on_reject_persist_atomic is not None:
+                    persisted = self.on_reject_persist_atomic(conn, payload)
+                    if persisted is None or persisted is False:
+                        raise RuntimeError("rejected_decision_artifact_persistence_failed")
+                return self._canonical_persisted_reject_count(conn) if self._burnin_run_id else 0
+
+            for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
+                conn = engine.connect()
+                transaction = None
+                old_timeout = None
+                try:
+                    if engine.dialect.name == "sqlite":
+                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                        conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                        conn.commit()
+                    transaction = conn.begin()
+                    if engine.dialect.name == "sqlite":
+                        conn.exec_driver_sql("BEGIN IMMEDIATE")
+                    canonical_persisted_count = persist_atomic(conn)
+                    transaction.commit()
+                    break
+                except OperationalError as exc:
+                    if transaction is not None:
+                        transaction.rollback()
+                    if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+                        raise
+                    conn.invalidate()
+                    if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
+                        self.metrics.reject_persistence_failures += 1
+                        self.metrics.reject_persistence_degraded = True
+                        self._recovery_required = True
+                        self._runtime_status = "RECOVERY_REQUIRED"
+                        self._fail_closed_reason = self._fail_closed_reason or "REJECT_PERSISTENCE_FAILED"
+                        self._last_error = (
+                            "SQLITE_BUSY reject persistence after "
+                            f"{attempt + 1} attempts; reject_decision_id={payload['reject_decision_id']}"
+                        )
+                        logger.error("reject_persistence_degraded reason=%s", self._last_error)
+                        return
+                    time.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
+                except BaseException:
+                    if transaction is not None:
+                        transaction.rollback()
+                    raise
+                finally:
+                    if old_timeout is not None and not conn.invalidated:
+                        conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                        conn.commit()
+                    conn.close()
         else:
             self._persist_burnin_decision(
                 {**payload, "decision": "REJECTED"},
@@ -4769,6 +4831,13 @@ class RuntimeOrchestrator:
                 if canonical_persisted_count is not None
                 else len(self._persisted_reject_decision_ids)
             )
+            if self.metrics.reject_persistence_degraded:
+                self.metrics.reject_persistence_degraded = False
+                if self._fail_closed_reason == "REJECT_PERSISTENCE_FAILED":
+                    self._fail_closed_reason = None
+                    self._recovery_required = False
+                    self._runtime_status = "OPERATING"
+                    self._last_error = None
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
@@ -6244,13 +6313,12 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
                 raise RuntimeError("trade_lifecycle_event_persistence_failed")
             session.commit()
 
-    def _persist_reject(payload: dict[str, Any]) -> None:
+    def _persist_reject(conn: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
         if not persistence_enabled:
-            return
-        from alphaforge.persistence import save_rejected_decision_artifact
-        with SessionLocal() as session:
-            persisted = save_rejected_decision_artifact(
-                session,
+            return None
+        return save_rejected_decision_artifact(
+                conn,
+                _commit=False,
                 decision_id=payload.get("reject_decision_id"),
                 mode=mode.value,
                 phase=payload.get("phase", "final"),
@@ -6274,10 +6342,10 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
                 portfolio_risk_state=payload.get("portfolio_risk_state"),
                 portfolio_diagnostics=payload.get("portfolio_diagnostics"),
                 risk_flags=payload.get("risk_flags"),
+                side=payload.get("side"),
+                timeframe=payload.get("timeframe"),
+                event_ts=payload.get("decision_timestamp"),
             )
-            if persisted is None:
-                raise RuntimeError("rejected_decision_artifact_persistence_failed")
-            session.commit()
 
     live_reconciliation_provider = None
     if mode in {ExecutionMode.PAPER, ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} and cfg.runtime.enable_binance_readonly_reconciliation:
@@ -6323,7 +6391,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
         scanner_source=scanner_source,
         live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,
-        on_reject_persist=_persist_reject,
+        on_reject_persist_atomic=_persist_reject if persistence_enabled else None,
         state_direction_shadow_enabled=state_direction_shadow_enabled,
         state_direction_shadow_store=state_direction_shadow_store,
         persistence_engine=engine,

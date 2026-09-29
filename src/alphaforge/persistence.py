@@ -877,7 +877,8 @@ def save_ai_decision_features(*args, execution_features=None, **kwargs):
         return None
 
 
-def save_signal(session: Any, **signal: Any) -> Any:
+def save_signal(session: Any, *, _commit: bool = True, _raise_on_error: bool = False,
+                **signal: Any) -> Any:
     if session is None:
         return None
     now = _utc_now_iso()
@@ -895,14 +896,17 @@ def save_signal(session: Any, **signal: Any) -> Any:
             "mode": signal.get("mode"), "score": signal.get("score"), "rr": signal.get("rr"), "effective_rr": signal.get("effective_rr"),
             "expectancy_bucket": signal.get("expectancy_bucket"), "created_at": now, "updated_at": now,
         })
-        if hasattr(session, "commit"):
+        if _commit and hasattr(session, "commit"):
             session.commit()
         return signal_id or row.lastrowid
     except Exception:
+        if _raise_on_error:
+            raise
         return signal.get("id")
 
 
-def save_order_decision(session: Any, **decision: Any) -> Any:
+def save_order_decision(session: Any, *, _commit: bool = True,
+                        _raise_on_error: bool = False, **decision: Any) -> Any:
     if session is None:
         return None
     now = _utc_now_iso()
@@ -970,10 +974,12 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_context_is_unavailable(execution_ctx))) else 0,
         "created_at": now, "updated_at": now,
     })
-        if hasattr(session, "commit"):
+        if _commit and hasattr(session, "commit"):
             session.commit()
         return decision_id or row.lastrowid
     except Exception:
+        if _raise_on_error:
+            raise
         return None
 
 
@@ -1076,7 +1082,8 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
         return None
 
 
-def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, Any] | None:
+def save_rejected_decision_artifact(session: Any, *, _commit: bool = True,
+                                    **artifact: Any) -> dict[str, Any] | None:
     """Persist a rejected signal/order as one auditable SQL artifact.
 
     The helper intentionally writes the signal, order_decision, and lifecycle
@@ -1116,9 +1123,11 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
         "effective_rr": effective_rr,
         "expectancy_bucket": artifact.get("expectancy_bucket"),
     }
-    save_signal(session, **signal_payload)
+    save_signal(session, _commit=False, _raise_on_error=True, **signal_payload)
     decision_id = save_order_decision(
         session,
+        _commit=False,
+        _raise_on_error=True,
         decision_id=artifact.get("decision_id") or f"{signal_id}:REJECTED",
         signal_id=signal_id,
         order_id=artifact.get("order_id"),
@@ -1148,6 +1157,8 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
     )
     lifecycle_ok = save_trade_lifecycle_event(
         session,
+        _commit=False,
+        _raise_on_error=True,
         event_id=artifact.get("event_id") or f"{signal_id}:SIGNAL_REJECTED",
         signal_id=signal_id,
         order_id=artifact.get("order_id"),
@@ -1169,10 +1180,13 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
     )
     if not decision_id or not lifecycle_ok:
         return None
+    if _commit and hasattr(session, "commit"):
+        session.commit()
     return {"signal_id": signal_id, "decision_id": decision_id, "reject_reason": reason}
 
 
-def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
+def save_trade_lifecycle_event(session: Any, *, _commit: bool = True,
+                               _raise_on_error: bool = False, **event: Any) -> Any:
     if session is None:
         return False
     now = _utc_now_iso()
@@ -1263,6 +1277,8 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
     try:
         session.execute(statement_by_lifecycle_key, payload)
     except Exception as first_error:
+        if _raise_on_error:
+            raise
         # A failed SQLAlchemy statement poisons the transaction.  Roll it back
         # before the compatibility conflict-target retry, and never hide the
         # original database evidence if both forms fail.
@@ -1280,7 +1296,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
                 f"fallback={fallback_error.__class__.__name__}:{fallback_error}"
             ) from first_error
 
-    if hasattr(session, "commit"):
+    if _commit and hasattr(session, "commit"):
         try:
             session.commit()
         except Exception as commit_error:
