@@ -1133,9 +1133,12 @@ class BurnInCampaignRunner:
         elapsed = time.monotonic() - self._last_qualification_monotonic
         enough_new = count - self._last_qualification_observation_count >= self.qualification_observation_threshold
         evidence_changed = latest_hash is not None and latest_hash != agg.get("evidence_hash")
-        return first_evidence or (evidence_changed and (
-            near_completion or (elapsed >= self.qualification_interval_seconds and enough_new)
-        ))
+        return (
+            first_evidence
+            or (evidence_changed and near_completion)
+            or (elapsed >= self.qualification_interval_seconds
+                and (enough_new or evidence_changed))
+        )
 
     def _qualify_if_due(self) -> dict[str, Any] | None:
         # Resolver and maintenance run in separate worker threads. Qualification
