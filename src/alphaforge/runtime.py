@@ -3317,7 +3317,6 @@ class RuntimeOrchestrator:
                 return
 
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
-        duplicate_position_key = None
         if risk_reject == "DUPLICATE_POSITION":
             setup_identity = str(market_ctx.get("setup_identity") or "").strip()
             active_position_episode_id = str(
@@ -3329,9 +3328,6 @@ class RuntimeOrchestrator:
                 ) and not self._kill_switch_active():
                     return
                 market_ctx["active_position_episode_id"] = active_position_episode_id
-                duplicate_position_key = self._duplicate_position_reject_key(
-                    setup_identity, active_position_episode_id
-                )
             else:
                 # The exposure guard stays fail-closed. Incomplete identity may
                 # be audited, but it cannot become qualification-quality evidence.
@@ -3346,8 +3342,8 @@ class RuntimeOrchestrator:
         if risk_reject is not None:
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": None, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
-            if duplicate_position_key is not None:
-                self._canonical_duplicate_position_keys.add(duplicate_position_key)
+            # Do not cache success speculatively: the next scan proves durable
+            # canonical persistence before suppressing another evidence row.
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         legacy_pre_ai_execution_reason = None
