@@ -399,6 +399,17 @@ def persist_pending_position(conn: Any, **kw) -> str:
     return pid
 
 def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_price: float, exit_reason: str, exit_costs: Mapping[str,Any], mfe: float|None=None, mae: float|None=None, ambiguous: bool=False) -> dict[str,Any]:
+    def non_negative_excursion(value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, parsed) if math.isfinite(parsed) else None
+
+    mfe = non_negative_excursion(mfe)
+    mae = non_negative_excursion(mae)
     bootstrap_campaign_schema(conn); row=_exec(conn,"SELECT * FROM burnin_pending_position_outcomes WHERE trade_id=:t",{"t":trade_id}).fetchone()
     if not row: raise KeyError('position not found')
     r=dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
@@ -505,7 +516,7 @@ def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Ma
         if provenance.get('execution_cost_model_unit') == 'R' and provenance.get('execution_cost_unit') == 'USD':
             exit_costs={key: None if value is None else float(value)*risk_usd for key,value in exit_costs.items()}
         ts=_dt(terminal_candle['timestamp']); ambiguous=bool(sl and tp); reason='AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT'); price=stop if sl else target
-        resolve_position_closure(conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),exit_price=price,exit_reason=reason,exit_costs=exit_costs,mfe=max(favorable,default=0.0),mae=max(adverse,default=0.0),ambiguous=ambiguous)
+        resolve_position_closure(conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),exit_price=price,exit_reason=reason,exit_costs=exit_costs,mfe=max(0.0,max(favorable,default=0.0)),mae=max(0.0,max(adverse,default=0.0)),ambiguous=ambiguous)
         counts['closed']+=1; counts['ambiguous' if ambiguous else 'sl' if sl else 'tp']+=1
     return counts
 
@@ -557,8 +568,8 @@ def evaluate_forward_outcome(*, side: str, entry: Any, stop: Any, target: Any,
     favorable = [((float(c["high"])-float(entry))/float(entry) if sign > 0 else (float(entry)-float(c["low"]))/float(entry))*100 for c in observed]
     adverse = [((float(entry)-float(c["low"]))/float(entry) if sign > 0 else (float(c["high"])-float(entry))/float(entry))*100 for c in observed]
     complete, gaps = _window_complete(normalized, row, terminal, input_errors=input_errors)
-    return {"forward_label": label, "mfe": max(favorable, default=0.0),
-            "mae": max(adverse, default=0.0), "gross_r": gross,
+    return {"forward_label": label, "mfe": max(0.0, max(favorable, default=0.0)),
+            "mae": max(0.0, max(adverse, default=0.0)), "gross_r": gross,
             "ambiguous": ambiguous, "evidence_complete": bool(complete and not ambiguous),
             "window_complete": complete,
             "terminal_index": terminal,
