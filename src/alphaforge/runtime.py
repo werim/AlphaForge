@@ -4838,7 +4838,8 @@ class RuntimeOrchestrator:
                     self._recovery_required = False
                     self._runtime_status = "OPERATING"
                     self._last_error = None
-        if self.on_reject_persist is not None:
+        if self.on_reject_persist is not None and (
+                engine is None or self.on_reject_persist_atomic is None):
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
@@ -6350,6 +6351,12 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
                 event_ts=payload.get("decision_timestamp"),
             )
 
+    def _persist_reject_legacy(payload: dict[str, Any]) -> None:
+        """Compatibility entrypoint; the orchestrator uses the atomic callback."""
+        with engine.begin() as conn:
+            if _persist_reject(conn, payload) is None:
+                raise RuntimeError("rejected_decision_artifact_persistence_failed")
+
     live_reconciliation_provider = None
     if mode in {ExecutionMode.PAPER, ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} and cfg.runtime.enable_binance_readonly_reconciliation:
         api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
@@ -6394,6 +6401,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
         scanner_source=scanner_source,
         live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,
+        on_reject_persist=_persist_reject_legacy if persistence_enabled else None,
         on_reject_persist_atomic=_persist_reject if persistence_enabled else None,
         state_direction_shadow_enabled=state_direction_shadow_enabled,
         state_direction_shadow_store=state_direction_shadow_store,
