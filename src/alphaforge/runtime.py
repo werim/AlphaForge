@@ -5116,8 +5116,14 @@ class RuntimeOrchestrator:
                     "geometry_source": guided_geometry.get("geometry_source")
                         or "MTF_SETUP_STRUCTURE",
                     "guided_reject_geometry": dict(guided_geometry),
-                    "reject_quality_attributable": True,
-                    "non_attributable_reason": None,
+                    "reject_quality_attributable": bool(
+                        guided_geometry.get("forward_geometry_valid")
+                    ),
+                    "non_attributable_reason": (
+                        None
+                        if guided_geometry.get("forward_geometry_valid")
+                        else "GUIDED_REJECT_FORWARD_GEOMETRY_INVALID"
+                    ),
                     "rr": None,
                     "raw_rr": None,
                     "risk_reward": None,
