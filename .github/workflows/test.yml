@@ -50,6 +50,16 @@ jobs:
       - name: Compile
         run: python -m compileall -q src
 
+      - name: System verification routing gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue437_system_verification_router.py
+          PYTHONPATH=src python -m alphaforge.system_verification plan \
+            --base "origin/${GITHUB_BASE_REF}" \
+            --head HEAD \
+            --output artifacts/system-verification-plan.json
+          cat artifacts/system-verification-plan.json
+
       - name: Cross-surface invariant gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py tests/test_ci_branch_contract.py
