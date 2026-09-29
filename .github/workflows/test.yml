@@ -104,6 +104,7 @@ jobs:
       - name: SQLite contention regression gate
         if: github.event_name == 'pull_request'
         run: |
+          pytest -q tests/test_issue550_atomic_reject_persistence.py
           pytest -q tests/test_runtime_heartbeat.py
           pytest -q tests/test_reconciliation_sqlite_contention.py
           pytest -q tests/test_issue450_sqlite_concurrency.py

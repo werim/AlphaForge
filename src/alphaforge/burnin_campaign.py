@@ -917,6 +917,27 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
 
 def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresholds|None=None) -> dict[str,Any]:
     configure_sqlite_engine(engine)
+    # The progress/hash check is read-only.  Do not rebuild the synthetic run
+    # when the latest qualification already names the exact current evidence.
+    with engine.connect() as read_conn:
+        current = aggregate_campaign(read_conn, campaign_id)
+        campaign = get_campaign(read_conn, campaign_id)
+        latest = None
+        if campaign and campaign.get("latest_qualification_id"):
+            latest = _exec(read_conn, """SELECT qualification_id,status,aggregate_evidence_hash
+                FROM burnin_qualification_snapshots WHERE qualification_id=:qid""",
+                {"qid": campaign["latest_qualification_id"]}).mappings().first()
+    if (latest and current.get("status") == "OK"
+            and latest.get("aggregate_evidence_hash") == current.get("evidence_hash")):
+        return {
+            "campaign_id": campaign_id,
+            "qualification_id": latest["qualification_id"],
+            "verdict": latest["status"],
+            "aggregate_evidence_hash": current["evidence_hash"],
+            "aggregate_run_id": f"{campaign_id}__aggregate",
+            "materialized": False,
+        }
+
     def rebuild(conn: Any) -> tuple[str, dict[str, Any]]:
         bootstrap_campaign_schema(conn)
         aggregate_run_id = materialize_campaign_aggregate(conn, campaign_id)
@@ -935,7 +956,7 @@ def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresho
         _exec(conn,"UPDATE burnin_campaigns SET qualification_status=:s, latest_qualification_id=:qid, evidence_completeness_status=:ev WHERE campaign_id=:cid",{"cid":campaign_id,"s":snap.status,"qid":snap.qualification_id,"ev":snap.evidence_completeness_status})
         event(conn,campaign_id,"QUALIFICATION_SNAPSHOT",burnin_run_id=aggregate_run_id,details={"qualification_id":snap.qualification_id,"status":snap.status})
     _with_fresh_lock_retry(engine, persist_snapshot)
-    return {"campaign_id":campaign_id,"qualification_id":snap.qualification_id,"verdict":snap.status,"aggregate_evidence_hash":agg["evidence_hash"],"aggregate_run_id":aggregate_run_id}
+    return {"campaign_id":campaign_id,"qualification_id":snap.qualification_id,"verdict":snap.status,"aggregate_evidence_hash":agg["evidence_hash"],"aggregate_run_id":aggregate_run_id,"materialized":True}
 
 def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id: str) -> dict[str,Any]:
     conn=sqlite3.connect(str(db_path)); conn.row_factory=sqlite3.Row
@@ -1112,7 +1133,9 @@ class BurnInCampaignRunner:
         elapsed = time.monotonic() - self._last_qualification_monotonic
         enough_new = count - self._last_qualification_observation_count >= self.qualification_observation_threshold
         evidence_changed = latest_hash is not None and latest_hash != agg.get("evidence_hash")
-        return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and (enough_new or evidence_changed))
+        return first_evidence or (evidence_changed and (
+            near_completion or (elapsed >= self.qualification_interval_seconds and enough_new)
+        ))
 
     def _qualify_if_due(self) -> dict[str, Any] | None:
         # Resolver and maintenance run in separate worker threads. Qualification
