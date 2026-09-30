@@ -392,89 +392,642 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
 def _release(conn,bid):
     row=_exec(conn,"SELECT release_id FROM burnin_runs WHERE burnin_run_id=:bid",{"bid":bid}).fetchone(); return row[0] if row else "UNKNOWN"
 
+def _row_dict(row: Any) -> dict[str, Any]:
+    return dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
+
+
+def _finite_number(value: Any, *, positive: bool = false) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    if positive and parsed <= 0:
+        return None
+    return parsed
+
+
 def persist_pending_position(conn: Any, **kw) -> str:
-    bootstrap_campaign_schema(conn); pid='ppos_'+canonical_hash({'trade_id':kw['trade_id']})[:20]
-    vals={**kw,'source_decision_id':kw.get('source_decision_id'),'decision_time':kw.get('decision_time'),'setup_type':kw.get('setup_type'),'pid':pid,'prov':json.dumps(dict(kw.get('source_provenance') or {}),sort_keys=True),'now':utc_now(),'sv':CAMPAIGN_SCHEMA_VERSION}
-    _exec(conn,"""INSERT OR IGNORE INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,source_decision_id,decision_time,symbol,side,setup_type,entry_time,planned_entry,simulated_fill,stop,target,quantity,notional,entry_spread,entry_slippage,entry_fee,regime,source_provenance_json,status,created_at,schema_version) VALUES (:pid,:trade_id,:campaign_id,:burnin_run_id,:signal_id,:source_decision_id,:decision_time,:symbol,:side,:setup_type,:entry_time,:planned_entry,:simulated_fill,:stop,:target,:quantity,:notional,:entry_spread,:entry_slippage,:entry_fee,:regime,:prov,'OPEN',:now,:sv)""", vals)
+    bootstrap_campaign_schema(conn)
+    pid = 'ppos_' + canonical_hash({'trade_id': kw['trade_id']})[:20]
+    vals = {
+        **kw,
+        'source_decision_id': kw.get('source_decision_id'),
+        'decision_time': kw.get('decision_time'),
+        'setup_type': kw.get('setup_type'),
+        'pid': pid,
+        'prov': json.dumps(dict(kw.get('source_provenance') or {}), sort_keys=True),
+        'now': utc_now(),
+        'sv': CAMPAIGN_SCHEMA_VERSION,
+    }
+    _exec(conn, """INSERT OR IGNORE INTO burnin_pending_position_outcomes(
+        pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,source_decision_id,
+        decision_time,symbol,side,setup_type,entry_time,planned_entry,simulated_fill,
+        stop,target,quantity,notional,current_stop,current_target,remaining_quantity,
+        remaining_notional,entry_spread,entry_slippage,entry_fee,regime,
+        source_provenance_json,status,created_at,schema_version
+    ) VALUES (
+        :pid,:trade_id,:campaign_id,:burnin_run_id,:signal_id,:source_decision_id,
+        :decision_time,:symbol,:side,:setup_type,:entry_time,:planned_entry,:simulated_fill,
+        :stop,:target,:quantity,:notional,:stop,:target,:quantity,:notional,
+        :entry_spread,:entry_slippage,:entry_fee,:regime,:prov,'OPEN',:now,:sv
+    )""", vals)
     return pid
 
-def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_price: float, exit_reason: str, exit_costs: Mapping[str,Any], mfe: float|None=None, mae: float|None=None, ambiguous: bool=False) -> dict[str,Any]:
+
+def load_position_management_state(conn: Any, trade_id: str) -> dict[str, Any]:
+    bootstrap_campaign_schema(conn)
+    row = _exec(conn, """SELECT * FROM burnin_pending_position_outcomes
+        WHERE trade_id=:trade_id""", {"trade_id": trade_id}).fetchone()
+    if row is None:
+        raise KeyError("position not found")
+    r = _row_dict(row)
+    return {
+        "trade_id": trade_id,
+        "status": r.get("status"),
+        "side": r.get("side"),
+        "entry": r.get("simulated_fill") or r.get("planned_entry"),
+        "initial_stop": r.get("stop"),
+        "initial_target": r.get("target"),
+        "initial_quantity": r.get("quantity"),
+        "initial_notional": r.get("notional"),
+        "current_stop": r.get("current_stop") if r.get("current_stop") is not None else r.get("stop"),
+        "current_target": r.get("current_target") if r.get("current_target") is not None else r.get("target"),
+        "remaining_quantity": r.get("remaining_quantity") if r.get("remaining_quantity") is not None else r.get("quantity"),
+        "remaining_notional": r.get("remaining_notional") if r.get("remaining_notional") is not None else r.get("notional"),
+        "realized_gross_pnl": float(r.get("realized_gross_pnl") or 0.0),
+        "realized_execution_cost": float(r.get("realized_execution_cost") or 0.0),
+        "realized_net_pnl": float(r.get("realized_net_pnl") or 0.0),
+        "trailing_enabled": bool(r.get("trailing_enabled")),
+        "management_version": int(r.get("management_version") or 0),
+        "last_management_at": r.get("last_management_at"),
+    }
+
+
+_MANAGEMENT_EVIDENCE_FIELDS = (
+    "execution_risk_status",
+    "regime_status",
+    "liquidity_status",
+)
+
+
+def _validate_management_evidence(evidence: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(evidence, Mapping):
+        raise ValueError("POSITION_MANAGEMENT_EVIDENCE_UNAVAILABLE")
+    payload = dict(evidence)
+    if str(payload.get("evidence_status") or "").upper() != "COMPLETE":
+        raise ValueError("POSITION_MANAGEMENT_EVIDENCE_INCOMPLETE")
+    if not str(payload.get("source") or "").strip():
+        raise ValueError("POSITION_MANAGEMENT_EVIDENCE_SOURCE_MISSING")
+    unavailable = {"", "UNKNOWN", "UNAVAILABLE", "INCOMPLETE", "STALE"}
+    missing = [
+        name for name in _MANAGEMENT_EVIDENCE_FIELDS
+        if str(payload.get(name) or "").upper() in unavailable
+    ]
+    if missing:
+        raise ValueError("POSITION_MANAGEMENT_RISK_EVIDENCE_UNAVAILABLE:" + ",".join(missing))
+    observed_price = _finite_number(payload.get("observed_price"), positive=True)
+    if observed_price is None:
+        raise ValueError("POSITION_MANAGEMENT_OBSERVED_PRICE_UNAVAILABLE")
+    payload["observed_price"] = observed_price
+    return payload
+
+
+def _position_provenance(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        value = json.loads(row.get("source_provenance_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        value = {}
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _entry_costs_usd(row: Mapping[str, Any], *, risk_usd: float) -> dict[str, float | None]:
+    provenance = _position_provenance(row)
+    multiplier = risk_usd if provenance.get("execution_cost_unit") == "R" else 1.0
+    def value(name: str) -> float | None:
+        raw = _finite_number(row.get(name))
+        return None if raw is None else raw * multiplier
+    return {
+        "spread_cost": value("entry_spread"),
+        "entry_slippage_cost": value("entry_slippage"),
+        "fee_cost": value("entry_fee"),
+    }
+
+
+_EXIT_COST_INPUTS = (
+    "exit_spread",
+    "exit_slippage",
+    "exit_fee",
+    "funding",
+    "latency_impact_penalty",
+    "volatility_penalty",
+    "liquidity_penalty",
+)
+
+
+def _strict_exit_costs_usd(exit_costs: Mapping[str, Any] | None) -> dict[str, float]:
+    if not isinstance(exit_costs, Mapping) or str(exit_costs.get("cost_unit") or "").upper() != "USD":
+        raise ValueError("POSITION_MANAGEMENT_EXIT_COST_UNIT_MUST_BE_USD")
+    out: dict[str, float] = {}
+    for key in _EXIT_COST_INPUTS:
+        value = _finite_number(exit_costs.get(key))
+        if value is None or value < 0:
+            raise ValueError(f"POSITION_MANAGEMENT_EXIT_COST_UNAVAILABLE:{key}")
+        out[key] = value
+    return out
+
+
+def _management_events(conn: Any, trade_id: str) -> list[dict[str, Any]]:
+    rows = _exec(conn, """SELECT * FROM burnin_position_management_events
+        WHERE trade_id=:trade_id ORDER BY id""", {"trade_id": trade_id}).fetchall()
+    return [_row_dict(row) for row in rows]
+
+
+def _insert_management_event(
+    conn: Any,
+    *,
+    row: Mapping[str, Any],
+    management_event_id: str,
+    event_time: str,
+    action: str,
+    requested_quantity: float | None,
+    execution_price: float | None,
+    previous_stop: float | None,
+    new_stop: float | None,
+    previous_remaining_quantity: float | None,
+    new_remaining_quantity: float | None,
+    gross_pnl: float | None,
+    execution_cost: float | None,
+    net_pnl: float | None,
+    evidence: Mapping[str, Any],
+) -> None:
+    _exec(conn, """INSERT INTO burnin_position_management_events(
+        management_event_id,trade_id,campaign_id,burnin_run_id,event_time,action,
+        requested_quantity,execution_price,previous_stop,new_stop,
+        previous_remaining_quantity,new_remaining_quantity,gross_pnl,execution_cost,
+        net_pnl,evidence_json,created_at,schema_version
+    ) VALUES (
+        :event_id,:trade_id,:campaign_id,:burnin_run_id,:event_time,:action,
+        :requested_quantity,:execution_price,:previous_stop,:new_stop,
+        :previous_remaining_quantity,:new_remaining_quantity,:gross_pnl,:execution_cost,
+        :net_pnl,:evidence_json,:created_at,:schema_version
+    )""", {
+        "event_id": management_event_id,
+        "trade_id": row["trade_id"],
+        "campaign_id": row["campaign_id"],
+        "burnin_run_id": row["burnin_run_id"],
+        "event_time": event_time,
+        "action": action,
+        "requested_quantity": requested_quantity,
+        "execution_price": execution_price,
+        "previous_stop": previous_stop,
+        "new_stop": new_stop,
+        "previous_remaining_quantity": previous_remaining_quantity,
+        "new_remaining_quantity": new_remaining_quantity,
+        "gross_pnl": gross_pnl,
+        "execution_cost": execution_cost,
+        "net_pnl": net_pnl,
+        "evidence_json": json.dumps(dict(evidence), sort_keys=True, default=str),
+        "created_at": utc_now(),
+        "schema_version": CAMPAIGN_SCHEMA_VERSION,
+    })
+
+
+def apply_position_management_action(
+    conn: Any,
+    *,
+    trade_id: str,
+    management_event_id: str,
+    action: str,
+    event_time: str,
+    evidence: Mapping[str, Any],
+    new_stop: float | None = None,
+    exit_quantity: float | None = None,
+    execution_price: float | None = None,
+    exit_costs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply one idempotent PAPER position-management mutation.
+
+    The function never chooses a stop distance, exit fraction, or protective
+    threshold. Those values must arrive as explicit, complete decision evidence.
+    """
+    bootstrap_campaign_schema(conn)
+    existing = _exec(conn, """SELECT management_event_id,trade_id,action FROM
+        burnin_position_management_events WHERE management_event_id=:event_id""",
+        {"event_id": management_event_id}).fetchone()
+    if existing is not None:
+        mapped = _row_dict(existing)
+        if mapped.get("trade_id") != trade_id or mapped.get("action") != str(action).upper():
+            raise ValueError("POSITION_MANAGEMENT_EVENT_ID_CONFLICT")
+        return {"status": "IDEMPOTENT", **load_position_management_state(conn, trade_id)}
+
+    row = _exec(conn, """SELECT * FROM burnin_pending_position_outcomes
+        WHERE trade_id=:trade_id""", {"trade_id": trade_id}).fetchone()
+    if row is None:
+        raise KeyError("position not found")
+    r = _row_dict(row)
+    if str(r.get("status") or "").upper() != "OPEN":
+        raise ValueError("POSITION_NOT_OPEN")
+
+    evidence_payload = _validate_management_evidence(evidence)
+    normalized_action = str(action or "").strip().upper()
+    side = _side(r.get("side"))
+    fill = _finite_number(r.get("simulated_fill") or r.get("planned_entry"), positive=True)
+    original_stop = _finite_number(r.get("stop"), positive=True)
+    original_qty = _finite_number(r.get("quantity"), positive=True)
+    remaining_qty = _finite_number(
+        r.get("remaining_quantity") if r.get("remaining_quantity") is not None else r.get("quantity"),
+        positive=True,
+    )
+    current_stop = _finite_number(
+        r.get("current_stop") if r.get("current_stop") is not None else r.get("stop"),
+        positive=True,
+    )
+    initial_notional = _finite_number(r.get("notional"), positive=True)
+    if None in {fill, original_stop, original_qty, remaining_qty, current_stop, initial_notional}:
+        raise ValueError("POSITION_MANAGEMENT_STATE_INCOMPLETE")
+    assert fill is not None and original_stop is not None and original_qty is not None
+    assert remaining_qty is not None and current_stop is not None and initial_notional is not None
+    risk_usd = abs(fill - original_stop) * original_qty
+    if risk_usd <= 0:
+        raise ValueError("POSITION_MANAGEMENT_INITIAL_RISK_INVALID")
+
+    if normalized_action == "TIGHTEN_STOP":
+        stop_value = _finite_number(new_stop, positive=True)
+        if stop_value is None:
+            raise ValueError("POSITION_MANAGEMENT_NEW_STOP_INVALID")
+        tightened = stop_value > current_stop if side == "LONG" else stop_value < current_stop
+        if not tightened:
+            raise ValueError("POSITION_MANAGEMENT_STOP_WIDEN_BLOCKED")
+        observed_price = float(evidence_payload["observed_price"])
+        if (side == "LONG" and stop_value >= observed_price) or (
+            side == "SHORT" and stop_value <= observed_price
+        ):
+            raise ValueError("POSITION_MANAGEMENT_STOP_CROSSES_MARKET")
+        _insert_management_event(
+            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            action=normalized_action, requested_quantity=None, execution_price=None,
+            previous_stop=current_stop, new_stop=stop_value,
+            previous_remaining_quantity=remaining_qty, new_remaining_quantity=remaining_qty,
+            gross_pnl=None, execution_cost=None, net_pnl=None, evidence=evidence_payload,
+        )
+        _exec(conn, """UPDATE burnin_pending_position_outcomes
+            SET current_stop=:stop,management_version=management_version+1,
+                last_management_at=:event_time WHERE trade_id=:trade_id AND status='OPEN'""",
+            {"stop": stop_value, "event_time": event_time, "trade_id": trade_id})
+        return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
+
+    if normalized_action == "ENABLE_TRAILING":
+        provenance = _position_provenance(r)
+        target_policy = provenance.get("target_policy")
+        trailing_allowed = (
+            isinstance(target_policy, Mapping)
+            and bool(target_policy.get("trailing_allowed"))
+        )
+        if not trailing_allowed:
+            raise ValueError("POSITION_MANAGEMENT_TRAILING_NOT_AUTHORIZED")
+        if bool(r.get("trailing_enabled")):
+            raise ValueError("POSITION_MANAGEMENT_TRAILING_ALREADY_ENABLED")
+        _insert_management_event(
+            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            action=normalized_action, requested_quantity=None, execution_price=None,
+            previous_stop=current_stop, new_stop=current_stop,
+            previous_remaining_quantity=remaining_qty, new_remaining_quantity=remaining_qty,
+            gross_pnl=None, execution_cost=None, net_pnl=None,
+            evidence={**evidence_payload, "trailing_distance": None},
+        )
+        _exec(conn, """UPDATE burnin_pending_position_outcomes
+            SET trailing_enabled=1,management_version=management_version+1,
+                last_management_at=:event_time WHERE trade_id=:trade_id AND status='OPEN'""",
+            {"event_time": event_time, "trade_id": trade_id})
+        return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
+
+    if normalized_action == "PARTIAL_EXIT":
+        qty = _finite_number(exit_quantity, positive=True)
+        price = _finite_number(execution_price, positive=True)
+        if qty is None or price is None:
+            raise ValueError("POSITION_MANAGEMENT_PARTIAL_EXIT_EVIDENCE_INVALID")
+        if qty >= remaining_qty - 1e-12:
+            raise ValueError("POSITION_MANAGEMENT_PARTIAL_EXIT_MUST_LEAVE_REMAINDER")
+        costs = _strict_exit_costs_usd(exit_costs)
+        sign = -1.0 if side == "SHORT" else 1.0
+        gross = (price - fill) * qty * sign
+        entry_costs = _entry_costs_usd(r, risk_usd=risk_usd)
+        if any(value is None for value in entry_costs.values()):
+            raise ValueError("POSITION_MANAGEMENT_ENTRY_COST_EVIDENCE_INCOMPLETE")
+        entry_fraction = qty / original_qty
+        entry_allocation = {
+            key: float(value) * entry_fraction
+            for key, value in entry_costs.items()
+            if value is not None
+        }
+        execution_cost = sum(entry_allocation.values()) + sum(costs.values())
+        net = gross - execution_cost
+        new_remaining = remaining_qty - qty
+        remaining_notional = initial_notional * new_remaining / original_qty
+        event_evidence = {
+            **evidence_payload,
+            "exit_costs_usd": costs,
+            "entry_cost_allocation_usd": entry_allocation,
+            "initial_risk_usd": risk_usd,
+            "initial_quantity": original_qty,
+        }
+        _insert_management_event(
+            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            action=normalized_action, requested_quantity=qty, execution_price=price,
+            previous_stop=current_stop, new_stop=current_stop,
+            previous_remaining_quantity=remaining_qty, new_remaining_quantity=new_remaining,
+            gross_pnl=gross, execution_cost=execution_cost, net_pnl=net,
+            evidence=event_evidence,
+        )
+        _exec(conn, """UPDATE burnin_pending_position_outcomes
+            SET remaining_quantity=:remaining_quantity,
+                remaining_notional=:remaining_notional,
+                realized_gross_pnl=COALESCE(realized_gross_pnl,0)+:gross,
+                realized_execution_cost=COALESCE(realized_execution_cost,0)+:cost,
+                realized_net_pnl=COALESCE(realized_net_pnl,0)+:net,
+                management_version=management_version+1,last_management_at=:event_time
+            WHERE trade_id=:trade_id AND status='OPEN'""", {
+                "remaining_quantity": new_remaining,
+                "remaining_notional": remaining_notional,
+                "gross": gross,
+                "cost": execution_cost,
+                "net": net,
+                "event_time": event_time,
+                "trade_id": trade_id,
+            })
+        return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
+
+    if normalized_action == "PROTECTIVE_EXIT":
+        price = _finite_number(execution_price, positive=True)
+        if price is None:
+            raise ValueError("POSITION_MANAGEMENT_PROTECTIVE_EXIT_PRICE_INVALID")
+        if not str(evidence_payload.get("trigger_reason") or "").strip():
+            raise ValueError("POSITION_MANAGEMENT_PROTECTIVE_TRIGGER_MISSING")
+        costs = _strict_exit_costs_usd(exit_costs)
+        closure = resolve_position_closure(
+            conn, trade_id=trade_id, exit_time=event_time, exit_price=price,
+            exit_reason="RUNTIME_PROTECTIVE_EXIT",
+            exit_costs={**costs, "cost_unit": "USD"},
+        )
+        event_evidence = {
+            **evidence_payload,
+            "exit_costs_usd": costs,
+            "initial_risk_usd": risk_usd,
+            "initial_quantity": original_qty,
+        }
+        _insert_management_event(
+            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            action=normalized_action, requested_quantity=remaining_qty, execution_price=price,
+            previous_stop=current_stop, new_stop=current_stop,
+            previous_remaining_quantity=remaining_qty, new_remaining_quantity=0.0,
+            gross_pnl=closure.get("final_slice_gross_pnl"),
+            execution_cost=closure.get("final_slice_execution_cost"),
+            net_pnl=closure.get("final_slice_net_pnl"),
+            evidence=event_evidence,
+        )
+        return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
+
+    raise ValueError(f"POSITION_MANAGEMENT_ACTION_UNSUPPORTED:{normalized_action}")
+
+
+def _prior_partial_exit_components(conn: Any, trade_id: str) -> dict[str, float]:
+    totals = {key: 0.0 for key in _EXIT_COST_INPUTS}
+    for event in _management_events(conn, trade_id):
+        if str(event.get("action") or "").upper() != "PARTIAL_EXIT":
+            continue
+        try:
+            evidence = json.loads(event.get("evidence_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            evidence = {}
+        costs = evidence.get("exit_costs_usd")
+        if not isinstance(costs, Mapping):
+            continue
+        for key in totals:
+            value = _finite_number(costs.get(key))
+            if value is not None:
+                totals[key] += value
+    return totals
+
+
+def resolve_position_closure(
+    conn: Any, *, trade_id: str, exit_time: str, exit_price: float,
+    exit_reason: str, exit_costs: Mapping[str,Any], mfe: float|None=None,
+    mae: float|None=None, ambiguous: bool=False,
+) -> dict[str,Any]:
     def non_negative_excursion(value: float | None) -> float | None:
         if value is None:
             return None
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            return None
-        return max(0.0, parsed) if math.isfinite(parsed) else None
+        parsed = _finite_number(value)
+        return None if parsed is None else max(0.0, parsed)
 
     mfe = non_negative_excursion(mfe)
     mae = non_negative_excursion(mae)
-    bootstrap_campaign_schema(conn); row=_exec(conn,"SELECT * FROM burnin_pending_position_outcomes WHERE trade_id=:t",{"t":trade_id}).fetchone()
-    if not row: raise KeyError('position not found')
-    r=dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
-    if r.get('status') == 'CLOSED': return {'status':'IDEMPOTENT','trade_id':trade_id}
-    fill=float(r.get('simulated_fill') or r.get('planned_entry')); qty=float(r['quantity']); side=_side(r.get('side')); sign=-1 if side=='SHORT' else 1
-    risk_per_unit=abs(fill-float(r['stop'])) if r.get('stop') is not None else 0.0
-    risk_usd=risk_per_unit*qty
-    gross_pnl=(float(exit_price)-fill)*qty*sign
-    gross_r=gross_pnl/risk_usd if risk_usd > 0 else None
-    missing=[k for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty') if exit_costs.get(k) is None]
+    bootstrap_campaign_schema(conn)
+    row = _exec(conn, "SELECT * FROM burnin_pending_position_outcomes WHERE trade_id=:t", {"t": trade_id}).fetchone()
+    if not row:
+        raise KeyError('position not found')
+    r = _row_dict(row)
+    if r.get('status') == 'CLOSED':
+        return {'status':'IDEMPOTENT','trade_id':trade_id}
+
+    fill = float(r.get('simulated_fill') or r.get('planned_entry'))
+    original_qty = float(r['quantity'])
+    remaining_qty = float(r.get('remaining_quantity') if r.get('remaining_quantity') is not None else original_qty)
+    side = _side(r.get('side'))
+    sign = -1.0 if side == 'SHORT' else 1.0
+    initial_stop = float(r['stop'])
+    risk_per_unit = abs(fill - initial_stop)
+    risk_usd = risk_per_unit * original_qty
+    final_slice_gross = (float(exit_price) - fill) * remaining_qty * sign
+    previous_gross = float(r.get('realized_gross_pnl') or 0.0)
+    gross_pnl = previous_gross + final_slice_gross
+    gross_r = gross_pnl / risk_usd if risk_usd > 0 else None
+
+    missing = [k for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty') if exit_costs.get(k) is None]
     missing += [k for k in ('entry_spread','entry_slippage','entry_fee') if r.get(k) is None]
-    if risk_usd <= 0: missing.append('risk_usd')
-    try: provenance=json.loads(r.get('source_provenance_json') or '{}')
-    except (TypeError,json.JSONDecodeError): provenance={}
-    raw_costs={
-        'spread_cost': None if r.get('entry_spread') is None or exit_costs.get('exit_spread') is None else float(r['entry_spread'])+float(exit_costs['exit_spread']),
-        'entry_slippage_cost': r.get('entry_slippage'),
-        'exit_slippage_cost': exit_costs.get('exit_slippage'),
-        'fee_cost': None if r.get('entry_fee') is None or exit_costs.get('exit_fee') is None else float(r['entry_fee'])+float(exit_costs['exit_fee']),
-        'funding_cost': exit_costs.get('funding'),
-        'latency_cost': exit_costs.get('latency_impact_penalty'),
-        'volatility_penalty': exit_costs.get('volatility_penalty'),
-        'liquidity_penalty': exit_costs.get('liquidity_penalty'),
+    if risk_usd <= 0:
+        missing.append('risk_usd')
+
+    provenance = _position_provenance(r)
+    remaining_fraction = remaining_qty / original_qty if original_qty > 0 else 0.0
+    explicit_usd = str(exit_costs.get("cost_unit") or "").upper() == "USD"
+    multiplier = 1.0 if explicit_usd else (risk_usd if provenance.get('execution_cost_unit') == 'R' else 1.0)
+
+    def exit_value(name: str) -> float | None:
+        raw = _finite_number(exit_costs.get(name))
+        if raw is None:
+            return None
+        return raw * multiplier * (1.0 if explicit_usd else remaining_fraction)
+
+    final_exit = {key: exit_value(key) for key in _EXIT_COST_INPUTS}
+    partial_exit = _prior_partial_exit_components(conn, trade_id)
+    entry_costs = _entry_costs_usd(r, risk_usd=risk_usd)
+
+    costs_usd = {
+        'spread_cost': None if entry_costs['spread_cost'] is None or final_exit['exit_spread'] is None else (
+            float(entry_costs['spread_cost']) + partial_exit['exit_spread'] + float(final_exit['exit_spread'])
+        ),
+        'entry_slippage_cost': entry_costs['entry_slippage_cost'],
+        'exit_slippage_cost': None if final_exit['exit_slippage'] is None else (
+            partial_exit['exit_slippage'] + float(final_exit['exit_slippage'])
+        ),
+        'fee_cost': None if entry_costs['fee_cost'] is None or final_exit['exit_fee'] is None else (
+            float(entry_costs['fee_cost']) + partial_exit['exit_fee'] + float(final_exit['exit_fee'])
+        ),
+        'funding_cost': None if final_exit['funding'] is None else (
+            partial_exit['funding'] + float(final_exit['funding'])
+        ),
+        'latency_cost': None if final_exit['latency_impact_penalty'] is None else (
+            partial_exit['latency_impact_penalty'] + float(final_exit['latency_impact_penalty'])
+        ),
+        'volatility_penalty': (
+            partial_exit['volatility_penalty'] + float(final_exit['volatility_penalty'] or 0.0)
+        ),
+        'liquidity_penalty': (
+            partial_exit['liquidity_penalty'] + float(final_exit['liquidity_penalty'] or 0.0)
+        ),
     }
-    multiplier=risk_usd if provenance.get('execution_cost_unit') == 'R' else 1.0
-    costs_usd={key: None if value is None else float(value)*multiplier for key,value in raw_costs.items()}
-    total=None if missing else sum(float(value or 0) for value in costs_usd.values())
-    net_pnl=None if total is None else gross_pnl-total
-    net_r=None if net_pnl is None or risk_usd <= 0 else net_pnl/risk_usd
-    hold=(_dt(exit_time)-_dt(r['entry_time'])).total_seconds()
-    evidence_missing=[*missing, *(['ambiguous_intrabar_sequence'] if ambiguous else [])]
-    resolved_at=utc_now()
-    _exec(conn,"""UPDATE burnin_pending_position_outcomes SET status='CLOSED',exit_time=:xt,exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,missing_fields_json=:mf,resolved_at=:now WHERE trade_id=:tid""",{"tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,"gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),"esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),"fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),"tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,"ec":0 if evidence_missing else 1,"mf":json.dumps(evidence_missing),"now":resolved_at})
-    outcome_payload={'pending_position_id':r['pending_position_id'],'signal_id':r.get('signal_id'),'source_provenance':provenance,'phase':provenance.get('setup_phase'),'execution':provenance.get('execution_direction'),'ambiguous_intrabar_sequence':ambiguous,'quantity':qty,'notional':r.get('notional'),'simulated_fill':fill,'cost_unit':'USD'}
-    persist_burnin_trade_outcome(conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,gross_r=gross_r,gross_pnl=gross_pnl,costs=costs_usd,net_r=net_r,net_pnl=net_pnl,effective_rr_at_entry=provenance.get('effective_rr_at_entry'),realized_effective_rr=net_r,hold_duration_seconds=hold,mfe=mfe,mae=mae,exit_reason=exit_reason,payload=outcome_payload)
-    record_expectancy_evidence(conn,evidence_id='accepted:'+trade_id,source_decision_id=r.get('source_decision_id'),evidence_type='ACCEPTED_TRADE',decision_time=r.get('decision_time'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=r.get('setup_type'),regime=r.get('regime'),reject_reason=None,net_r=net_r,run_id=r.get('burnin_run_id'),campaign_id=r.get('campaign_id'),release_id=_release(conn,r['burnin_run_id']),evidence_complete=not evidence_missing)
+    total = None if missing else sum(float(value or 0.0) for value in costs_usd.values())
+    net_pnl = None if total is None else gross_pnl - total
+    net_r = None if net_pnl is None or risk_usd <= 0 else net_pnl / risk_usd
+
+    partial_events = [
+        event for event in _management_events(conn, trade_id)
+        if str(event.get("action") or "").upper() == "PARTIAL_EXIT"
+    ]
+    ledger_gross = sum(float(event.get("gross_pnl") or 0.0) for event in partial_events)
+    ledger_cost = sum(float(event.get("execution_cost") or 0.0) for event in partial_events)
+    if not math.isclose(ledger_gross, previous_gross, rel_tol=1e-9, abs_tol=1e-9):
+        missing.append("management_gross_ledger_mismatch")
+    if not math.isclose(ledger_cost, float(r.get("realized_execution_cost") or 0.0), rel_tol=1e-9, abs_tol=1e-9):
+        missing.append("management_cost_ledger_mismatch")
+
+    hold = (_dt(exit_time) - _dt(r['entry_time'])).total_seconds()
+    evidence_missing = [*missing, *(['ambiguous_intrabar_sequence'] if ambiguous else [])]
+    resolved_at = utc_now()
+    final_slice_cost = None
+    if total is not None:
+        final_slice_cost = total - float(r.get("realized_execution_cost") or 0.0)
+    final_slice_net = None if final_slice_cost is None else final_slice_gross - final_slice_cost
+
+    _exec(conn, """UPDATE burnin_pending_position_outcomes SET
+        status='CLOSED',remaining_quantity=0,remaining_notional=0,exit_time=:xt,
+        exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,
+        exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,
+        latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,
+        realized_gross_pnl=:gp,realized_execution_cost=:tc,realized_net_pnl=:np,
+        hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,
+        missing_fields_json=:mf,resolved_at=:now,last_management_at=:now
+        WHERE trade_id=:tid""", {
+            "tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,
+            "gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),
+            "esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),
+            "fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),
+            "tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,
+            "ec":0 if evidence_missing else 1,"mf":json.dumps(evidence_missing),
+            "now":resolved_at,
+        })
+    outcome_payload = {
+        'pending_position_id': r['pending_position_id'],
+        'signal_id': r.get('signal_id'),
+        'source_provenance': provenance,
+        'phase': provenance.get('setup_phase'),
+        'execution': provenance.get('execution_direction'),
+        'ambiguous_intrabar_sequence': ambiguous,
+        'quantity': original_qty,
+        'final_exit_quantity': remaining_qty,
+        'partial_exit_count': len(partial_events),
+        'management_event_ids': [event.get('management_event_id') for event in _management_events(conn, trade_id)],
+        'notional': r.get('notional'),
+        'simulated_fill': fill,
+        'initial_stop': initial_stop,
+        'final_managed_stop': r.get('current_stop') if r.get('current_stop') is not None else initial_stop,
+        'trailing_enabled': bool(r.get('trailing_enabled')),
+        'cost_unit': 'USD',
+    }
+    persist_burnin_trade_outcome(
+        conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],
+        release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,
+        symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,
+        gross_r=gross_r,gross_pnl=gross_pnl,costs=costs_usd,net_r=net_r,
+        net_pnl=net_pnl,effective_rr_at_entry=provenance.get('effective_rr_at_entry'),
+        realized_effective_rr=net_r,hold_duration_seconds=hold,mfe=mfe,mae=mae,
+        exit_reason=exit_reason,payload=outcome_payload,
+    )
+    record_expectancy_evidence(
+        conn,evidence_id='accepted:'+trade_id,source_decision_id=r.get('source_decision_id'),
+        evidence_type='ACCEPTED_TRADE',decision_time=r.get('decision_time'),
+        resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),
+        setup_type=r.get('setup_type'),regime=r.get('regime'),reject_reason=None,
+        net_r=net_r,run_id=r.get('burnin_run_id'),campaign_id=r.get('campaign_id'),
+        release_id=_release(conn,r['burnin_run_id']),evidence_complete=not evidence_missing,
+    )
     if ambiguous:
-        _exec(conn,"UPDATE burnin_trade_outcomes SET evidence_complete=0,missing_cost_fields_json=:mf WHERE outcome_id=:oid",{'mf':json.dumps(evidence_missing),'oid':'tout_'+trade_id})
-    return {'status':'CLOSED','trade_id':trade_id,'evidence_complete':not evidence_missing,'net_r':net_r,'exit_reason':exit_reason}
+        _exec(conn,"UPDATE burnin_trade_outcomes SET evidence_complete=0,missing_cost_fields_json=:mf WHERE outcome_id=:oid",{
+            'mf':json.dumps(evidence_missing),'oid':'tout_'+trade_id})
+    return {
+        'status':'CLOSED','trade_id':trade_id,'evidence_complete':not evidence_missing,
+        'net_r':net_r,'exit_reason':exit_reason,
+        'final_slice_gross_pnl': final_slice_gross,
+        'final_slice_execution_cost': final_slice_cost,
+        'final_slice_net_pnl': final_slice_net,
+    }
 
 
-def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Mapping[Any,Sequence[Mapping[str,Any]]], *, now: str|None=None) -> dict[str,int]:
-    """Resolve PAPER positions only across a complete canonical 1m entry-to-terminal path."""
-    bootstrap_campaign_schema(conn); now=now or utc_now()
-    rows=_exec(conn,"SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id",{'cid':campaign_id}).fetchall()
-    counts={'closed':0,'tp':0,'sl':0,'ambiguous':0,'pending':0}
+def resolve_campaign_positions(
+    conn: Any,
+    campaign_id: str,
+    candles_by_trade: Mapping[Any,Sequence[Mapping[str,Any]]],
+    *,
+    now: str|None=None,
+    management_actions_by_trade: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> dict[str,int]:
+    """Resolve PAPER positions using persisted post-entry management state."""
+    bootstrap_campaign_schema(conn)
+    now = now or utc_now()
+
+    for trade_id, actions in (management_actions_by_trade or {}).items():
+        for action in actions:
+            payload = dict(action)
+            apply_position_management_action(
+                conn,
+                trade_id=trade_id,
+                management_event_id=str(payload.pop("management_event_id")),
+                action=str(payload.pop("action")),
+                event_time=str(payload.pop("event_time")),
+                evidence=payload.pop("evidence"),
+                new_stop=payload.pop("new_stop", None),
+                exit_quantity=payload.pop("exit_quantity", None),
+                execution_price=payload.pop("execution_price", None),
+                exit_costs=payload.pop("exit_costs", None),
+            )
+
+    rows = _exec(conn, """SELECT * FROM burnin_pending_position_outcomes
+        WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id""",
+        {'cid':campaign_id}).fetchall()
+    counts = {'closed':0,'tp':0,'sl':0,'ambiguous':0,'pending':0}
     for raw in rows:
-        r=dict(raw) if isinstance(raw,sqlite3.Row) else dict(raw._mapping)
-        candles=candles_by_trade.get((r['symbol'],'position',r['trade_id'])) or candles_by_trade.get(r['trade_id']) or []
-        window_row={
-            'decision_timestamp':r['entry_time'],
-            'due_at':now,
-            'timeframe':'1m',
-            'horizon_bars':1,
+        r = _row_dict(raw)
+        candles = candles_by_trade.get((r['symbol'],'position',r['trade_id'])) or candles_by_trade.get(r['trade_id']) or []
+        window_row = {
+            'decision_timestamp':r['entry_time'],'due_at':now,'timeframe':'1m','horizon_bars':1,
         }
-        normalized,input_errors=_normalize_candle_window(candles,window_row)
+        normalized,input_errors = _normalize_candle_window(candles,window_row)
 
-        fill=float(r.get('simulated_fill') or r['planned_entry']); stop=float(r['stop']); target=float(r['target']); risk=abs(fill-stop) or 1.0
-        sign=-1 if _side(r['side'])=='SHORT' else 1
-        favorable=[]; adverse=[]; terminal=None
+        fill = float(r.get('simulated_fill') or r['planned_entry'])
+        initial_stop = float(r['stop'])
+        stop = float(r.get('current_stop') if r.get('current_stop') is not None else r['stop'])
+        target = float(r.get('current_target') if r.get('current_target') is not None else r['target'])
+        risk = abs(fill - initial_stop) or 1.0
+        sign = -1 if _side(r['side'])=='SHORT' else 1
+        terminal = None
         for index,candle in enumerate(normalized):
             high=float(candle['high']); low=float(candle['low'])
-            favorable.append(((high-fill)*sign)/risk if sign>0 else ((fill-low)/risk))
-            adverse.append(((fill-low)/risk) if sign>0 else ((high-fill)/risk))
-            sl,tp=_hit(r['side'],high,low,stop,target)
+            sl,tp = _hit(r['side'],high,low,stop,target)
             if sl or tp:
                 terminal=(index,candle,sl,tp)
                 break
@@ -483,41 +1036,67 @@ def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Ma
             if input_errors:
                 _exec(conn,"UPDATE burnin_pending_position_outcomes SET evidence_complete=0,missing_fields_json=:mf WHERE trade_id=:tid AND status='OPEN'",{
                     'mf':json.dumps(input_errors,sort_keys=True),'tid':r['trade_id']})
-            counts['pending']+=1
+            counts['pending'] += 1
             continue
 
-        terminal_index,terminal_candle,sl,tp=terminal
-        window_row['horizon_bars']=terminal_index+1
-        complete,gaps=_window_complete(
+        terminal_index,terminal_candle,sl,tp = terminal
+        window_row['horizon_bars'] = terminal_index + 1
+        complete,gaps = _window_complete(
             normalized,window_row,terminal_index,input_errors=input_errors)
         if not complete:
             diagnostics=['incomplete_market_window',*input_errors]
             diagnostics += [f"market_gap:{start}->{end}" for start,end in gaps]
             _exec(conn,"UPDATE burnin_pending_position_outcomes SET evidence_complete=0,missing_fields_json=:mf WHERE trade_id=:tid AND status='OPEN'",{
                 'mf':json.dumps(sorted(set(diagnostics)),sort_keys=True),'tid':r['trade_id']})
-            counts['pending']+=1
+            counts['pending'] += 1
             continue
 
-        observed=normalized[:terminal_index+1]
+        observed = normalized[:terminal_index+1]
         favorable=[]; adverse=[]
         for candle in observed:
             high=float(candle['high']); low=float(candle['low'])
             favorable.append(((high-fill)*sign)/risk if sign>0 else ((fill-low)/risk))
             adverse.append(((fill-low)/risk) if sign>0 else ((high-fill)/risk))
 
-        try: provenance=json.loads(r.get('source_provenance_json') or '{}')
-        except (TypeError,json.JSONDecodeError): provenance={}
-        model=provenance.get('execution_cost_model') if isinstance(provenance.get('execution_cost_model'),Mapping) else {}
-        risk_usd=abs(fill-stop)*float(r['quantity'])
+        provenance = _position_provenance(r)
+        model = provenance.get('execution_cost_model') if isinstance(provenance.get('execution_cost_model'),Mapping) else {}
+        original_qty = float(r['quantity'])
+        remaining_qty = float(r.get('remaining_quantity') if r.get('remaining_quantity') is not None else original_qty)
+        risk_usd = abs(fill-initial_stop) * original_qty
+        remaining_fraction = remaining_qty / original_qty if original_qty > 0 else 0.0
         def half(name):
             value=model.get(name)
             return None if value is None else float(value)/2.0
-        exit_costs={'exit_spread':half('spread_penalty'),'exit_slippage':half('slippage_penalty'),'exit_fee':half('fee_penalty'),'funding':model.get('funding_penalty'),'latency_impact_penalty':model.get('latency_penalty'),'volatility_penalty':model.get('volatility_penalty'),'liquidity_penalty':model.get('liquidity_penalty')}
+        raw_exit = {
+            'exit_spread':half('spread_penalty'),
+            'exit_slippage':half('slippage_penalty'),
+            'exit_fee':half('fee_penalty'),
+            'funding':model.get('funding_penalty'),
+            'latency_impact_penalty':model.get('latency_penalty'),
+            'volatility_penalty':model.get('volatility_penalty'),
+            'liquidity_penalty':model.get('liquidity_penalty'),
+        }
         if provenance.get('execution_cost_model_unit') == 'R' and provenance.get('execution_cost_unit') == 'USD':
-            exit_costs={key: None if value is None else float(value)*risk_usd for key,value in exit_costs.items()}
-        ts=_dt(terminal_candle['timestamp']); ambiguous=bool(sl and tp); reason='AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT'); price=stop if sl else target
-        resolve_position_closure(conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),exit_price=price,exit_reason=reason,exit_costs=exit_costs,mfe=max(0.0,max(favorable,default=0.0)),mae=max(0.0,max(adverse,default=0.0)),ambiguous=ambiguous)
-        counts['closed']+=1; counts['ambiguous' if ambiguous else 'sl' if sl else 'tp']+=1
+            exit_costs = {
+                key: None if value is None else float(value)*risk_usd*remaining_fraction
+                for key,value in raw_exit.items()
+            }
+            exit_costs['cost_unit'] = 'USD'
+        else:
+            exit_costs = raw_exit
+
+        ts = _dt(terminal_candle['timestamp'])
+        ambiguous = bool(sl and tp)
+        reason = 'AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT')
+        price = stop if sl else target
+        resolve_position_closure(
+            conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),
+            exit_price=price,exit_reason=reason,exit_costs=exit_costs,
+            mfe=max(0.0,max(favorable,default=0.0)),
+            mae=max(0.0,max(adverse,default=0.0)),ambiguous=ambiguous,
+        )
+        counts['closed'] += 1
+        counts['ambiguous' if ambiguous else 'sl' if sl else 'tp'] += 1
     return counts
 
 
