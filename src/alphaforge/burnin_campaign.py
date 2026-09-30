@@ -104,6 +104,7 @@ def bootstrap_campaign_schema(conn: Any) -> None:
         "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_stop REAL",
         "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_target REAL",
         "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_quantity REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_notional REAL",
         "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_gross_pnl REAL NOT NULL DEFAULT 0",
         "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_execution_cost REAL NOT NULL DEFAULT 0",
         "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_net_pnl REAL NOT NULL DEFAULT 0",
@@ -118,7 +119,8 @@ def bootstrap_campaign_schema(conn: Any) -> None:
     _exec(conn, """UPDATE burnin_pending_position_outcomes
         SET current_stop=COALESCE(current_stop,stop),
             current_target=COALESCE(current_target,target),
-            remaining_quantity=COALESCE(remaining_quantity,quantity)
+            remaining_quantity=COALESCE(remaining_quantity,quantity),
+            remaining_notional=COALESCE(remaining_notional,notional)
         WHERE status='OPEN'""")
     # additive qualification columns; ignore on older SQLite if duplicate
     for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN last_operator_activity_at TEXT"]:
