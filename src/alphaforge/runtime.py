@@ -5334,6 +5334,15 @@ class RuntimeOrchestrator:
                 "failed_gate_evidence": list(failed_gate_evidence),
             }
 
+            # Packaged upstream audit results were computed against scanner/shadow
+            # candidate geometry. Once guided candidate authority is absent, only
+            # a fresh audit over the remaining canonical fields may contribute.
+            result.pop("execution_safety", None)
+            result.pop("all_failed_gates", None)
+            result.pop("failed_gate_evidence", None)
+            all_failed_gates = []
+            failed_gate_evidence = []
+
             guided_reason_candidates = [
                 generation.get("reason"),
                 guided_geometry.get("reason"),
@@ -5408,17 +5417,8 @@ class RuntimeOrchestrator:
                 })
                 forward_label_subject = "GUIDED_GEOMETRY_REJECT"
             else:
-                # The scanner-shadow gates are diagnostic only. Do not leak them
-                # back into canonical multi-gate evidence for a missing guided candidate.
-                all_failed_gates = []
-                failed_gate_evidence = []
-                # Drop packaged upstream audit evidence before the canonical re-audit.
-                # Otherwise execution_safety.failed_gate_evidence can resurrect
-                # geometry-dependent gates after their canonical observed values
-                # have been scrubbed.
-                result.pop("execution_safety", None)
-                result.pop("all_failed_gates", None)
-                result.pop("failed_gate_evidence", None)
+                # Scanner-shadow gates were quarantined above; only canonical
+                # guided/market evidence survives into the fresh audit below.
                 for key in (
                     "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                     "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
