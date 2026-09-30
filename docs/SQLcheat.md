@@ -133,7 +133,12 @@ UNION ALL
 SELECT 'POSITIONS CLOSED', COUNT(*)
 FROM burnin_pending_position_outcomes
 WHERE campaign_id='$CID'
-  AND UPPER(status) IN ('CLOSED','RESOLVED');
+  AND UPPER(status) IN ('CLOSED','RESOLVED')
+
+UNION ALL
+SELECT 'POSITION MGMT EVENTS', COUNT(*)
+FROM burnin_position_management_events
+WHERE campaign_id='$CID';
 
 
 SELECT
@@ -387,7 +392,7 @@ sqlite3 -readonly -header -column "$DB" "SELECT c.campaign_id,c.release_id,c.cam
 | Burn-in campaign | `burnin_campaigns`, `burnin_campaign_runs`, `burnin_runs` | Campaign identity, continuation lineage, release/config hashes, and run-level counters. |
 | Burn-in decisions | `burnin_observations` | Campaign/run-scoped decision evidence. `metrics_json` carries `signal_id`, `reject_decision_id`, MTF, and provenance. Use the canonical-decision predicate when counting KPI rows because diagnostic observations can coexist. |
 | Reject forward outcome | `burnin_pending_reject_labels` → `burnin_reject_outcomes` | Pending labels are campaign/run scoped. Resolved outcomes are run scoped and carry campaign/pending/reject identity in `payload_json`. |
-| Accepted trade outcome | `burnin_pending_position_outcomes` → `burnin_trade_outcomes` | Pending positions are campaign/run scoped; realized trade outcomes are run scoped and include cost, net-R, PnL, hold, and exit evidence. |
+| Accepted trade outcome | `burnin_pending_position_outcomes` → `burnin_position_management_events` → `burnin_trade_outcomes` | Entry evidence in the pending position is immutable; post-entry stop/remaining-exposure/partial/protective changes are append-only management events; realized trade outcomes bind the final cost, net-R, PnL, hold, and management ledger. |
 | Qualification | `burnin_qualification_snapshots` | Historical, immutable-looking qualification snapshots keyed by `qualification_id`; current campaign linkage is direct in current schemas. |
 | Runtime health | `runtime_heartbeats`, `runtime_state_snapshots`, `runtime_recovery_events`, `exchange_reconciliation_events` | Operational liveness, recovery, fail-closed, kill-switch, and exchange reconciliation evidence. |
 | Readiness/release | `release_gate_snapshots`, `operator_acknowledgements`, `canary_run_events`, `rollback_verification_events`, `runbook_evidence`, `live_readiness_reports` | Release/readiness evidence; not a substitute for campaign decision/lifecycle evidence. |
@@ -440,7 +445,8 @@ The following is the current column inventory. `id` is the ordinary row primary 
 | `burnin_observations` | Run-scoped decision/evidence observations | unique `observation_id`; `burnin_run_id`; campaign through `burnin_campaign_runs` | `id, observation_id, burnin_run_id, release_id, observed_at, execution_mode, symbol, interval, regime, decision, lifecycle_state, evidence_complete, missing_fields_json, metrics_json, source_provenance_json, schema_version` |
 | `burnin_pending_reject_labels` | Reject resolver queue | unique `pending_label_id` and `reject_decision_id`; direct campaign/run joins; `reject_decision_id → order_decisions.decision_id` | `id, pending_label_id, campaign_id, burnin_run_id, reject_decision_id, signal_id, symbol, side, decision_timestamp, timeframe, horizon_bars, entry, stop, target, horizon_seconds, execution_cost_assumptions_json, regime, reject_reason, source_provenance_json, due_at, status, evidence_complete, last_error, claim_token, claimed_at, created_at, resolved_at, schema_version` |
 | `burnin_reject_outcomes` | Canonical resolved reject forward outcome | unique `reject_outcome_id`; `burnin_run_id`; explicit identities in `payload_json` | `id, reject_outcome_id, burnin_run_id, release_id, reject_reason, symbol, regime, decision_time, hypothetical_entry, hypothetical_stop, hypothetical_target, forward_label, would_tp, would_sl, timeout, ambiguous, hypothetical_gross_r, hypothetical_net_r_after_costs, avoided_loss, missed_profit, execution_invalidated, evidence_horizon, evidence_complete, payload_json, schema_version` |
-| `burnin_pending_position_outcomes` | Accepted PAPER position/outcome queue | unique `pending_position_id` and `trade_id`; direct campaign/run joins; `source_decision_id` | `id, pending_position_id, trade_id, campaign_id, burnin_run_id, signal_id, source_decision_id, decision_time, symbol, side, setup_type, entry_time, planned_entry, simulated_fill, stop, target, quantity, notional, entry_spread, entry_slippage, entry_fee, regime, source_provenance_json, status, exit_time, exit_price, exit_reason, gross_pnl, gross_r, exit_spread, exit_slippage, exit_fee, funding, latency_impact_penalty, total_execution_cost, net_pnl, net_r, hold_duration_seconds, mfe, mae, evidence_complete, missing_fields_json, created_at, resolved_at, schema_version` |
+| `burnin_pending_position_outcomes` | Accepted PAPER position/outcome queue | unique `pending_position_id` and `trade_id`; direct campaign/run joins; `source_decision_id` | `id, pending_position_id, trade_id, campaign_id, burnin_run_id, signal_id, source_decision_id, decision_time, symbol, side, setup_type, entry_time, planned_entry, simulated_fill, stop, target, quantity, notional, entry_spread, entry_slippage, entry_fee, regime, source_provenance_json, status, exit_time, exit_price, exit_reason, gross_pnl, gross_r, exit_spread, exit_slippage, exit_fee, funding, latency_impact_penalty, total_execution_cost, net_pnl, net_r, hold_duration_seconds, mfe, mae, evidence_complete, missing_fields_json, created_at, resolved_at, schema_version, current_stop, current_target, remaining_quantity, remaining_notional, realized_gross_pnl, realized_execution_cost, realized_net_pnl, trailing_enabled, management_version, last_management_at` |
+| `burnin_position_management_events` | Append-only PAPER post-entry management evidence | unique `management_event_id`; `request_hash` binds replay identity; joins by `trade_id,campaign_id,burnin_run_id` | `id, management_event_id, request_hash, trade_id, campaign_id, burnin_run_id, event_time, action, requested_quantity, execution_price, previous_stop, new_stop, previous_remaining_quantity, new_remaining_quantity, gross_pnl, execution_cost, net_pnl, evidence_json, created_at, schema_version` |
 | `burnin_trade_outcomes` | Canonical realized burn-in trade outcome | unique `outcome_id`; `burnin_run_id` | `id, outcome_id, burnin_run_id, release_id, trade_id, symbol, regime, closed_at, gross_r, gross_pnl, spread_cost, entry_slippage_cost, exit_slippage_cost, fee_cost, funding_cost, latency_cost, volatility_penalty, liquidity_penalty, total_execution_cost, net_r, net_pnl, effective_rr_at_entry, realized_effective_rr, hold_duration_seconds, mfe, mae, exit_reason, evidence_complete, missing_cost_fields_json, payload_json, schema_version` |
 | `burnin_regime_metrics` | Run/regime derived qualification metrics | unique `(burnin_run_id,regime)` | `id, burnin_run_id, release_id, regime, sample_count, accepted_count, rejected_count, mean_net_r, lower_confidence_bound_expectancy, max_drawdown, cost_drag, slippage_distribution_json, reject_accuracy, execution_failure_count, status, generated_at, schema_version` |
 | `burnin_execution_metrics` | Run/window execution-quality aggregate | run/window logical key | `id, burnin_run_id, release_id, metric_window, spread_baseline, spread_current, slippage_baseline, slippage_current, latency_baseline, latency_current, fill_probability_baseline, fill_probability_current, liquidity_depth_baseline, liquidity_depth_current, timeout_rate, execution_rejects, stale_data_count, reconciliation_quality, funding_cost, price_impact_proxy, status, generated_at, schema_version` |
@@ -1470,6 +1476,18 @@ Accepted decision without downstream position is a review candidate, not a guara
 
 ```bash
 sqlite3 -readonly -header -column "$DB" "WITH accepted AS (SELECT DISTINCT json_extract(o.metrics_json,'$.signal_id') AS signal_id FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id='$CID' AND UPPER(COALESCE(o.decision,'')) IN ('ACCEPT','ACCEPTED')) SELECT a.signal_id FROM accepted a LEFT JOIN burnin_pending_position_outcomes p ON p.signal_id=a.signal_id AND p.campaign_id='$CID' LEFT JOIN positions pos ON pos.signal_id=a.signal_id WHERE p.signal_id IS NULL AND pos.signal_id IS NULL;"
+```
+
+Post-entry management ledger for one campaign. `stop/target/quantity/notional` are immutable entry evidence; current exposure is `current_stop/current_target/remaining_quantity/remaining_notional`. A repeated `management_event_id` is valid only when its `request_hash` is unchanged.
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT e.event_time,e.trade_id,e.action,e.requested_quantity,e.execution_price,e.previous_stop,e.new_stop,e.previous_remaining_quantity,e.new_remaining_quantity,e.gross_pnl,e.execution_cost,e.net_pnl,e.request_hash FROM burnin_position_management_events e WHERE e.campaign_id='$CID' ORDER BY e.id;"
+```
+
+Current managed PAPER exposure:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT trade_id,symbol,side,status,simulated_fill,stop AS initial_stop,current_stop,target AS initial_target,current_target,quantity AS initial_quantity,remaining_quantity,notional AS initial_notional,remaining_notional,trailing_enabled,management_version,last_management_at FROM burnin_pending_position_outcomes WHERE campaign_id='$CID' ORDER BY id;"
 ```
 
 Closed position without a canonical trade outcome is also a review candidate. Runtime positions lack a campaign key, so this is a cross-surface diagnostic, not a definitive campaign violation:
