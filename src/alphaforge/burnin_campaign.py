@@ -754,6 +754,16 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
         "reject_reason": gv(r,"reject_reason"), "forward_label": gv(r,"forward_label"),
         "hypothetical_net_r_after_costs": gv(r,"hypothetical_net_r_after_costs")
     } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
+    management_rows = _exec(conn, """SELECT management_event_id,trade_id,burnin_run_id,event_time,
+        action,requested_quantity,execution_price,previous_stop,new_stop,
+        previous_remaining_quantity,new_remaining_quantity,gross_pnl,execution_cost,
+        net_pnl,evidence_json FROM burnin_position_management_events
+        WHERE campaign_id=:cid ORDER BY id""", {"cid": campaign_id}).fetchall()
+    qualification_hash_payload["position_management_events"] = [
+        dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
+        for row in management_rows
+    ]
+    metrics["position_management_event_count"] = len(management_rows)
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     metrics["reject_candidate_feasibility_shadow"] = reject_candidate_feasibility_shadow(conn, campaign_id)
@@ -989,11 +999,11 @@ def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id:
         root=Path(output_dir)/f"burnin_campaign_{campaign_id}"; root.mkdir(parents=True,exist_ok=True)
         agg=aggregate_campaign(conn,campaign_id); run_ids=agg.get("metrics",{}).get("source_run_ids",[])
         (root/"campaign.json").write_text(json.dumps(c,indent=2,sort_keys=True,default=str))
-        tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
+        tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","position_management_events.csv":"burnin_position_management_events","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
         counts={}
         for fname,table in tables.items():
             if table == "burnin_campaign_runs": rows=conn.execute("SELECT cr.*,r.observed_duration_seconds FROM burnin_campaign_runs cr JOIN burnin_runs r ON r.burnin_run_id=cr.burnin_run_id WHERE cr.campaign_id=? ORDER BY cr.id",(campaign_id,)).fetchall()
-            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
+            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes","burnin_position_management_events"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
             else:
                 q=",".join("?" for _ in run_ids) or "''"; rows=conn.execute(f"SELECT * FROM {table} WHERE burnin_run_id IN ({q}) ORDER BY id",run_ids).fetchall()
             counts[fname]=len(rows); 
