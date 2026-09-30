@@ -3689,7 +3689,7 @@ class RuntimeOrchestrator:
             side=market_ctx.get("side", signal_payload.get("side")),
             entry=rr_metrics.get("expected_fill") or market_ctx.get("entry"),
             stop=market_ctx.get("sl"),
-            target=market_ctx.get("structural_target", market_ctx.get("tp")),
+            target=market_ctx.get("structural_target") or market_ctx.get("tp"),
             effective_rr=effective_rr,
             min_effective_rr=self.config.min_effective_rr,
             regime=regime_layer.get("regime") or market_ctx.get("regime"),
