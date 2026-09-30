@@ -151,6 +151,143 @@ def scale_candidate_exposure(
         "effective_quantity": effective_qty,
     }
 
+
+def risk_based_candidate_exposure(
+    *,
+    equity: Any,
+    entry: Any,
+    stop: Any,
+    risk_pct_per_trade: Any,
+    rolling_drawdown_pct: Any = 0.0,
+    max_rolling_drawdown_pct: Any = None,
+    expected_slippage_pct: Any = None,
+    max_expected_slippage_pct: Any = None,
+    volatility_penalty_pct: Any = None,
+    max_volatility_penalty_pct: Any = None,
+    liquidity_depth_usdt: Any = None,
+    max_liquidity_participation_pct: Any = 0.01,
+    max_leverage: Any = 1.0,
+    min_notional: Any = 0.0,
+    hard_notional_caps: Mapping[str, Any] | None = None,
+    require_execution_limits: bool = True,
+) -> dict[str, Any]:
+    """Derive PAPER notional from equity risk and executable stop distance.
+
+    All modifiers are monotonic risk reducers. No cap, minimum or reporting
+    objective may increase the risk budget. Missing mandatory execution
+    evidence fails closed when the projection is authoritative.
+    """
+    def num(value: Any) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+
+    eq = num(equity)
+    px = num(entry)
+    sl = num(stop)
+    risk_pct = num(risk_pct_per_trade)
+    if eq is None or eq <= 0 or px is None or px <= 0 or sl is None:
+        return {"status": "UNAVAILABLE", "reason": "RISK_SIZING_CORE_EVIDENCE_UNAVAILABLE"}
+    if risk_pct is None or risk_pct <= 0 or risk_pct > 1:
+        return {"status": "INVALID", "reason": "INVALID_RISK_PCT_PER_TRADE"}
+
+    stop_distance_pct = abs(px - sl) / px
+    if not math.isfinite(stop_distance_pct) or stop_distance_pct <= 0:
+        return {"status": "INVALID", "reason": "INVALID_STOP_DISTANCE"}
+
+    dd = num(rolling_drawdown_pct)
+    max_dd = num(max_rolling_drawdown_pct)
+    if dd is None or dd < 0:
+        return {"status": "UNAVAILABLE", "reason": "DRAWDOWN_EVIDENCE_UNAVAILABLE"}
+    drawdown_multiplier = 1.0
+    if max_dd is not None and max_dd > 0:
+        drawdown_multiplier = max(0.0, min(1.0, 1.0 - (dd / max_dd)))
+    if drawdown_multiplier <= 0:
+        return {"status": "REJECTED", "reason": "MAX_ROLLING_DRAWDOWN"}
+
+    slip = num(expected_slippage_pct)
+    max_slip = num(max_expected_slippage_pct)
+    vol_penalty = num(volatility_penalty_pct)
+    max_vol_penalty = num(max_volatility_penalty_pct)
+    depth = num(liquidity_depth_usdt)
+    participation = num(max_liquidity_participation_pct)
+    leverage = num(max_leverage)
+    min_size = num(min_notional) or 0.0
+
+    if require_execution_limits and (
+        slip is None or max_slip is None or vol_penalty is None
+        or max_vol_penalty is None or depth is None
+    ):
+        return {"status": "UNAVAILABLE", "reason": "RISK_SIZING_EXECUTION_EVIDENCE_UNAVAILABLE"}
+    if slip is not None and max_slip is not None and slip > max_slip:
+        return {"status": "REJECTED", "reason": "EXCESSIVE_EXPECTED_SLIPPAGE"}
+    if participation is None or participation < 0 or participation > 1:
+        return {"status": "INVALID", "reason": "INVALID_LIQUIDITY_PARTICIPATION"}
+    if leverage is None or leverage <= 0 or leverage > 1:
+        return {"status": "INVALID", "reason": "INVALID_PAPER_MAX_LEVERAGE"}
+    if min_size < 0:
+        return {"status": "INVALID", "reason": "INVALID_MIN_NOTIONAL"}
+
+    volatility_multiplier = 1.0
+    if vol_penalty is not None and max_vol_penalty is not None:
+        if max_vol_penalty <= 0:
+            if vol_penalty > 0:
+                return {"status": "REJECTED", "reason": "EXCESSIVE_VOLATILITY"}
+        else:
+            if vol_penalty > max_vol_penalty:
+                return {"status": "REJECTED", "reason": "EXCESSIVE_VOLATILITY"}
+            volatility_multiplier = max(0.0, min(1.0, 1.0 - (vol_penalty / max_vol_penalty)))
+
+    risk_budget_usdt = eq * risk_pct * drawdown_multiplier * volatility_multiplier
+    raw_notional = risk_budget_usdt / stop_distance_pct
+
+    caps: dict[str, float] = {
+        "leverage_cap": eq * leverage,
+    }
+    if depth is not None and participation is not None:
+        caps["liquidity_cap"] = max(0.0, depth * participation)
+    for name, value in dict(hard_notional_caps or {}).items():
+        parsed = num(value)
+        if parsed is None:
+            if require_execution_limits:
+                return {"status": "UNAVAILABLE", "reason": f"{str(name).upper()}_CAP_UNAVAILABLE"}
+            continue
+        caps[str(name)] = max(0.0, parsed)
+
+    selected_notional = min([raw_notional, *caps.values()]) if caps else raw_notional
+    if selected_notional <= 0:
+        return {"status": "REJECTED", "reason": "NO_RISK_CAPACITY", "caps": caps}
+    if min_size > 0 and selected_notional < min_size:
+        return {
+            "status": "REJECTED",
+            "reason": "BELOW_MIN_NOTIONAL",
+            "selected_notional": selected_notional,
+            "min_notional": min_size,
+            "caps": caps,
+        }
+
+    quantity = selected_notional / px
+    return {
+        "status": "COMPLETE",
+        "reason": "",
+        "entry_basis": px,
+        "stop": sl,
+        "stop_distance_pct": stop_distance_pct,
+        "risk_pct_per_trade": risk_pct,
+        "risk_budget_usdt": risk_budget_usdt,
+        "drawdown_multiplier": drawdown_multiplier,
+        "volatility_multiplier": volatility_multiplier,
+        "raw_risk_notional": raw_notional,
+        "selected_notional": selected_notional,
+        "quantity": quantity,
+        "risk_at_stop_usdt": selected_notional * stop_distance_pct,
+        "risk_at_stop_pct_equity": (selected_notional * stop_distance_pct) / eq,
+        "caps": caps,
+    }
+
+
 def correlation_group_for_symbol(symbol: str, override: Mapping[str, str] | None = None) -> str:
     s = str(symbol or "").upper().replace("-", "")
     if override and s in {k.upper(): v for k, v in override.items()}:
