@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from alphaforge.multi_timeframe import REGIME_GUIDED_SETUP_PHASES
-from alphaforge.walk_forward import SegmentRole
+from alphaforge.walk_forward import SearchSelectionLineage, SegmentRole
 
 MANIFEST_SCHEMA = "pullback_reentry_research_v1"
 BASELINE_VARIANT = "CURRENT_PRODUCTION_GUIDED_PHASES"
@@ -79,27 +79,37 @@ class FrozenResearchManifest:
             blockers.append("MISSING_SEARCH_LINEAGE")
         if not self.candidate_variant_ids:
             blockers.append("MISSING_VARIANT_LINEAGE")
-        if self.evaluation_count < len(self.candidate_variant_ids):
-            blockers.append("INVALID_EVALUATION_COUNT")
-        if self.declared_fresh and (
-            self.evaluation_count > 1
-            or len(self.candidate_variant_ids) > 1
-            or self.influenced_selection
-        ):
-            blockers.append("FALSE_FRESHNESS_CLAIM")
+        lineage = None
+        if self.search_lineage_id and self.candidate_variant_ids:
+            try:
+                lineage = SearchSelectionLineage(
+                    lineage_id=self.search_lineage_id,
+                    candidate_variant_ids=self.candidate_variant_ids,
+                    evidence_evaluation_count=self.evaluation_count,
+                    influenced_selection=self.influenced_selection,
+                    declared_fresh=self.declared_fresh,
+                )
+            except ValueError:
+                blockers.append("INVALID_SEARCH_SELECTION_LINEAGE")
+        if lineage is not None and not lineage.promotion_admissible:
+            blockers.append("UNTOUCHED_LINEAGE_NOT_PROMOTION_ADMISSIBLE")
         if not self.untouched_segment_ids:
             blockers.append("MISSING_UNTOUCHED_TEST_SEGMENT")
         return tuple(sorted(set(blockers)))
 
     @property
     def untouched_admissible(self) -> bool:
-        return (
-            not self.validate()
-            and self.declared_fresh
-            and not self.influenced_selection
-            and self.evaluation_count == 1
-            and len(self.candidate_variant_ids) == 1
-        )
+        try:
+            lineage = SearchSelectionLineage(
+                lineage_id=self.search_lineage_id,
+                candidate_variant_ids=self.candidate_variant_ids,
+                evidence_evaluation_count=self.evaluation_count,
+                influenced_selection=self.influenced_selection,
+                declared_fresh=self.declared_fresh,
+            )
+        except ValueError:
+            return False
+        return not self.validate() and lineage.promotion_admissible
 
 
 def _finite_non_negative(value: Any, field: str) -> float:
