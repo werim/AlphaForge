@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from alphaforge.regime_authority import REGIME_STATES
+
 SCHEMA_VERSION = "phase7_burnin_v1"
 ALLOWED_BURNIN_MODES = {"PAPER", "LIVE_PRECHECK"}
 FORBIDDEN_PROVIDER_MARKERS = {"SYNTHETIC", "MOCK", "FAKE", "TEST_PROVIDER"}
-REGIMES = {"TRENDING","MEAN_REVERTING","CHOPPY","PANIC","LOW_LIQUIDITY","BREAKOUT","SHORT_SQUEEZE","RANGE_COMPRESSION","NEWS_DRIVEN","UNKNOWN"}
+REGIMES = set(REGIME_STATES)
 CRITICAL_COST_FIELDS = ("spread_cost","entry_slippage_cost","exit_slippage_cost","fee_cost","funding_cost","latency_cost")
 CANONICAL_DECISION_KIND = "CANONICAL_DECISION"
 DIAGNOSTIC_OBSERVATION_KIND = "DIAGNOSTIC"

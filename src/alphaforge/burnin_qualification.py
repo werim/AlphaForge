@@ -11,6 +11,7 @@ from alphaforge.burnin import CRITICAL_COST_FIELDS, LEGACY_REJECT_IDENTITY_MODE,
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
+from alphaforge.regime_authority import REGIME_AUTHORITY_VERSION, is_qualifiable_regime
 
 VERDICTS={"BURN_IN_INSUFFICIENT","BURN_IN_FAILED","CANARY_QUALIFIED","CANARY_SUSPENDED"}
 REQUIRED_TABLES={"burnin_runs","burnin_trade_outcomes","burnin_reject_outcomes","burnin_regime_metrics","burnin_execution_metrics","burnin_calibration_metrics","burnin_drawdown_events","burnin_qualification_snapshots","burnin_suspension_events"}
@@ -439,14 +440,31 @@ class BurnInQualificationEngine:
             "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RUNTIME_RECOVERY_REQUIRED"
         }
     def _check_regimes(self,regimes,blockers,metrics):
-        material=0; status="PASS"; by={}
+        material=0; status="PASS"; by={}; qualifiable=set(); excluded={}
         for r in regimes:
-            reg=str(r.get("regime") or "UNKNOWN").upper(); sc=int(r.get("sample_count") or 0); by[reg]=dict(r)
-            if reg=="UNKNOWN" and str(r.get("status") or "").upper()=="PASS": blockers.append("UNKNOWN_REGIME_CANNOT_PASS"); status="FAIL"
-            if sc>=self.thresholds.minimum_regime_sample: material+=1
-            if sc>=self.thresholds.minimum_regime_sample and r.get("lower_confidence_bound_expectancy") is not None and float(r["lower_confidence_bound_expectancy"])<0: blockers.append(f"NEGATIVE_MATERIAL_REGIME:{reg}"); status="FAIL"
+            reg=str(r.get("regime") or "UNKNOWN").upper()
+            sc=int(r.get("sample_count") or 0)
+            authority_eligible=is_qualifiable_regime(reg)
+            row=dict(r); row["regime_authority_eligible"]=authority_eligible; by[reg]=row
+            if reg=="UNKNOWN" and str(r.get("status") or "").upper()=="PASS":
+                blockers.append("UNKNOWN_REGIME_CANNOT_PASS"); status="FAIL"
+            if not authority_eligible:
+                if sc>0:
+                    excluded[reg]=sc
+                    if str(r.get("status") or "").upper()=="PASS":
+                        blockers.append(f"UNQUALIFIED_REGIME_AUTHORITY:{reg}"); status="FAIL"
+                continue
+            if sc>=self.thresholds.minimum_regime_sample:
+                material+=1; qualifiable.add(reg)
+            if sc>=self.thresholds.minimum_regime_sample and r.get("lower_confidence_bound_expectancy") is not None and float(r["lower_confidence_bound_expectancy"])<0:
+                blockers.append(f"NEGATIVE_MATERIAL_REGIME:{reg}"); status="FAIL"
         metrics["regime_metrics"]=by
-        if material<self.thresholds.minimum_regime_coverage: blockers.append("INSUFFICIENT_REGIME_COVERAGE"); return "INSUFFICIENT"
+        metrics["regime_authority_version"]=REGIME_AUTHORITY_VERSION
+        metrics["qualifiable_regime_coverage"]=material
+        metrics["qualifiable_regimes"]=sorted(qualifiable)
+        metrics["excluded_regime_samples"]=excluded
+        if material<self.thresholds.minimum_regime_coverage:
+            blockers.append("INSUFFICIENT_REGIME_COVERAGE"); return "INSUFFICIENT"
         return status
     def _compute_reject_quality(self,rejects,trades,blockers,metrics):
         false=sum(1 for r in rejects if float(r.get("missed_profit") or 0)>0); avoided=sum(1 for r in rejects if float(r.get("avoided_loss") or 0)>0); invalid=sum(1 for r in rejects if int(r.get("execution_invalidated") or 0)==1)
