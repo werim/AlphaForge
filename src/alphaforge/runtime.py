@@ -1420,7 +1420,9 @@ class RuntimeOrchestrator:
                 metrics = {k: payload.get(k) for k in ("score", "rr", "candidate_rr",
                     "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
                     "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
-                    "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
+                    "latency_ms", "funding_rate_pct", "expectancy_after_costs",
+                    "expectancy_sample_size", "expectancy_cost_basis",
+                    "entry", "sl", "tp",
                     "entry_source", "stop_source", "target_source", "setup_timeframe",
                     "execution_timeframe", "structural_stop", "structural_target",
                     "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
@@ -3471,7 +3473,12 @@ class RuntimeOrchestrator:
                 {**reject_payload, "reject_reason": legacy_pre_ai_execution_reason},
             )
             return
-        signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
+        signal_payload = self._build_signal(
+            selection,
+            market_ctx,
+            signal_id=signal_id,
+            decision_filters=self._canonical_filter_config(),
+        )
         signal_payload["reject_decision_id"] = self._canonical_reject_decision_id({
             **market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
         })
@@ -3510,6 +3517,15 @@ class RuntimeOrchestrator:
                 "confidence": order_plan.confidence,
                 "score": getattr(score_ctx, "total_score", None),
                 "score_components": getattr(score_ctx, "components", None),
+                "expectancy_after_costs": (
+                    getattr(score_ctx, "probabilistic", {}) or {}
+                ).get("expectancy_after_costs"),
+                "expectancy_sample_size": (
+                    getattr(score_ctx, "probabilistic", {}) or {}
+                ).get("sample_size"),
+                "expectancy_cost_basis": (
+                    getattr(score_ctx, "probabilistic", {}) or {}
+                ).get("expectancy_cost_basis", "AIBRAIN_HEURISTIC_EXECUTION_THRESHOLDS"),
                 "rr": signal_payload.get("risk_reward"),
                 "side": signal_payload.get("side", market_ctx.get("side")),
                 "setup_type": signal_payload.get("setup", signal_payload.get("setup_type")),
@@ -5047,7 +5063,17 @@ class RuntimeOrchestrator:
             payload.get("primary_reject_reason") or payload.get("reason") or payload.get("reject_reason")
         )
         if primary and primary != "UNKNOWN":
-            add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
+            expectancy_after_costs = number(payload.get("expectancy_after_costs"))
+            if primary == "NEGATIVE_EXPECTANCY_AFTER_COSTS" and expectancy_after_costs is not None:
+                add(
+                    primary,
+                    expectancy_after_costs,
+                    0.0,
+                    "<=",
+                    str(payload.get("expectancy_cost_basis") or "AIBRAIN_EXPECTANCY"),
+                )
+            else:
+                add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
 
         market_time_evidence = payload.get("market_time_evidence")
         if isinstance(market_time_evidence, Mapping):
@@ -6382,12 +6408,15 @@ class RuntimeOrchestrator:
                 loop.add_signal_handler(sig, self.shutdown)
 
     @staticmethod
-    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *, signal_id: str | None = None) -> dict[str, Any]:
+    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *,
+                      signal_id: str | None = None,
+                      decision_filters: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return build_signal_payload(
             selection.symbol, market_ctx,
             signal_id=signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
             default_mode="PAPER",
             regime_fallback=getattr(selection, "regime_hint", None),
+            decision_filters=decision_filters,
         )
 
 

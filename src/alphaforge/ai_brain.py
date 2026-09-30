@@ -205,6 +205,16 @@ class AIBrain:
             "confidence": confidence,
             "calibrated_score": calibrated_score,
             "expectancy_after_costs": expectancy_after_costs,
+            "expectancy_cost_basis": "AIBRAIN_NORMALIZED_EXECUTION_THRESHOLDS",
+            "execution_threshold_source": signal.get(
+                "execution_threshold_source", "LEGACY_MODEL_DEFAULTS"
+            ),
+            "execution_thresholds": {
+                "max_spread_bps": signal.get("max_spread_bps"),
+                "max_expected_slippage_pct": signal.get("max_expected_slippage_pct"),
+                "max_latency_ms": signal.get("max_latency_ms"),
+                "max_funding_rate_pct": signal.get("max_funding_rate_pct"),
+            },
             "raw_expectancy": raw_expectancy,
             "raw_expectancy_source": "setup_regime_symbol_expectancy_stats",
             "sample_size": sample_size,

@@ -62,7 +62,6 @@
       "audit"
     ],
     "failed_gates": [
-      "LOW_EXECUTION_PROBABILITY",
       "THIN_LIQUIDITY"
     ],
     "geometry_status": "COMPLETE",
