@@ -10,6 +10,8 @@ from alphaforge.derivatives_contract import (
     evaluate_reported_liquidation_boundary,
     normalize_derivatives_position_fields,
 )
+from alphaforge.live_readiness import LiveReadinessEvaluator
+from alphaforge.persistence import init_db
 
 
 def _position(
@@ -171,3 +173,91 @@ def test_binance_position_risk_exposes_contract_without_claiming_live_equivalenc
     assert snapshot["derivatives_contract"]["funding_live_equivalent"] is False
     assert snapshot["derivatives_contract"]["live_eligible"] is False
     assert "HOLD_AWARE_FUNDING_UNAVAILABLE" in snapshot["derivatives_contract"]["blocking_reasons"]
+
+
+def _parity() -> dict[str, object]:
+    return {
+        "evidence_status": "COMPLETE",
+        "sample_count": 3,
+        "min_sample_count": 3,
+        "mismatch_count": 0,
+        "missing_field_count": 0,
+        "semantic_violation_count": 0,
+        "no_submit_verified": True,
+        "execution_context_complete": True,
+        "execution_evidence_status": "COMPLETE",
+        "modes_compared": ["BACKTEST", "PAPER", "LIVE_PRECHECK"],
+        "comparison_fields": [
+            "decision",
+            "primary_reject_reason",
+            "failed_gates",
+            "score",
+            "candidate_rr",
+            "executable_raw_rr",
+            "remaining_execution_penalty",
+            "effective_rr",
+            "rr_basis",
+            "execution_cost_semantics",
+            "threshold_provenance",
+            "execution_evidence_status",
+            "portfolio_decision",
+            "original_notional",
+            "risk_scale",
+            "effective_notional",
+            "stop_distance_basis",
+            "geometry_status",
+            "geometry_source",
+            "lifecycle_pre_submit_terminal_state",
+        ],
+    }
+
+
+def _reconciliation(contract: dict[str, object]) -> dict[str, object]:
+    return {
+        "provider_configured": True,
+        "evidence_status": "COMPLETE",
+        "orphan_positions": 0,
+        "orphan_orders": 0,
+        "duplicate_fills": 0,
+        "fail_closed_findings": 0,
+        "derivatives_contract": contract,
+    }
+
+
+def test_live_readiness_surfaces_hold_aware_funding_as_explicit_blocker() -> None:
+    contract = evaluate_notional_only_derivatives_contract(
+        positions=[_position()],
+        required_symbols=["BTCUSDT"],
+        provider_evidence_status="COMPLETE",
+    )
+    evaluator = LiveReadinessEvaluator(init_db("sqlite+pysqlite:///:memory:"))
+    checks = {
+        check.name: check
+        for check in evaluator._check_runtime(_parity(), _reconciliation(contract))
+    }
+    assert checks["notional_only_1x_verified"].passed is True
+    assert checks["leveraged_live_disabled"].passed is True
+    assert checks["hold_aware_funding_verified"].passed is False
+    assert checks["derivatives_live_eligible"].passed is False
+
+
+def test_live_readiness_accepts_only_complete_notional_derivatives_contract() -> None:
+    contract = evaluate_notional_only_derivatives_contract(
+        positions=[_position()],
+        required_symbols=["BTCUSDT"],
+        provider_evidence_status="COMPLETE",
+        funding_accrual_status=HOLD_AWARE_FUNDING_COMPLETE,
+    )
+    evaluator = LiveReadinessEvaluator(init_db("sqlite+pysqlite:///:memory:"))
+    checks = {
+        check.name: check
+        for check in evaluator._check_runtime(_parity(), _reconciliation(contract))
+    }
+    required = {
+        "derivatives_contract_present",
+        "notional_only_1x_verified",
+        "leveraged_live_disabled",
+        "hold_aware_funding_verified",
+        "derivatives_live_eligible",
+    }
+    assert all(checks[name].passed for name in required)
