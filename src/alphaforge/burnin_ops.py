@@ -1549,6 +1549,41 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
     return {"status": "PASS", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "terminal_status": "FAILED", "idempotent_replay": False, "idempotency_identity": replay_identity, "runtime_evidence": runtime_identity, "source_evidence_hash": final["source_hash"]}
 
 
+def _managed_position_recovery_snapshot(
+    conn: sqlite3.Connection, campaign_id: str
+) -> dict[str, Any]:
+    positions = [
+        dict(row) for row in conn.execute(
+            """SELECT pending_position_id,trade_id,burnin_run_id,symbol,side,status,
+                      simulated_fill,stop,target,quantity,notional,
+                      current_stop,current_target,remaining_quantity,remaining_notional,
+                      realized_gross_pnl,realized_execution_cost,realized_net_pnl,
+                      trailing_enabled,management_version,last_management_at
+               FROM burnin_pending_position_outcomes
+               WHERE campaign_id=? AND status='OPEN'
+               ORDER BY pending_position_id""",
+            (campaign_id,),
+        ).fetchall()
+    ]
+    events = [
+        dict(row) for row in conn.execute(
+            """SELECT management_event_id,request_hash,trade_id,burnin_run_id,event_time,
+                      action,requested_quantity,execution_price,previous_stop,new_stop,
+                      previous_remaining_quantity,new_remaining_quantity,gross_pnl,
+                      execution_cost,net_pnl,evidence_json
+               FROM burnin_position_management_events
+               WHERE campaign_id=? ORDER BY id""",
+            (campaign_id,),
+        ).fetchall()
+    ]
+    return {
+        "positions": positions,
+        "management_events": events,
+        "position_state_hash": canonical_hash(positions),
+        "management_ledger_hash": canonical_hash(events),
+    }
+
+
 def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
     db = conn.execute("PRAGMA database_list").fetchone()[2]
     campaign = get_campaign(conn, campaign_id)
@@ -1566,6 +1601,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     source_before = {rid: _source_row_ids_and_hash(conn, rid) for rid in _run_source_ids(conn, campaign_id)}
     pending_ids_before = [r[0] for r in conn.execute("SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY') ORDER BY pending_label_id", (campaign_id,)).fetchall()]
     position_ids_before = [r[0] for r in conn.execute("SELECT pending_position_id FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN' ORDER BY pending_position_id", (campaign_id,)).fetchall()]
+    managed_positions_before = _managed_position_recovery_snapshot(conn, campaign_id)
     old_run = campaign.get("active_run_id")
     old_pid = campaign.get("worker_pid")
     started_at = campaign.get("started_at")
@@ -1781,6 +1817,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     conn.commit()
     attach = verify_worker_attachment(conn, campaign_id, worker_started_at=worker_started_at, launch_started_at=worker_started_at, timeout_seconds=attach_timeout_seconds, process=proc)
     current = get_campaign(conn, campaign_id) or {}
+    managed_positions_after = _managed_position_recovery_snapshot(conn, campaign_id)
     runs_after = _run_source_ids(conn, campaign_id)
     source_after = {rid: _source_row_ids_and_hash(conn, rid) for rid in runs_before}
     new_hash = _campaign_source_evidence_hash(conn, campaign_id)
@@ -1804,6 +1841,8 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         "exactly_one_new_continuation": len(runs_after) == len(runs_before) + 1,
         "pending_reject_ids_preserved_exactly": pending_ids_before == [r[0] for r in conn.execute("SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY') ORDER BY pending_label_id", (campaign_id,)).fetchall()],
         "open_position_ids_preserved_exactly": position_ids_before == [r[0] for r in conn.execute("SELECT pending_position_id FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN' ORDER BY pending_position_id", (campaign_id,)).fetchall()],
+        "managed_position_state_preserved_exactly": managed_positions_before["position_state_hash"] == managed_positions_after["position_state_hash"],
+        "management_ledger_preserved_exactly": managed_positions_before["management_ledger_hash"] == managed_positions_after["management_ledger_hash"],
         "campaign_start_time_unchanged": current.get("started_at") == started_at,
         "restart_count_incremented_once": int(current.get("restart_count") or 0) == restart_count + 1,
         "qualification_includes_all_source_runs": q_source == runs_after,
@@ -1811,7 +1850,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         "evidence_hash_changes_from_source_evidence": (old_hash != new_hash) == (source_before != {rid: _source_row_ids_and_hash(conn, rid) for rid in runs_after}),
     }
     status = "PASS" if all(checks.values()) else "FAIL"
-    payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now()})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": status, "checks": {**prechecks, **checks}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_after, "source_hash": new_hash, "resume": resume, "attach": attach, "qualification": q}}
+    payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now()})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": status, "checks": {**prechecks, **checks}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash, "managed_position_state_hash": managed_positions_before["position_state_hash"], "management_ledger_hash": managed_positions_before["management_ledger_hash"]}, "after": {"run_ids": runs_after, "source_hash": new_hash, "managed_position_state_hash": managed_positions_after["position_state_hash"], "management_ledger_hash": managed_positions_after["management_ledger_hash"], "resume": resume, "attach": attach, "qualification": q}}
     conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], status, json.dumps(payload["checks"]), json.dumps(payload["before"], default=str), json.dumps(payload["after"], default=str), PHASE9_SCHEMA_VERSION))
     conn.commit()
     return payload
