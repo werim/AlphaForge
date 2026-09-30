@@ -506,6 +506,7 @@ def validate_live_order_authorization(ctx: OrderExecutionContext) -> dict[str, b
         "operator_acknowledged": bool(authorization.get("operator_acknowledged", False)),
         "qualification_passed": bool(authorization.get("qualification_passed", False)),
         "reconciliation_passed": bool(authorization.get("reconciliation_passed", False)),
+        "derivatives_contract_passed": bool(authorization.get("derivatives_contract_passed", False)),
         "execution_owner_valid": bool(authorization.get("execution_owner_valid", False)),
         "kill_switch_inactive": not bool(authorization.get("kill_switch_active", True)),
     }
