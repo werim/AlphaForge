@@ -5329,6 +5329,7 @@ class RuntimeOrchestrator:
                 "attributable": False,
                 "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
                 "primary_reject_reason": primary_reject_reason,
+                "reject_reason": primary_reject_reason,
                 "reject_reasons": list(reject_reasons),
                 "all_failed_gates": list(all_failed_gates),
                 "failed_gate_evidence": list(failed_gate_evidence),
@@ -5351,10 +5352,29 @@ class RuntimeOrchestrator:
                 if raw_alignment_reasons
                 else []
             )
+            source_guided_reason = (
+                primary_reject_reason
+                if (
+                    str(primary_reject_reason or "").startswith("MTF_")
+                    or primary_reject_reason in {
+                        "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE",
+                        "KLINE_INSUFFICIENT_ROWS",
+                        "NO_STRUCTURAL_GEOMETRY",
+                        "INSUFFICIENT_STRUCTURAL_REWARD",
+                        "ZERO_RISK_GEOMETRY",
+                        "REGIME_SIDE_INVALID",
+                        "KLINE_MALFORMED_PAYLOAD",
+                        "OHLC_INVALID",
+                        "INVALID_TARGET",
+                    }
+                )
+                else None
+            )
             guided_reason_candidates = [
                 generation.get("reason"),
                 guided_geometry.get("reason"),
                 *alignment_reasons,
+                source_guided_reason,
             ]
             guided_reasons = []
             for raw_reason in guided_reason_candidates:
