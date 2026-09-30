@@ -103,6 +103,11 @@ class RuntimeSettings:
     paper_fee_bps: float= field(default_factory=lambda: canonical_field_default("paper_fee_bps"))
     paper_execution_latency_ms: float= field(default_factory=lambda: canonical_field_default("paper_execution_latency_ms"))
     paper_candidate_notional: float= field(default_factory=lambda: canonical_field_default("paper_candidate_notional"))
+    paper_position_sizing_mode: str= field(default_factory=lambda: canonical_field_default("paper_position_sizing_mode"))
+    risk_pct_per_trade: float= field(default_factory=lambda: canonical_field_default("risk_pct_per_trade"))
+    paper_max_leverage: float= field(default_factory=lambda: canonical_field_default("paper_max_leverage"))
+    paper_max_liquidity_participation_pct: float= field(default_factory=lambda: canonical_field_default("paper_max_liquidity_participation_pct"))
+    paper_min_notional: float= field(default_factory=lambda: canonical_field_default("paper_min_notional"))
     market_data_base_url: str = field(default_factory=lambda: str(canonical_field_default("binance_market_data_base_url")))
     regime_timeframe: str= field(default_factory=lambda: canonical_field_default("regime_timeframe"))
     setup_timeframe: str= field(default_factory=lambda: canonical_field_default("setup_timeframe"))
@@ -395,6 +400,11 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         cfg.update({
             "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
             "PAPER_CANDIDATE_NOTIONAL": runtime.paper_candidate_notional,
+            "PAPER_POSITION_SIZING_MODE": runtime.paper_position_sizing_mode,
+            "RISK_PCT_PER_TRADE": runtime.risk_pct_per_trade,
+            "PAPER_MAX_LEVERAGE": runtime.paper_max_leverage,
+            "PAPER_MAX_LIQUIDITY_PARTICIPATION_PCT": runtime.paper_max_liquidity_participation_pct,
+            "PAPER_MIN_NOTIONAL": runtime.paper_min_notional,
             "PAPER_ACCOUNT_MODEL": runtime.paper_account_model,
             "MAX_CORRELATION_GROUP_EXPOSURE": runtime.max_correlation_group_exposure,
             "MAX_CORRELATED_POSITIONS": runtime.max_correlated_positions,
@@ -454,6 +464,11 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
         paper_execution_latency_ms=val("ALPHAFORGE_PAPER_EXECUTION_LATENCY_MS"),
         paper_candidate_notional=val("ALPHAFORGE_PAPER_CANDIDATE_NOTIONAL"),
+        paper_position_sizing_mode=val("ALPHAFORGE_PAPER_POSITION_SIZING_MODE"),
+        risk_pct_per_trade=val("ALPHAFORGE_RISK_PCT_PER_TRADE"),
+        paper_max_leverage=val("ALPHAFORGE_PAPER_MAX_LEVERAGE"),
+        paper_max_liquidity_participation_pct=val("ALPHAFORGE_PAPER_MAX_LIQUIDITY_PARTICIPATION_PCT"),
+        paper_min_notional=val("ALPHAFORGE_PAPER_MIN_NOTIONAL"),
         market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
         regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
