@@ -1152,7 +1152,28 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
             return {"status": "timeout", "order_id": "abc-1"}
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        now = time.time()
+        return [{
+            "symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
+            "rr": 3.0, "side": "LONG", "market_ts": now,
+            "volume_24h_usdt": 90_000_000,
+            "spread_pct": 0.0002, "spread_status": "MEASURED", "spread_source": "FIXTURE",
+            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED", "slippage_source": "FIXTURE",
+            "latency_ms": 50.0, "latency_status": "MEASURED", "latency_source": "FIXTURE",
+            "liquidity_score": 0.9, "liquidity_status": "MEASURED", "liquidity_source": "FIXTURE",
+            "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "FIXTURE",
+            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED", "orderbook_source": "FIXTURE",
+            "spoof_risk": 0.1, "spoof_status": "MEASURED", "spoof_source": "FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.5, "absorption_status": "MEASURED", "absorption_source": "FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED", "liquidity_depth_source": "FIXTURE",
+            "microstructure_observed_at": now,
+            "volatility_regime": "normal", "volatility_status": "MEASURED", "volatility_source": "FIXTURE",
+            "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
+            "volatility_pct": 0.4, "trend_strength": 0.9, "chop_score": 0.1,
+        }]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(
@@ -1761,18 +1782,26 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
     adapter = _MutationTrapAdapter()
 
     async def scanner() -> list[dict]:
+        now = time.time()
         return [{
             "symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
-            "rr": 3.0, "side": "LONG", "market_ts": time.time(),
+            "rr": 3.0, "side": "LONG", "market_ts": now,
             "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
             "volume_24h_usdt": 90_000_000,
-            "spread_pct": 0.0002, "spread_status": "MEASURED",
-            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED",
-            "latency_ms": 50.0, "latency_status": "MEASURED",
-            "liquidity_score": 0.9, "liquidity_status": "MEASURED",
-            "funding_rate_pct": 0.00005, "funding_status": "MEASURED",
-            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED",
-            "volatility_regime": "normal", "volatility_status": "MEASURED",
+            "spread_pct": 0.0002, "spread_status": "MEASURED", "spread_source": "FIXTURE",
+            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED", "slippage_source": "FIXTURE",
+            "latency_ms": 50.0, "latency_status": "MEASURED", "latency_source": "FIXTURE",
+            "liquidity_score": 0.9, "liquidity_status": "MEASURED", "liquidity_source": "FIXTURE",
+            "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "FIXTURE",
+            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED", "orderbook_source": "FIXTURE",
+            "spoof_risk": 0.1, "spoof_status": "MEASURED", "spoof_source": "FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.5, "absorption_status": "MEASURED", "absorption_source": "FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED", "liquidity_depth_source": "FIXTURE",
+            "microstructure_observed_at": now,
+            "volatility_regime": "normal", "volatility_status": "MEASURED", "volatility_source": "FIXTURE",
             "volatility_pct": 0.4, "trend_strength": 0.9, "chop_score": 0.1,
         }]
 
