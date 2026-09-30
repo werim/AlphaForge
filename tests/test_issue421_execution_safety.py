@@ -543,6 +543,7 @@ def test_paper_process_symbol_enforces_each_execution_safety_family(
 def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit() -> None:
     rejects: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
+    now = time.time()
     market = _market(
         latency_ms=50.0,
         latency_status="MODEL_ESTIMATE",
@@ -550,6 +551,21 @@ def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit
         expected_slippage_pct=0.0002,
         slippage_status="MODEL_ESTIMATE",
         slippage_source="MODEL",
+        orderbook_imbalance=0.10,
+        orderbook_status="MEASURED",
+        orderbook_source="FIXTURE",
+        spoof_risk=0.10,
+        spoof_status="MEASURED",
+        spoof_source="FIXTURE",
+        spoof_confirmed=False,
+        absorption_score=0.50,
+        absorption_status="MEASURED",
+        absorption_source="FIXTURE",
+        absorption_execution_ok=True,
+        liquidity_depth_usdt=1_000_000.0,
+        liquidity_depth_status="MEASURED",
+        liquidity_depth_source="FIXTURE",
+        microstructure_observed_at=now,
     )
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),

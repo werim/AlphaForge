@@ -28,6 +28,190 @@ SOURCE_ESTIMATED_BACKTEST = "ESTIMATED_BACKTEST"
 SOURCE_MODELLED = "MODELLED"
 SOURCE_UNAVAILABLE = "UNAVAILABLE"
 
+# Existing production guardrails from order.evaluate_trade_quality. #502 does
+# not tune these values; it makes their LIVE evidence contract authoritative.
+LEGACY_EXTREME_ORDERBOOK_IMBALANCE = 0.90
+LEGACY_EXTREME_SPOOF_RISK = 0.80
+
+MICROSTRUCTURE_COMPLETE_MEASURED = "COMPLETE_MEASURED"
+MICROSTRUCTURE_PARTIAL_ESTIMATED = "PARTIAL_ESTIMATED"
+MICROSTRUCTURE_UNAVAILABLE_BLOCKING = "UNAVAILABLE_BLOCKING"
+
+
+def evaluate_microstructure_authority(
+    execution_ctx: Mapping[str, Any],
+    *,
+    side: str | None = None,
+    require_measured: bool = False,
+    now_ts: Any = None,
+    max_age_sec: Any = None,
+) -> dict[str, Any]:
+    """Canonical microstructure evidence/permission contract.
+
+    PAPER may carry estimated/optional evidence, but measured LIVE semantics
+    require attributable depth, imbalance, spoof and absorption evidence.
+    Absorption permission is supplied by the upstream microstructure provider;
+    this layer deliberately does not invent a numeric absorption threshold.
+    """
+
+    ctx = dict(execution_ctx or {})
+
+    def finite(name: str) -> float | None:
+        value = ctx.get(name)
+        if isinstance(value, bool) or value in (None, "", "UNKNOWN", "UNAVAILABLE"):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    values = {
+        "orderbook_imbalance": finite("orderbook_imbalance"),
+        "spoof_risk": finite("spoof_risk"),
+        "absorption_score": finite("absorption_score"),
+        "liquidity_depth_usdt": finite("liquidity_depth_usdt"),
+    }
+    status_keys = {
+        "orderbook_imbalance": "orderbook_status",
+        "spoof_risk": "spoof_status",
+        "absorption_score": "absorption_status",
+        "liquidity_depth_usdt": "liquidity_depth_status",
+    }
+    source_keys = {
+        "orderbook_imbalance": "orderbook_source",
+        "spoof_risk": "spoof_source",
+        "absorption_score": "absorption_source",
+        "liquidity_depth_usdt": "liquidity_depth_source",
+    }
+    missing_fields: list[str] = []
+    invalid_fields: list[str] = []
+
+    for field, value in values.items():
+        raw = ctx.get(field)
+        if raw not in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST") and value is None:
+            invalid_fields.append(field)
+
+    imbalance = values["orderbook_imbalance"]
+    spoof = values["spoof_risk"]
+    absorption = values["absorption_score"]
+    depth = values["liquidity_depth_usdt"]
+    if imbalance is not None and not -1.0 <= imbalance <= 1.0:
+        invalid_fields.append("orderbook_imbalance")
+    if spoof is not None and not 0.0 <= spoof <= 1.0:
+        invalid_fields.append("spoof_risk")
+    if absorption is not None and not 0.0 <= absorption <= 1.0:
+        invalid_fields.append("absorption_score")
+    if depth is not None and depth <= 0.0:
+        invalid_fields.append("liquidity_depth_usdt")
+
+    normalized_side = str(side or ctx.get("trade_side") or "").upper()
+    spoof_confirmed = ctx.get("spoof_confirmed")
+    absorption_execution_ok = ctx.get("absorption_execution_ok")
+    observed_at = finite("microstructure_observed_at")
+    reference_ts = now_ts if now_ts is not None else ctx.get("microstructure_reference_ts")
+    try:
+        reference = float(reference_ts) if not isinstance(reference_ts, bool) else None
+    except (TypeError, ValueError):
+        reference = None
+    if reference is not None and not math.isfinite(reference):
+        reference = None
+    try:
+        max_age = float(max_age_sec) if not isinstance(max_age_sec, bool) else None
+    except (TypeError, ValueError):
+        max_age = None
+    if max_age is not None and (not math.isfinite(max_age) or max_age <= 0.0):
+        max_age = None
+
+    if require_measured:
+        for field, value in values.items():
+            status = str(ctx.get(status_keys[field], "") or "").upper()
+            source = str(ctx.get(source_keys[field], "") or "").strip().upper()
+            if value is None or status not in MEASURED_STATUSES:
+                missing_fields.append(field)
+            if not source or source in UNAVAILABLE_STATUSES or source == "UNKNOWN":
+                missing_fields.append(f"{field}_source")
+        if normalized_side not in {"LONG", "SHORT"}:
+            missing_fields.append("trade_side")
+        if not isinstance(spoof_confirmed, bool):
+            missing_fields.append("spoof_confirmed")
+        if not isinstance(absorption_execution_ok, bool):
+            missing_fields.append("absorption_execution_ok")
+        if observed_at is None or observed_at <= 0.0:
+            missing_fields.append("microstructure_observed_at")
+        if reference is None or max_age is None:
+            missing_fields.append("microstructure_freshness_policy")
+
+    blockers: list[str] = []
+    if invalid_fields:
+        blockers.append("MICROSTRUCTURE_EVIDENCE_INVALID")
+    if require_measured and missing_fields:
+        blockers.append("MICROSTRUCTURE_CONTEXT_UNAVAILABLE")
+
+    age_sec: float | None = None
+    if require_measured and observed_at is not None and reference is not None and max_age is not None:
+        age_sec = reference - observed_at
+        if age_sec < 0.0:
+            blockers.append("MICROSTRUCTURE_TIMESTAMP_INVALID")
+        elif age_sec > max_age:
+            blockers.append("STALE_MICROSTRUCTURE")
+
+    # Direction convention: positive imbalance is bid-side dominance, negative
+    # is ask-side dominance. Only adverse extremes block; favorable pressure is
+    # not rejected merely for being large.
+    if imbalance is not None and normalized_side == "LONG" and imbalance <= -LEGACY_EXTREME_ORDERBOOK_IMBALANCE:
+        blockers.append("ADVERSE_ORDERBOOK_IMBALANCE")
+    elif imbalance is not None and normalized_side == "SHORT" and imbalance >= LEGACY_EXTREME_ORDERBOOK_IMBALANCE:
+        blockers.append("ADVERSE_ORDERBOOK_IMBALANCE")
+    if spoof is not None and spoof >= LEGACY_EXTREME_SPOOF_RISK and spoof_confirmed is True:
+        blockers.append("SPOOF_RISK")
+    if absorption_execution_ok is False:
+        blockers.append("ADVERSE_ABSORPTION")
+
+    blockers = list(dict.fromkeys(blockers))
+    if invalid_fields or (require_measured and missing_fields):
+        evidence_status = MICROSTRUCTURE_UNAVAILABLE_BLOCKING
+    elif require_measured:
+        evidence_status = MICROSTRUCTURE_COMPLETE_MEASURED
+    elif any(
+        str(ctx.get(status_keys[field], "") or "").upper() in ESTIMATED_STATUSES
+        for field in values
+    ):
+        evidence_status = MICROSTRUCTURE_PARTIAL_ESTIMATED
+    elif all(
+        values[field] is not None
+        and str(ctx.get(status_keys[field], "") or "").upper() in MEASURED_STATUSES
+        for field in values
+    ):
+        evidence_status = MICROSTRUCTURE_COMPLETE_MEASURED
+    else:
+        evidence_status = MICROSTRUCTURE_UNAVAILABLE_BLOCKING
+
+    live_equivalent = (
+        evidence_status == MICROSTRUCTURE_COMPLETE_MEASURED
+        and not invalid_fields
+        and not missing_fields
+        and "STALE_MICROSTRUCTURE" not in blockers
+        and "MICROSTRUCTURE_TIMESTAMP_INVALID" not in blockers
+    )
+    accepted = not blockers if require_measured else True
+    return {
+        "accepted": accepted,
+        "live_equivalent": live_equivalent,
+        "evidence_status": evidence_status,
+        "blocking_reasons": blockers,
+        "missing_fields": sorted(set(missing_fields)),
+        "invalid_fields": sorted(set(invalid_fields)),
+        "observed_at": observed_at,
+        "age_sec": age_sec,
+        "max_age_sec": max_age,
+        "side": normalized_side or None,
+        "orderbook_imbalance_semantics": "POSITIVE_BID_DOMINANCE_NEGATIVE_ASK_DOMINANCE",
+        "liquidity_depth_semantics": "ABSOLUTE_USDT_DEPTH_DISTINCT_FROM_NORMALIZED_LIQUIDITY_SCORE",
+        "spoof_confirmation_required": True,
+        "absorption_permission_semantics": "UPSTREAM_MEASURED_BOOLEAN_NO_LOCAL_NUMERIC_THRESHOLD",
+    }
+
 
 def execution_context_is_unavailable(execution_ctx: Mapping[str, Any] | None) -> bool:
     """Return whether the active execution-safety evidence is unavailable.
@@ -628,7 +812,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
 
     def _to_float(v: Any) -> float | None:
-        if v is None:
+        if v is None or isinstance(v, bool):
             return None
         try:
             return float(v)
@@ -728,6 +912,19 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     orderbook = _to_float(market_ctx.get("orderbook_imbalance"))
     orderbook_status = str(market_ctx.get("orderbook_status", "MEASURED" if orderbook is not None else "UNAVAILABLE"))
     orderbook_source = str(market_ctx.get("orderbook_source", "UNKNOWN" if orderbook is not None else "UNAVAILABLE"))
+    spoof_risk = _to_float(market_ctx.get("spoof_risk"))
+    spoof_status = str(market_ctx.get("spoof_status", "MEASURED" if spoof_risk is not None else "UNAVAILABLE"))
+    spoof_source = str(market_ctx.get("spoof_source", "UNKNOWN" if spoof_risk is not None else "UNAVAILABLE"))
+    absorption_score = _to_float(market_ctx.get("absorption_score"))
+    absorption_status = str(market_ctx.get("absorption_status", "MEASURED" if absorption_score is not None else "UNAVAILABLE"))
+    absorption_source = str(market_ctx.get("absorption_source", "UNKNOWN" if absorption_score is not None else "UNAVAILABLE"))
+    liquidity_depth_usdt = _to_float(market_ctx.get("liquidity_depth_usdt"))
+    liquidity_depth_status = str(market_ctx.get("liquidity_depth_status", "MEASURED" if liquidity_depth_usdt is not None else "UNAVAILABLE"))
+    liquidity_depth_source = str(market_ctx.get("liquidity_depth_source", "UNKNOWN" if liquidity_depth_usdt is not None else "UNAVAILABLE"))
+    microstructure_observed_at = _to_float(market_ctx.get("microstructure_observed_at"))
+    microstructure_reference_ts = _to_float(
+        market_ctx.get("microstructure_reference_ts", market_ctx.get("market_ts"))
+    )
 
     raw_liquidity = market_ctx.get("liquidity_score")
     if raw_liquidity in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
@@ -816,8 +1013,20 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
             "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
             "volatility_status": volatility_status,
         }),
-        "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
-        "absorption_score": float(market_ctx.get("absorption_score", 0.0) or 0.0),
+        "spoof_risk": spoof_risk,
+        "spoof_status": spoof_status,
+        "spoof_source": spoof_source,
+        "spoof_confirmed": market_ctx.get("spoof_confirmed") if isinstance(market_ctx.get("spoof_confirmed"), bool) else None,
+        "absorption_score": absorption_score,
+        "absorption_status": absorption_status,
+        "absorption_source": absorption_source,
+        "absorption_execution_ok": market_ctx.get("absorption_execution_ok") if isinstance(market_ctx.get("absorption_execution_ok"), bool) else None,
+        "liquidity_depth_usdt": liquidity_depth_usdt,
+        "liquidity_depth_status": liquidity_depth_status,
+        "liquidity_depth_source": liquidity_depth_source,
+        "microstructure_observed_at": microstructure_observed_at,
+        "microstructure_reference_ts": microstructure_reference_ts,
+        "trade_side": str(market_ctx.get("side") or "").upper() or None,
     }
 
 
@@ -833,8 +1042,20 @@ def neutral_execution_context() -> dict[str, Any]:
         "funding_status": "UNAVAILABLE",
         "volatility_regime": None,
         "volatility_status": "UNAVAILABLE",
-        "spoof_risk": 0.0,
-        "absorption_score": 0.0,
+        "spoof_risk": None,
+        "spoof_status": "UNAVAILABLE",
+        "spoof_source": "UNAVAILABLE",
+        "spoof_confirmed": None,
+        "absorption_score": None,
+        "absorption_status": "UNAVAILABLE",
+        "absorption_source": "UNAVAILABLE",
+        "absorption_execution_ok": None,
+        "liquidity_depth_usdt": None,
+        "liquidity_depth_status": "UNAVAILABLE",
+        "liquidity_depth_source": "UNAVAILABLE",
+        "microstructure_observed_at": None,
+        "microstructure_reference_ts": None,
+        "trade_side": None,
     }
 
 
@@ -1146,6 +1367,14 @@ def evaluate_execution_safety(
     orderbook_required = bool(
         t.get("ENABLE_ORDERBOOK_FILTER", t.get("enable_orderbook_filter", False))
     )
+    microstructure_required = bool(t.get("REQUIRE_LIVE_MICROSTRUCTURE", False))
+    microstructure = evaluate_microstructure_authority(
+        execution_ctx,
+        side=str(execution_ctx.get("trade_side") or "") or None,
+        require_measured=microstructure_required,
+        now_ts=execution_ctx.get("microstructure_reference_ts"),
+        max_age_sec=t.get("MICROSTRUCTURE_MAX_AGE_SEC", t.get("STALE_MARKET_DATA_SEC")),
+    )
 
     status_keys = {
         "spread_pct": "spread_status",
@@ -1191,6 +1420,15 @@ def evaluate_execution_safety(
         ) and number(field) is None
     ]
     missing_fields.extend(invalid_numeric_fields)
+    if microstructure_required:
+        missing_fields.extend(
+            f"microstructure.{field}"
+            for field in microstructure.get("missing_fields", [])
+        )
+        missing_fields.extend(
+            f"microstructure.{field}"
+            for field in microstructure.get("invalid_fields", [])
+        )
 
     fake_zero_fields: list[str] = []
     zero_sensitive_fields = [
@@ -1219,7 +1457,11 @@ def evaluate_execution_safety(
     ]
     if fake_zero_fields:
         evidence_status = EXECUTION_EVIDENCE_INVALID_FAKE_ZERO
-    elif missing_fields:
+    elif missing_fields or (
+        microstructure_required
+        and str(microstructure.get("evidence_status") or "").upper()
+        != MICROSTRUCTURE_COMPLETE_MEASURED
+    ):
         evidence_status = EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
     elif require_measured:
         evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
@@ -1262,6 +1504,18 @@ def evaluate_execution_safety(
             "source": "EXECUTION_SAFETY_CONTRACT",
         })
 
+    if microstructure_required:
+        for gate in microstructure.get("blocking_reasons", []):
+            fail(
+                str(gate),
+                {
+                    "missing_fields": microstructure.get("missing_fields", []),
+                    "invalid_fields": microstructure.get("invalid_fields", []),
+                    "age_sec": microstructure.get("age_sec"),
+                },
+                "AUTHORITATIVE_FRESH_MEASURED_MICROSTRUCTURE",
+                "required",
+            )
     if (reject_unknown and missing_fields) or invalid_numeric_fields:
         fail(
             "EXECUTION_CONTEXT_UNAVAILABLE",
@@ -1300,6 +1554,13 @@ def evaluate_execution_safety(
              "FINITE_RR_REQUIRED" if effective is None else "<")
 
     priority = (
+        "MICROSTRUCTURE_EVIDENCE_INVALID",
+        "MICROSTRUCTURE_CONTEXT_UNAVAILABLE",
+        "MICROSTRUCTURE_TIMESTAMP_INVALID",
+        "STALE_MICROSTRUCTURE",
+        "SPOOF_RISK",
+        "ADVERSE_ORDERBOOK_IMBALANCE",
+        "ADVERSE_ABSORPTION",
         "EXECUTION_CONTEXT_UNAVAILABLE",
         "INVALID_FAKE_ZERO",
         "SPREAD_TOO_HIGH",
@@ -1326,6 +1587,8 @@ def evaluate_execution_safety(
         "effective_rr": None if effective is None else round(effective, 6),
         "min_effective_rr": float(min_effective_rr),
         "require_measured": bool(require_measured),
+        "microstructure_required": microstructure_required,
+        "microstructure": microstructure,
     }
 
 

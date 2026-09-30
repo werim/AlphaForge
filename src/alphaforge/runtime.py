@@ -464,6 +464,18 @@ class RuntimeOrchestrator:
             "orderbook_imbalance": 0.10,
             "orderbook_status": "MEASURED",
             "orderbook_source": "PARITY_FIXTURE",
+            "spoof_risk": 0.10,
+            "spoof_status": "MEASURED",
+            "spoof_source": "PARITY_FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.50,
+            "absorption_status": "MEASURED",
+            "absorption_source": "PARITY_FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED",
+            "liquidity_depth_source": "PARITY_FIXTURE",
+            "microstructure_observed_at": 1716200000.0,
             "volatility_regime": "normal",
             "volatility_status": "MEASURED",
             "volatility_source": "PARITY_FIXTURE",
@@ -519,6 +531,18 @@ class RuntimeOrchestrator:
             "orderbook_imbalance": 0.10,
             "orderbook_status": "MEASURED",
             "orderbook_source": "PARITY_FIXTURE",
+            "spoof_risk": 0.10,
+            "spoof_status": "MEASURED",
+            "spoof_source": "PARITY_FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.50,
+            "absorption_status": "MEASURED",
+            "absorption_source": "PARITY_FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED",
+            "liquidity_depth_source": "PARITY_FIXTURE",
+            "microstructure_observed_at": 1716200060.0,
             "volatility_regime": "normal",
             "volatility_status": "MEASURED",
             "volatility_source": "PARITY_FIXTURE",
@@ -574,6 +598,18 @@ class RuntimeOrchestrator:
             "orderbook_imbalance": 0.10,
             "orderbook_status": "MEASURED",
             "orderbook_source": "PARITY_FIXTURE",
+            "spoof_risk": 0.10,
+            "spoof_status": "MEASURED",
+            "spoof_source": "PARITY_FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.50,
+            "absorption_status": "MEASURED",
+            "absorption_source": "PARITY_FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED",
+            "liquidity_depth_source": "PARITY_FIXTURE",
+            "microstructure_observed_at": 1716200120.0,
             "volatility_regime": "normal",
             "volatility_status": "MEASURED",
             "volatility_source": "PARITY_FIXTURE",
@@ -2086,7 +2122,7 @@ class RuntimeOrchestrator:
             effective_rr=effective_rr,
             min_effective_rr=self.config.min_effective_rr,
             thresholds=filter_config,
-            require_measured=mode_enum is ExecutionMode.LIVE_PRECHECK,
+            require_measured=mode_enum in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK},
         )
         risk_scale = diagnostics.get("risk_scale")
         require_scale = bool(diagnostics.get("stop_too_wide_softened"))
@@ -2188,6 +2224,12 @@ class RuntimeOrchestrator:
                 "execution_evidence_status"
             ),
             "execution_safety": execution_safety,
+            "microstructure_evidence_status": (
+                execution_safety.get("microstructure", {}).get("evidence_status")
+            ),
+            "microstructure_live_equivalent": bool(
+                execution_safety.get("microstructure", {}).get("live_equivalent", False)
+            ),
             "portfolio_decision": {
                 "accepted": bool(portfolio.accepted),
                 "decision": "ACCEPT" if portfolio.accepted else "REJECT",
@@ -2455,6 +2497,14 @@ class RuntimeOrchestrator:
                         sample.get("market_ts")
                     ),
                     "execution_context": execution_ctx,
+                    "microstructure": {
+                        key: dict(
+                            evaluations[key]
+                            .get("execution_safety", {})
+                            .get("microstructure", {})
+                        )
+                        for key in ("backtest", "paper", "live_precheck")
+                    },
                     "no_submit_verified": True,
                     "parity_result": (
                         "PASS" if not semantic_error else "FAIL"
@@ -2487,6 +2537,19 @@ class RuntimeOrchestrator:
             for sample in comparisons
             for mode in ("backtest", "paper", "live_precheck")
         )
+        microstructure_live_equivalent = bool(comparisons) and all(
+            bool(
+                sample.get("microstructure", {})
+                .get("live_precheck", {})
+                .get("live_equivalent", False)
+            )
+            for sample in comparisons
+        )
+        microstructure_evidence_status = (
+            "COMPLETE_MEASURED"
+            if microstructure_live_equivalent
+            else "UNAVAILABLE_BLOCKING"
+        )
         rr_breakdown_complete = all(
             sample.get(mode, {}).get("executable_raw_rr") is not None
             and sample.get(mode, {}).get(
@@ -2511,6 +2574,8 @@ class RuntimeOrchestrator:
                 if execution_context_complete
                 else "INCOMPLETE"
             ),
+            "microstructure_evidence_status": microstructure_evidence_status,
+            "microstructure_live_equivalent": microstructure_live_equivalent,
             "effective_rr_penalty_breakdown_complete": (
                 rr_breakdown_complete
             ),
@@ -2922,6 +2987,10 @@ class RuntimeOrchestrator:
             if finalized:
                 self.metrics.finalized_signal_replays_skipped += 1
             return
+        # Microstructure freshness is evaluated against decision time, not
+        # candle time; a fresh depth snapshot can legitimately arrive after
+        # the latest closed candle.
+        market_ctx["microstructure_reference_ts"] = time.time()
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
         legacy_candidate = {key: market_ctx.get(key) for key in (
@@ -3206,13 +3275,17 @@ class RuntimeOrchestrator:
         if self.config.execution_mode in {
             ExecutionMode.PAPER,
             ExecutionMode.LIVE_PRECHECK,
+            ExecutionMode.LIVE,
         }:
             execution_safety = evaluate_execution_safety(
                 execution_ctx,
                 effective_rr=effective_rr,
                 min_effective_rr=self.config.min_effective_rr,
                 thresholds=self._canonical_filter_config(),
-                require_measured=self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
+                require_measured=self.config.execution_mode in {
+                    ExecutionMode.LIVE,
+                    ExecutionMode.LIVE_PRECHECK,
+                },
             )
             execution_ctx = {
                 **execution_ctx,
