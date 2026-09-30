@@ -261,7 +261,6 @@ def test_regime_or_execution_deterioration_can_protectively_exit_with_complete_e
     )
     assert result["status"] == "APPLIED"
     assert result["remaining_quantity"] == pytest.approx(0.0)
-    assert result["status"] == "APPLIED"
 
     row = conn.execute(
         "SELECT status,exit_reason FROM burnin_pending_position_outcomes WHERE trade_id='trade-505'"
@@ -303,7 +302,7 @@ def test_restart_restores_management_state_from_sql(tmp_path):
     restarted.row_factory = sqlite3.Row
     bootstrap_campaign_schema(restarted)
     state = load_position_management_state(restarted, "trade-505")
-    assert state["status"] == "OPEN"
+    assert state["position_status"] == "OPEN"
     assert state["current_stop"] == pytest.approx(96.0)
     assert state["remaining_quantity"] == pytest.approx(0.75)
     assert state["remaining_notional"] == pytest.approx(75.0)
