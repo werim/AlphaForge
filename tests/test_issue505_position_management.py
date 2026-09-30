@@ -179,6 +179,10 @@ def test_partial_exit_updates_exposure_exactly_once(tmp_path):
         "SELECT COUNT(*) FROM burnin_position_management_events WHERE management_event_id='mgt-partial-1'"
     ).fetchone()[0] == 1
 
+    changed = {**action, "exit_quantity": 0.2}
+    with pytest.raises(ValueError, match="EVENT_ID_CONFLICT"):
+        apply_position_management_action(conn, **changed)
+
 
 def test_trailing_activation_requires_entry_authority_and_managed_stop_executes(tmp_path):
     _path, conn, cid = _setup(tmp_path, trailing_allowed=True)
