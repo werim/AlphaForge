@@ -47,8 +47,20 @@ def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
         "orderbook_status": str(base.get("orderbook_status", "") or ""),
         "volatility_status": str(base.get("volatility_status", "") or ""),
         "evidence_status": str(base.get("evidence_status", "") or ""),
-        "spoof_risk": float(base.get("spoof_risk", 0.0) or 0.0),
-        "absorption_score": float(base.get("absorption_score", 0.0) or 0.0),
+        "spoof_risk": _nullable_float(base.get("spoof_risk")),
+        "spoof_status": str(base.get("spoof_status", "") or ""),
+        "spoof_source": str(base.get("spoof_source", "") or ""),
+        "spoof_confirmed": base.get("spoof_confirmed") if isinstance(base.get("spoof_confirmed"), bool) else None,
+        "absorption_score": _nullable_float(base.get("absorption_score")),
+        "absorption_status": str(base.get("absorption_status", "") or ""),
+        "absorption_source": str(base.get("absorption_source", "") or ""),
+        "absorption_execution_ok": base.get("absorption_execution_ok") if isinstance(base.get("absorption_execution_ok"), bool) else None,
+        "liquidity_depth_usdt": _nullable_float(base.get("liquidity_depth_usdt")),
+        "liquidity_depth_status": str(base.get("liquidity_depth_status", "") or ""),
+        "liquidity_depth_source": str(base.get("liquidity_depth_source", "") or ""),
+        "microstructure_observed_at": _nullable_float(base.get("microstructure_observed_at")),
+        "microstructure_reference_ts": _nullable_float(base.get("microstructure_reference_ts")),
+        "trade_side": str(base.get("trade_side", "") or "").upper() or None,
     }
 
 
