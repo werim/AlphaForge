@@ -5343,10 +5343,18 @@ class RuntimeOrchestrator:
             all_failed_gates = []
             failed_gate_evidence = []
 
+            raw_alignment_reasons = alignment.get("reasons")
+            alignment_reasons = (
+                list(raw_alignment_reasons)
+                if isinstance(raw_alignment_reasons, (list, tuple))
+                else [raw_alignment_reasons]
+                if raw_alignment_reasons
+                else []
+            )
             guided_reason_candidates = [
                 generation.get("reason"),
                 guided_geometry.get("reason"),
-                *(alignment.get("reasons") or []),
+                *alignment_reasons,
             ]
             guided_reasons = []
             for raw_reason in guided_reason_candidates:
