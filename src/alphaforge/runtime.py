@@ -5320,8 +5320,9 @@ class RuntimeOrchestrator:
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
                 "take_profit", "rr", "raw_rr", "risk_reward", "candidate_rr",
                 "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
-                "effective_rr", "execution_cost_semantics", "score", "setup_type",
-                "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
+                "effective_rr", "execution_cost_semantics", "score", "score_components",
+                "expectancy", "expectancy_after_costs", "expectancy_bucket", "confidence",
+                "setup_type", "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
             )}
             result["legacy_shadow_geometry"] = {
                 **shadow_geometry,
@@ -5398,6 +5399,12 @@ class RuntimeOrchestrator:
                     "remaining_execution_penalty": None,
                     "effective_rr": None,
                     "execution_cost_semantics": None,
+                    "score": None,
+                    "score_components": None,
+                    "expectancy": None,
+                    "expectancy_after_costs": None,
+                    "expectancy_bucket": None,
+                    "confidence": None,
                 })
                 forward_label_subject = "GUIDED_GEOMETRY_REJECT"
             else:
@@ -5417,7 +5424,8 @@ class RuntimeOrchestrator:
                     "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
                     "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
                     "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
-                    "setup_type", "setup_reason", "geometry_source",
+                    "score", "score_components", "expectancy", "expectancy_after_costs",
+                    "expectancy_bucket", "confidence", "setup_type", "setup_reason", "geometry_source",
                 ):
                     result[key] = None
                 result["geometry_status"] = "UNAVAILABLE"
