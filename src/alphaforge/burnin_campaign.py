@@ -1138,8 +1138,8 @@ class BinanceReadOnlyCandleProvider:
 
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
-    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
+    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, position_management_provider: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.position_management_provider = position_management_provider; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
@@ -1201,7 +1201,7 @@ class BurnInCampaignRunner:
             with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
                 due = _exec(conn, "SELECT symbol, timeframe, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol,timeframe", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
-                positions = _exec(conn, "SELECT trade_id,symbol,entry_time FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
+                positions = _exec(conn, "SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
             candles: dict[str, Any] = {}
             for row in due:
                 r = _row_dict(row)
@@ -1222,11 +1222,38 @@ class BurnInCampaignRunner:
                 probe_start = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
                 try: self.candle_provider(symbols[0], probe_start, resolution_time, "1m")
                 except TypeError: self.candle_provider(symbols[0], probe_start, resolution_time)
+            management_actions: dict[str, list[dict[str, Any]]] = {}
+            if self.position_management_provider is not None:
+                for raw in positions:
+                    position = _row_dict(raw)
+                    trade_id = str(position.get("trade_id") or "")
+                    position_candles = (
+                        candles.get((position.get("symbol"), "position", trade_id)) or []
+                    )
+                    proposed = self.position_management_provider(
+                        dict(position), list(position_candles), resolution_time
+                    )
+                    if proposed is None:
+                        continue
+                    if isinstance(proposed, Mapping):
+                        proposed_actions = proposed.get("actions")
+                    else:
+                        proposed_actions = proposed
+                    if not isinstance(proposed_actions, (list, tuple)):
+                        raise ValueError("POSITION_MANAGEMENT_PROVIDER_ACTIONS_INVALID")
+                    actions = [dict(action) for action in proposed_actions if isinstance(action, Mapping)]
+                    if len(actions) != len(proposed_actions):
+                        raise ValueError("POSITION_MANAGEMENT_PROVIDER_ACTION_INVALID")
+                    if actions:
+                        management_actions[trade_id] = actions
             def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int]]:
                 self._persist_pending_failure_events(conn)
                 counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
-                position_counts = resolve_campaign_positions(conn, self.campaign_id, candles, now=resolution_time)
-                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts})
+                position_counts = resolve_campaign_positions(
+                    conn, self.campaign_id, candles, now=resolution_time,
+                    management_actions_by_trade=management_actions,
+                )
+                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts, "position_management_action_count": sum(len(value) for value in management_actions.values()), "position_management_provider_configured": self.position_management_provider is not None})
                 return counts, position_counts
             counts, position_counts = _with_fresh_lock_retry(self.engine, persist_resolution)
             self._pending_resolver_failure_events.clear()
