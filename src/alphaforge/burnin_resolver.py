@@ -598,6 +598,26 @@ def _insert_management_event(
     })
 
 
+def _position_management_pre_update_hook(
+    conn: Any, trade_id: str, expected_version: int
+) -> None:
+    """Deterministic test seam before the versioned state mutation."""
+
+
+def _cas_position_update(
+    conn: Any, sql: str, params: Mapping[str, Any], *, trade_id: str,
+    expected_version: int,
+) -> None:
+    _position_management_pre_update_hook(conn, trade_id, expected_version)
+    result = _exec(
+        conn,
+        sql,
+        {**dict(params), "trade_id": trade_id, "expected_version": expected_version},
+    )
+    if int(getattr(result, "rowcount", 0) or 0) != 1:
+        raise RuntimeError("POSITION_MANAGEMENT_CONCURRENT_STATE_CHANGE")
+
+
 def apply_position_management_action(
     conn: Any,
     *,
@@ -648,6 +668,7 @@ def apply_position_management_action(
     r = _row_dict(row)
     if str(r.get("status") or "").upper() != "OPEN":
         raise ValueError("POSITION_NOT_OPEN")
+    expected_version = int(r.get("management_version") or 0)
 
     evidence_payload = _validate_management_evidence(evidence)
     side = _side(r.get("side"))
@@ -683,6 +704,16 @@ def apply_position_management_action(
             side == "SHORT" and stop_value <= observed_price
         ):
             raise ValueError("POSITION_MANAGEMENT_STOP_CROSSES_MARKET")
+        _cas_position_update(
+            conn,
+            """UPDATE burnin_pending_position_outcomes
+               SET current_stop=:stop,management_version=management_version+1,
+                   last_management_at=:event_time
+               WHERE trade_id=:trade_id AND status='OPEN'
+                 AND management_version=:expected_version""",
+            {"stop": stop_value, "event_time": event_time},
+            trade_id=trade_id, expected_version=expected_version,
+        )
         _insert_management_event(
             conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=None, execution_price=None,
@@ -690,10 +721,6 @@ def apply_position_management_action(
             previous_remaining_quantity=remaining_qty, new_remaining_quantity=remaining_qty,
             gross_pnl=None, execution_cost=None, net_pnl=None, evidence=evidence_payload,
         )
-        _exec(conn, """UPDATE burnin_pending_position_outcomes
-            SET current_stop=:stop,management_version=management_version+1,
-                last_management_at=:event_time WHERE trade_id=:trade_id AND status='OPEN'""",
-            {"stop": stop_value, "event_time": event_time, "trade_id": trade_id})
         return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
 
     if normalized_action == "ENABLE_TRAILING":
@@ -707,6 +734,16 @@ def apply_position_management_action(
             raise ValueError("POSITION_MANAGEMENT_TRAILING_NOT_AUTHORIZED")
         if bool(r.get("trailing_enabled")):
             raise ValueError("POSITION_MANAGEMENT_TRAILING_ALREADY_ENABLED")
+        _cas_position_update(
+            conn,
+            """UPDATE burnin_pending_position_outcomes
+               SET trailing_enabled=1,management_version=management_version+1,
+                   last_management_at=:event_time
+               WHERE trade_id=:trade_id AND status='OPEN'
+                 AND management_version=:expected_version""",
+            {"event_time": event_time},
+            trade_id=trade_id, expected_version=expected_version,
+        )
         _insert_management_event(
             conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=None, execution_price=None,
@@ -715,10 +752,6 @@ def apply_position_management_action(
             gross_pnl=None, execution_cost=None, net_pnl=None,
             evidence={**evidence_payload, "trailing_distance": None},
         )
-        _exec(conn, """UPDATE burnin_pending_position_outcomes
-            SET trailing_enabled=1,management_version=management_version+1,
-                last_management_at=:event_time WHERE trade_id=:trade_id AND status='OPEN'""",
-            {"event_time": event_time, "trade_id": trade_id})
         return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
 
     if normalized_action == "PARTIAL_EXIT":
@@ -751,6 +784,27 @@ def apply_position_management_action(
             "initial_risk_usd": risk_usd,
             "initial_quantity": original_qty,
         }
+        _cas_position_update(
+            conn,
+            """UPDATE burnin_pending_position_outcomes
+               SET remaining_quantity=:remaining_quantity,
+                   remaining_notional=:remaining_notional,
+                   realized_gross_pnl=COALESCE(realized_gross_pnl,0)+:gross,
+                   realized_execution_cost=COALESCE(realized_execution_cost,0)+:cost,
+                   realized_net_pnl=COALESCE(realized_net_pnl,0)+:net,
+                   management_version=management_version+1,last_management_at=:event_time
+               WHERE trade_id=:trade_id AND status='OPEN'
+                 AND management_version=:expected_version""",
+            {
+                "remaining_quantity": new_remaining,
+                "remaining_notional": remaining_notional,
+                "gross": gross,
+                "cost": execution_cost,
+                "net": net,
+                "event_time": event_time,
+            },
+            trade_id=trade_id, expected_version=expected_version,
+        )
         _insert_management_event(
             conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=qty, execution_price=price,
@@ -759,22 +813,6 @@ def apply_position_management_action(
             gross_pnl=gross, execution_cost=execution_cost, net_pnl=net,
             evidence=event_evidence,
         )
-        _exec(conn, """UPDATE burnin_pending_position_outcomes
-            SET remaining_quantity=:remaining_quantity,
-                remaining_notional=:remaining_notional,
-                realized_gross_pnl=COALESCE(realized_gross_pnl,0)+:gross,
-                realized_execution_cost=COALESCE(realized_execution_cost,0)+:cost,
-                realized_net_pnl=COALESCE(realized_net_pnl,0)+:net,
-                management_version=management_version+1,last_management_at=:event_time
-            WHERE trade_id=:trade_id AND status='OPEN'""", {
-                "remaining_quantity": new_remaining,
-                "remaining_notional": remaining_notional,
-                "gross": gross,
-                "cost": execution_cost,
-                "net": net,
-                "event_time": event_time,
-                "trade_id": trade_id,
-            })
         return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
 
     if normalized_action == "PROTECTIVE_EXIT":
@@ -790,6 +828,15 @@ def apply_position_management_action(
             "initial_risk_usd": risk_usd,
             "initial_quantity": original_qty,
         }
+        _cas_position_update(
+            conn,
+            """UPDATE burnin_pending_position_outcomes
+               SET management_version=management_version+1,last_management_at=:event_time
+               WHERE trade_id=:trade_id AND status='OPEN'
+                 AND management_version=:expected_version""",
+            {"event_time": event_time},
+            trade_id=trade_id, expected_version=expected_version,
+        )
         # Persist the management identity before closure so the canonical trade
         # outcome carries the protective event in its management ledger. The
         # caller transaction keeps the event + close atomic.
