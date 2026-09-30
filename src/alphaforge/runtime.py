@@ -5324,7 +5324,7 @@ class RuntimeOrchestrator:
                 "expectancy", "expectancy_after_costs", "expectancy_bucket", "confidence",
                 "setup_type", "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
             )}
-            result["legacy_shadow_geometry"] = {
+            shadow_evidence = {
                 **shadow_geometry,
                 "attributable": False,
                 "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
@@ -5445,6 +5445,9 @@ class RuntimeOrchestrator:
                 })
                 forward_label_subject = "GUIDED_GEOMETRY_REJECT"
             else:
+                # No reproducible guided geometry exists. Retain scanner/shadow
+                # diagnostics only as explicitly non-authoritative evidence.
+                result["legacy_shadow_geometry"] = shadow_evidence
                 # Scanner-shadow gates were quarantined above; only canonical
                 # guided/market evidence survives into the fresh audit below.
                 for key in (
