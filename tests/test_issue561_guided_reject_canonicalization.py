@@ -210,6 +210,7 @@ def test_entry_outside_setup_zone_preserves_specific_guided_geometry_reason(tmp_
     assert payload["reject_quality_attributable"] is False
     assert payload["non_attributable_reason"] == "GUIDED_REJECT_FORWARD_GEOMETRY_INVALID"
     assert payload["forward_label_subject"] == "GUIDED_GEOMETRY_REJECT"
+    assert "legacy_shadow_geometry" not in payload
     assert "LOW_EFFECTIVE_RR" not in payload["all_failed_gates"]
 
 
