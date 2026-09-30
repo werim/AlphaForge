@@ -76,6 +76,8 @@ def _parity() -> dict[str, object]:
         "no_submit_verified": True,
         "execution_context_complete": True,
         "execution_evidence_status": "COMPLETE",
+        "microstructure_evidence_status": "COMPLETE_MEASURED",
+        "microstructure_live_equivalent": True,
         "effective_rr_penalty_breakdown_complete": True,
         "modes_compared": ["BACKTEST", "PAPER", "LIVE_PRECHECK"],
         "comparison_fields": [
@@ -132,6 +134,22 @@ def test_mode_parity_rejects_missing_protected_field_contract() -> None:
     }
     assert checks["mode_parity"].passed is False
     assert "MODE_PARITY_PROTECTED_FIELDS_MISSING:risk_scale" in checks["mode_parity"].details
+
+
+def test_mode_parity_rejects_non_measured_microstructure() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    parity = _parity()
+    parity["microstructure_evidence_status"] = "PARTIAL_ESTIMATED"
+    parity["microstructure_live_equivalent"] = False
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(parity, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert checks["microstructure_evidence_measured"].passed is False
+    assert checks["microstructure_live_equivalent"].passed is False
+    assert "LIVE_PRECHECK_MICROSTRUCTURE_NOT_MEASURED" in checks["mode_parity"].details
 
 
 def _reconciliation() -> dict[str, object]:
