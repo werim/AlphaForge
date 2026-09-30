@@ -81,7 +81,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
-from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure
+from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
     normalize_mtf_execution_confirmation_mode, runtime_filter_config)
@@ -162,6 +162,11 @@ class RuntimeConfig:
     # for unknown LIVE/LIVE_PRECHECK account state.
     paper_initial_equity: float | None = 1_000.0
     paper_candidate_notional: float | None= field(default_factory=lambda: canonical_field_default("paper_candidate_notional"))
+    paper_position_sizing_mode: str= field(default_factory=lambda: canonical_field_default("paper_position_sizing_mode"))
+    risk_pct_per_trade: float= field(default_factory=lambda: canonical_field_default("risk_pct_per_trade"))
+    paper_max_leverage: float= field(default_factory=lambda: canonical_field_default("paper_max_leverage"))
+    paper_max_liquidity_participation_pct: float= field(default_factory=lambda: canonical_field_default("paper_max_liquidity_participation_pct"))
+    paper_min_notional: float= field(default_factory=lambda: canonical_field_default("paper_min_notional"))
     market_data_base_url: str = field(default_factory=lambda: str(canonical_field_default("binance_market_data_base_url")))
     regime_timeframe: str= field(default_factory=lambda: canonical_field_default("regime_timeframe"))
     setup_timeframe: str= field(default_factory=lambda: canonical_field_default("setup_timeframe"))
@@ -239,6 +244,11 @@ class RuntimeConfig:
             raise ValueError("max_clock_skew_ms must be >= 0")
         self.execution_account_scope = str(self.execution_account_scope or "").strip()
         self.paper_account_model = str(self.paper_account_model or "").strip().upper()
+        self.paper_position_sizing_mode = str(self.paper_position_sizing_mode or "").strip().upper()
+        if self.paper_position_sizing_mode not in {"FIXED", "SHADOW", "RISK_BASED"}:
+            raise ValueError("PAPER_POSITION_SIZING_MODE must be FIXED, SHADOW, or RISK_BASED")
+        if self.paper_position_sizing_mode == "RISK_BASED" and self.execution_mode is not ExecutionMode.PAPER:
+            raise ValueError("RISK_BASED position sizing is PAPER-only until shadow promotion evidence exists")
         if self.paper_account_model != "ISOLATED_CAMPAIGN":
             raise ValueError("PAPER_ACCOUNT_MODEL must be ISOLATED_CAMPAIGN")
         if float(self.execution_lease_min_validity_sec) >= float(self.execution_lease_ttl_sec):
@@ -3756,6 +3766,67 @@ class RuntimeOrchestrator:
                 ),
             )
 
+        risk_based_sizing = {
+            "status": "DISABLED",
+            "reason": "FIXED_POSITION_SIZING",
+            "authority": "NON_AUTHORITATIVE",
+        }
+        if (
+            self.config.execution_mode is ExecutionMode.PAPER
+            and self.config.paper_position_sizing_mode in {"SHADOW", "RISK_BASED"}
+        ):
+            capacity = _portfolio_snapshot_for(0.0)
+            drawdown_value = historical_risk.get("rolling_drawdown_pct")
+            if drawdown_value is None and portfolio_evidence_source == "CONFIGURED_PAPER_ACCOUNT":
+                drawdown_value = 0.0
+            risk_based_sizing = risk_based_candidate_exposure(
+                equity=inferred_equity,
+                entry=rr_metrics.get("expected_fill") or market_ctx.get("entry"),
+                stop=market_ctx.get("sl"),
+                risk_pct_per_trade=self.config.risk_pct_per_trade,
+                rolling_drawdown_pct=drawdown_value,
+                max_rolling_drawdown_pct=self.config.max_rolling_drawdown_pct,
+                expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
+                max_expected_slippage_pct=self.config.max_expected_slippage_pct,
+                volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+                max_volatility_penalty_pct=self.config.max_volatility_penalty_pct,
+                liquidity_depth_usdt=execution_ctx.get("liquidity_depth_usdt"),
+                max_liquidity_participation_pct=self.config.paper_max_liquidity_participation_pct,
+                max_leverage=self.config.paper_max_leverage,
+                min_notional=self.config.paper_min_notional,
+                hard_notional_caps={
+                    "portfolio_remaining": (
+                        None if capacity.max_notional_exposure is None or capacity.total_notional_exposure is None
+                        else float(capacity.max_notional_exposure) - float(capacity.total_notional_exposure)
+                    ),
+                    "symbol_remaining": (
+                        None if capacity.max_symbol_notional is None or capacity.symbol_notional_exposure is None
+                        else float(capacity.max_symbol_notional) - float(capacity.symbol_notional_exposure)
+                    ),
+                    "correlation_remaining": (
+                        None if capacity.max_correlation_group_exposure is None or capacity.correlation_group_exposure is None
+                        else float(capacity.max_correlation_group_exposure) - float(capacity.correlation_group_exposure)
+                    ),
+                },
+                require_execution_limits=True,
+            )
+            risk_based_sizing["authority"] = (
+                "AUTHORITATIVE_PAPER"
+                if self.config.paper_position_sizing_mode == "RISK_BASED"
+                else "SHADOW_COUNTERFACTUAL"
+            )
+            market_ctx["risk_based_sizing"] = dict(risk_based_sizing)
+            if self.config.paper_position_sizing_mode == "RISK_BASED":
+                if risk_based_sizing.get("status") == "COMPLETE":
+                    candidate_notional = float(risk_based_sizing["selected_notional"])
+                    market_ctx["notional"] = candidate_notional
+                    market_ctx["quantity"] = float(risk_based_sizing["quantity"])
+                    market_ctx["qty"] = float(risk_based_sizing["quantity"])
+                else:
+                    candidate_notional = None
+                    for key in ("notional", "notional_usdt", "order_notional", "quantity", "qty"):
+                        market_ctx.pop(key, None)
+
         original_quantity = next(
             (
                 market_ctx.get(key)
@@ -3909,6 +3980,8 @@ class RuntimeOrchestrator:
             "effective_notional": market_ctx.get("effective_notional"),
             "original_quantity": market_ctx.get("original_quantity"),
             "effective_quantity": market_ctx.get("effective_quantity"),
+            "paper_position_sizing_mode": self.config.paper_position_sizing_mode,
+            "risk_based_sizing": market_ctx.get("risk_based_sizing"),
             "min_stop_pct": float(self.config.min_sl_pct),
             "max_stop_pct": float(self.config.max_sl_pct),
             "min_effective_rr": float(self.config.min_effective_rr),
@@ -6431,6 +6504,11 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         paper_fee_bps=cfg.runtime.paper_fee_bps,
         paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms,
         paper_candidate_notional=cfg.runtime.paper_candidate_notional,
+        paper_position_sizing_mode=cfg.runtime.paper_position_sizing_mode,
+        risk_pct_per_trade=cfg.runtime.risk_pct_per_trade,
+        paper_max_leverage=cfg.runtime.paper_max_leverage,
+        paper_max_liquidity_participation_pct=cfg.runtime.paper_max_liquidity_participation_pct,
+        paper_min_notional=cfg.runtime.paper_min_notional,
         market_data_base_url=cfg.exchange.binance.market_data_base_url,
         regime_timeframe=cfg.runtime.regime_timeframe,
         setup_timeframe=cfg.runtime.setup_timeframe,
