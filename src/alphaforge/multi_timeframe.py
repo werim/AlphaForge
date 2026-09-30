@@ -14,6 +14,7 @@ from alphaforge.signal_geometry import (
     build_structural_geometry_with_diagnostics,
     derive_setup_structure_with_diagnostics,
 )
+from alphaforge.regime_authority import regime_authority_metadata
 
 MTF_REJECT_REASONS = (
     "MTF_REGIME_UNAVAILABLE", "MTF_REGIME_NEUTRAL", "MTF_SETUP_UNAVAILABLE", "MTF_EXECUTION_UNAVAILABLE",
@@ -122,16 +123,27 @@ def build_regime_context(candles: list[dict[str, Any]], timeframe: str, *, direc
     valid_ohlc = _valid_ohlc(candles, 20)
     direction, strength = (_direction(candles, 8, 20, neutral_threshold=threshold)
                            if valid_ohlc else ("UNKNOWN", None))
-    complete = direction not in {"UNKNOWN", "NEUTRAL"}
+    classification_complete = valid_ohlc and direction != "UNKNOWN"
+    trade_direction_complete = direction in {"LONG", "SHORT"}
     volatility = _realized_volatility(candles) if valid_ohlc else None
-    return {"timeframe": timeframe, "regime": "TRENDING" if complete else ("UNKNOWN" if direction == "UNKNOWN" else "CHOPPY"),
+    regime = "TRENDING" if trade_direction_complete else ("UNKNOWN" if direction == "UNKNOWN" else "CHOPPY")
+    confidence = normalize_mtf_quality(strength, threshold)
+    authority = regime_authority_metadata(
+        regime, classification_complete=classification_complete,
+    )
+    return {"timeframe": timeframe, "regime": regime,
             "direction": direction, "trend_strength": strength, "ma_delta_strength": strength,
-            "regime_alignment": normalize_mtf_quality(strength, threshold),
+            "regime_alignment": confidence,
             "direction_threshold": threshold, "volatility_regime": None if volatility is None else ("HIGH" if volatility > HIGH_VOLATILITY_RETURN else "MODERATE"),
-            "structure_state": "MA_TREND" if complete else "UNCONFIRMED", "confidence": strength,
+            "structure_state": "MA_TREND" if trade_direction_complete else "UNCONFIRMED", "confidence": strength,
+            "classification_confidence": confidence,
             "last_closed_candle_ts": _iso(int(candles[-1]["close_ts"])) if candles else None,
             "last_closed_candle_ms": int(candles[-1]["close_ts"]) if candles else None,
-            "evidence_status": "COMPLETE" if complete else "INCOMPLETE"}
+            "classification_evidence_status": "COMPLETE" if classification_complete else "INCOMPLETE",
+            **authority,
+            # Preserve the existing trade-direction gate: a valid CHOPPY
+            # classification is complete evidence, but remains NO_TRADE.
+            "evidence_status": "COMPLETE" if trade_direction_complete else "INCOMPLETE"}
 
 
 def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
