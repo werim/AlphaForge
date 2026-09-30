@@ -135,6 +135,12 @@ jobs:
         run: |
           pytest -q tests/test_issue506_walk_forward.py tests/test_issue549_pullback_policy_research.py
 
+      - name: Derivatives execution contract gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue503_derivatives_contract.py
+          pytest -q tests/test_runtime_live_authorization.py tests/test_live_readiness.py -k "runtime_live_authorization or mode_parity or final_gate"
+
       - name: SOAK decision evidence gate
         if: github.event_name == 'pull_request'
         run: |
