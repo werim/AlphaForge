@@ -161,7 +161,7 @@ def test_reused_holdout_cannot_be_declared_admissible() -> None:
     )
     report = evaluate_policy_rows(rows, _manifest(fresh=False))
     assert report["verdict"] == ResearchVerdict.INCONCLUSIVE.value
-    assert "FALSE_FRESHNESS_CLAIM" not in report["blockers"]
+    assert "UNTOUCHED_LINEAGE_NOT_PROMOTION_ADMISSIBLE" in report["blockers"]
     assert "MISSING_UNTOUCHED_TEST_SEGMENT" not in report["blockers"]
     assert report["manifest"]["evaluation_count"] == 2
 
@@ -180,7 +180,7 @@ def test_two_candidate_variants_cannot_claim_fresh_holdout() -> None:
         declared_fresh=True,
         untouched_segment_ids=("test",),
     )
-    assert "FALSE_FRESHNESS_CLAIM" in manifest.validate()
+    assert "INVALID_SEARCH_SELECTION_LINEAGE" in manifest.validate()
     assert manifest.untouched_admissible is False
 
 
