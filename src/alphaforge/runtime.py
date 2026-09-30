@@ -2987,6 +2987,10 @@ class RuntimeOrchestrator:
             if finalized:
                 self.metrics.finalized_signal_replays_skipped += 1
             return
+        # Microstructure freshness is evaluated against decision time, not
+        # candle time; a fresh depth snapshot can legitimately arrive after
+        # the latest closed candle.
+        market_ctx["microstructure_reference_ts"] = time.time()
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
         legacy_candidate = {key: market_ctx.get(key) for key in (
