@@ -5307,6 +5307,95 @@ class RuntimeOrchestrator:
                 if isinstance(generation.get("geometry_evidence"), Mapping)
                 else {}
             )
+            alignment = (
+                mtf.get("alignment")
+                if isinstance(mtf.get("alignment"), Mapping)
+                else {}
+            )
+
+            # A missing guided candidate means scanner/shadow candidate economics
+            # are non-authoritative. Preserve them for diagnostics, but rebuild
+            # canonical reject attribution only from guided decision-time evidence.
+            shadow_geometry = {key: result.get(key) for key in (
+                "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
+                "take_profit", "rr", "raw_rr", "risk_reward", "candidate_rr",
+                "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
+                "effective_rr", "execution_cost_semantics", "score", "score_components",
+                "expectancy", "expectancy_after_costs", "expectancy_bucket", "confidence",
+                "setup_type", "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
+            )}
+            shadow_evidence = {
+                **shadow_geometry,
+                "attributable": False,
+                "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+                "primary_reject_reason": primary_reject_reason,
+                "reject_reason": primary_reject_reason,
+                "reject_reasons": list(reject_reasons),
+                "all_failed_gates": list(all_failed_gates),
+                "failed_gate_evidence": list(failed_gate_evidence),
+            }
+
+            # Packaged upstream audit results were computed against scanner/shadow
+            # candidate geometry. Once guided candidate authority is absent, only
+            # a fresh audit over the remaining canonical fields may contribute.
+            result.pop("execution_safety", None)
+            result.pop("all_failed_gates", None)
+            result.pop("failed_gate_evidence", None)
+            all_failed_gates = []
+            failed_gate_evidence = []
+
+            raw_alignment_reasons = alignment.get("reasons")
+            alignment_reasons = (
+                list(raw_alignment_reasons)
+                if isinstance(raw_alignment_reasons, (list, tuple))
+                else [raw_alignment_reasons]
+                if raw_alignment_reasons
+                else []
+            )
+            source_guided_reason = (
+                primary_reject_reason
+                if (
+                    str(primary_reject_reason or "").startswith("MTF_")
+                    or primary_reject_reason in {
+                        "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE",
+                        "KLINE_INSUFFICIENT_ROWS",
+                        "NO_STRUCTURAL_GEOMETRY",
+                        "INSUFFICIENT_STRUCTURAL_REWARD",
+                        "ZERO_RISK_GEOMETRY",
+                        "REGIME_SIDE_INVALID",
+                        "KLINE_MALFORMED_PAYLOAD",
+                        "OHLC_INVALID",
+                        "INVALID_TARGET",
+                    }
+                )
+                else None
+            )
+            guided_reason_candidates = [
+                generation.get("reason"),
+                guided_geometry.get("reason"),
+                *alignment_reasons,
+                source_guided_reason,
+            ]
+            guided_reasons = []
+            for raw_reason in guided_reason_candidates:
+                reason = canonical_reject_reason(raw_reason)
+                if reason in {"UNKNOWN", "MTF_GUIDED_GEOMETRY_UNAVAILABLE"}:
+                    continue
+                if reason not in guided_reasons:
+                    guided_reasons.append(reason)
+            if not guided_reasons:
+                guided_reasons = ["MTF_GUIDED_GEOMETRY_UNAVAILABLE"]
+
+            source_primary_reject_reason = primary_reject_reason
+            primary_reject_reason = guided_reasons[0]
+            reject_reasons = list(guided_reasons)
+            if source_primary_reject_reason != primary_reject_reason:
+                result["source_primary_reject_reason"] = source_primary_reject_reason
+            result["reason"] = primary_reject_reason
+            if result.get("reject_reason") is not None:
+                result["reject_reason"] = primary_reject_reason
+            result["authoritative_reject_reason"] = primary_reject_reason
+
             guided_geometry_reason = canonical_reject_reason(
                 guided_geometry.get("reason")
             )
@@ -5317,7 +5406,8 @@ class RuntimeOrchestrator:
             )
             if guided_geometry_complete:
                 # Persist the exact guided decision-time geometry that produced
-                # the reject. Scanner geometry remains excluded.
+                # the reject. Scanner geometry and scanner economics remain only
+                # under legacy_shadow_geometry.
                 result.update({
                     "side": guided_geometry.get("side"),
                     "entry": guided_geometry.get("execution_entry"),
@@ -5346,59 +5436,33 @@ class RuntimeOrchestrator:
                     "remaining_execution_penalty": None,
                     "effective_rr": None,
                     "execution_cost_semantics": None,
+                    "score": None,
+                    "score_components": None,
+                    "expectancy": None,
+                    "expectancy_after_costs": None,
+                    "expectancy_bucket": None,
+                    "confidence": None,
                 })
                 forward_label_subject = "GUIDED_GEOMETRY_REJECT"
             else:
-                shadow_geometry = {key: result.get(key) for key in (
-                    "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
-                    "take_profit", "rr", "raw_rr", "risk_reward", "effective_rr", "setup_type",
-                    "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
-                )}
-                result["legacy_shadow_geometry"] = {
-                    **shadow_geometry,
-                    "attributable": False,
-                    "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
-                    "all_failed_gates": list(all_failed_gates),
-                    "failed_gate_evidence": list(failed_gate_evidence),
-                }
-                # The scanner-shadow gates are diagnostic only. Do not leak them
-                # back into canonical multi-gate evidence for a missing guided candidate.
-                all_failed_gates = []
-                failed_gate_evidence = []
-                # Drop packaged upstream audit evidence before the canonical re-audit.
-                # Otherwise execution_safety.failed_gate_evidence can resurrect
-                # geometry-dependent gates (for example LOW_EFFECTIVE_RR) after the
-                # corresponding canonical geometry/effective_rr fields are scrubbed.
-                result.pop("execution_safety", None)
-                result.pop("all_failed_gates", None)
-                result.pop("failed_gate_evidence", None)
+                # No reproducible guided geometry exists. Retain scanner/shadow
+                # diagnostics only as explicitly non-authoritative evidence.
+                result["legacy_shadow_geometry"] = shadow_evidence
+                # Scanner-shadow gates were quarantined above; only canonical
+                # guided/market evidence survives into the fresh audit below.
                 for key in (
                     "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                     "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
                     "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
                     "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
-                    "setup_type", "setup_reason", "geometry_source",
+                    "score", "score_components", "expectancy", "expectancy_after_costs",
+                    "expectancy_bucket", "confidence", "setup_type", "setup_reason", "geometry_source",
                 ):
                     result[key] = None
                 result["geometry_status"] = "UNAVAILABLE"
                 result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
                 result["reject_quality_attributable"] = False
                 result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
-                if primary_reject_reason == "LOW_EFFECTIVE_RR":
-                    # LOW_EFFECTIVE_RR requires attributable canonical guided geometry.
-                    # Preserve the legacy scanner diagnosis only as shadow evidence.
-                    result["legacy_shadow_geometry"]["reject_reason"] = primary_reject_reason
-                    result["source_primary_reject_reason"] = primary_reject_reason
-                    primary_reject_reason = "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
-                    reject_reasons = [
-                        primary_reject_reason,
-                        *[reason for reason in reject_reasons if reason != "LOW_EFFECTIVE_RR"],
-                    ]
-                    reject_reasons = list(dict.fromkeys(reject_reasons))
-                    result["reason"] = primary_reject_reason
-                    if result.get("reject_reason") is not None:
-                        result["reject_reason"] = primary_reject_reason
-                    result["authoritative_reject_reason"] = primary_reject_reason
         all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
