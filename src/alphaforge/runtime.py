@@ -1285,7 +1285,7 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
-            open_positions = conn.execute(text("SELECT trade_id,signal_id,symbol,side,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
+            open_positions = conn.execute(text("SELECT trade_id,signal_id,symbol,side,COALESCE(remaining_notional,notional) AS notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
             for position in open_positions:
                 symbol = str(position.get("symbol") or "").upper()
                 if symbol:
@@ -4901,7 +4901,21 @@ class RuntimeOrchestrator:
         if engine is None:
             return
         with engine.connect() as conn:
-            open_symbols = {str(row[0]).upper() for row in conn.execute(text("SELECT symbol FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": self._campaign_id}).fetchall()}
+            open_rows = conn.execute(text(
+                "SELECT symbol,side,trade_id,signal_id,COALESCE(remaining_notional,notional) AS notional "
+                "FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"
+            ), {"cid": self._campaign_id}).mappings().all()
+        open_symbols = set()
+        for row in open_rows:
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            open_symbols.add(symbol)
+            self._active_positions[symbol] = float(row.get("notional") or 0.0)
+            self._active_position_sides[symbol] = str(row.get("side") or "UNKNOWN").upper()
+            episode_id = str(row.get("trade_id") or row.get("signal_id") or "").strip()
+            if episode_id:
+                self._active_position_episode_ids[symbol] = episode_id
         for symbol in set(self._active_positions) - open_symbols:
             self._active_positions.pop(symbol, None)
             self._active_position_sides.pop(symbol, None)
