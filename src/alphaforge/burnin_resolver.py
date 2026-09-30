@@ -447,7 +447,7 @@ def load_position_management_state(conn: Any, trade_id: str) -> dict[str, Any]:
     r = _row_dict(row)
     return {
         "trade_id": trade_id,
-        "status": r.get("status"),
+        "position_status": r.get("status"),
         "side": r.get("side"),
         "entry": r.get("simulated_fill") or r.get("planned_entry"),
         "initial_stop": r.get("stop"),
@@ -768,27 +768,36 @@ def apply_position_management_action(
         if not str(evidence_payload.get("trigger_reason") or "").strip():
             raise ValueError("POSITION_MANAGEMENT_PROTECTIVE_TRIGGER_MISSING")
         costs = _strict_exit_costs_usd(exit_costs)
-        closure = resolve_position_closure(
-            conn, trade_id=trade_id, exit_time=event_time, exit_price=price,
-            exit_reason="RUNTIME_PROTECTIVE_EXIT",
-            exit_costs={**costs, "cost_unit": "USD"},
-        )
         event_evidence = {
             **evidence_payload,
             "exit_costs_usd": costs,
             "initial_risk_usd": risk_usd,
             "initial_quantity": original_qty,
         }
+        # Persist the management identity before closure so the canonical trade
+        # outcome carries the protective event in its management ledger. The
+        # caller transaction keeps the event + close atomic.
         _insert_management_event(
             conn, row=r, management_event_id=management_event_id, event_time=event_time,
             action=normalized_action, requested_quantity=remaining_qty, execution_price=price,
             previous_stop=current_stop, new_stop=current_stop,
             previous_remaining_quantity=remaining_qty, new_remaining_quantity=0.0,
-            gross_pnl=closure.get("final_slice_gross_pnl"),
-            execution_cost=closure.get("final_slice_execution_cost"),
-            net_pnl=closure.get("final_slice_net_pnl"),
+            gross_pnl=None, execution_cost=None, net_pnl=None,
             evidence=event_evidence,
         )
+        closure = resolve_position_closure(
+            conn, trade_id=trade_id, exit_time=event_time, exit_price=price,
+            exit_reason="RUNTIME_PROTECTIVE_EXIT",
+            exit_costs={**costs, "cost_unit": "USD"},
+        )
+        _exec(conn, """UPDATE burnin_position_management_events
+            SET gross_pnl=:gross,execution_cost=:cost,net_pnl=:net
+            WHERE management_event_id=:event_id""", {
+                "gross": closure.get("final_slice_gross_pnl"),
+                "cost": closure.get("final_slice_execution_cost"),
+                "net": closure.get("final_slice_net_pnl"),
+                "event_id": management_event_id,
+            })
         return {"status": "APPLIED", **load_position_management_state(conn, trade_id)}
 
     raise ValueError(f"POSITION_MANAGEMENT_ACTION_UNSUPPORTED:{normalized_action}")
