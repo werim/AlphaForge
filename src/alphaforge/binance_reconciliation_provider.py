@@ -19,6 +19,7 @@ from urllib import error
 from typing import Any, Callable, Mapping
 
 from alphaforge.provider_failures import classify_provider_exception
+from alphaforge.derivatives_contract import evaluate_notional_only_derivatives_contract, normalize_derivatives_position_fields
 
 
 class ReconciliationAuthError(RuntimeError):
@@ -206,21 +207,33 @@ class BinanceReadonlyReconciliationProvider:
                 coverage["userTrades"].append(symbol)
             endpoint_statuses["userTrades"] = "PASS"
             active = sum(1 for p in positions if p["active"])
+            derivatives_contract = evaluate_notional_only_derivatives_contract(
+                positions=positions,
+                required_symbols=selected,
+                provider_evidence_status="COMPLETE",
+            )
             return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings, endpoint_statuses) | {
                 "orphan_orders": len(orders), "orphan_positions": active, "duplicate_fills": 0,
                 "evidence_status": "COMPLETE", "errors": [], "failed_endpoint": None,
                 "failed_symbol": None, "unknown_unreconciled_symbols": [], "failure_class": None,
+                "derivatives_contract": derivatives_contract,
             }
         except Exception as exc:  # fail closed while preserving completed evidence
             if isinstance(exc, ReconciliationExposureError):
                 positions = exc.positions
             unknown = [s for s in selected if s not in coverage["userTrades"]]
+            derivatives_contract = evaluate_notional_only_derivatives_contract(
+                positions=positions,
+                required_symbols=selected,
+                provider_evidence_status="INCOMPLETE",
+            )
             return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings, endpoint_statuses) | {
                 "orphan_orders": None, "orphan_positions": None, "duplicate_fills": None,
                 "evidence_status": "INCOMPLETE", "errors": [self._sanitize_error(exc)],
                 "failure_class": classify_provider_exception(exc),
                 "failed_endpoint": failed_endpoint, "failed_symbol": failed_symbol,
                 "unknown_unreconciled_symbols": unknown,
+                "derivatives_contract": derivatives_contract,
             }
         finally:
             # A snapshot boundary cannot retain possibly stale/poisoned state.
@@ -437,10 +450,12 @@ class BinanceReadonlyReconciliationProvider:
             epsilon_filtered = not exact_zero and abs(qty) <= self._cfg.position_epsilon
             active = abs(qty) > self._cfg.position_epsilon
             symbol = (normalized if regex_valid else raw_symbol) if valid else self._sanitized_symbol(raw_symbol)
+            derivative_fields = normalize_derivatives_position_fields(row)
             normalized_row = {"symbol": symbol, "symbol_valid": valid, "qty": float(qty), "qty_exact": str(qty),
                         "active": active, "epsilon_filtered": epsilon_filtered, "exact_zero": exact_zero,
                         "entry_price": float(row.get("entryPrice", 0) or 0), "position_side": str(row.get("positionSide") or "BOTH"),
-                        "unrealized_pnl": float(row.get("unRealizedProfit", 0) or 0)}
+                        "unrealized_pnl": float(row.get("unRealizedProfit", 0) or 0),
+                        **derivative_fields}
             out.append(normalized_row)
             if not valid and exact_zero:
                 warnings.append({"category": "zero_exposure_invalid_symbol", "symbol": symbol,
