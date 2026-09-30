@@ -4,8 +4,10 @@ import json
 import sqlite3
 
 import pytest
+from sqlalchemy import create_engine
 
 from alphaforge.burnin_campaign import (
+    BurnInCampaignRunner,
     aggregate_campaign,
     bootstrap_campaign_schema,
     create_campaign,
@@ -461,3 +463,59 @@ def test_management_ledger_is_bound_to_campaign_hash_and_export(tmp_path):
     ledger = (tmp_path / "artifacts" / f"burnin_campaign_{cid}" / "position_management_events.csv").read_text()
     assert "mgt-evidence-bind" in ledger
     assert "TIGHTEN_STOP" in ledger
+
+
+def test_campaign_runner_invokes_management_provider_before_position_resolution(tmp_path):
+    path, conn, cid = _setup(tmp_path)
+    conn.commit()
+    conn.close()
+
+    observed = {"calls": 0}
+
+    def candle_provider(symbol, start, end, timeframe="1m"):
+        assert symbol == "BTCUSDT"
+        return [{
+            "timestamp": "2026-09-30T12:01:00Z",
+            "high": 101.0,
+            "low": 96.5,
+        }]
+
+    def management_provider(position, candles, now):
+        observed["calls"] += 1
+        assert position["trade_id"] == "trade-505"
+        assert candles and candles[0]["low"] == pytest.approx(96.5)
+        return {"actions": [{
+            "management_event_id": "mgt-runner-tighten",
+            "action": "TIGHTEN_STOP",
+            "event_time": "2026-09-30T12:00:30Z",
+            "new_stop": 97.0,
+            "evidence": _management_evidence(101.0),
+        }]}
+
+    engine = create_engine(f"sqlite+pysqlite:///{path}", future=True)
+    runner = BurnInCampaignRunner(
+        engine,
+        cid,
+        candle_provider,
+        position_management_provider=management_provider,
+    )
+    runner._qualify_if_due = lambda: None
+
+    result = runner.resolver_tick()
+    assert result["status"] == "OK"
+    assert result["position_counts"]["sl"] == 1
+    assert observed["calls"] == 1
+
+    with engine.connect() as db:
+        position = db.exec_driver_sql(
+            "SELECT status,current_stop,exit_price FROM burnin_pending_position_outcomes "
+            "WHERE trade_id='trade-505'"
+        ).mappings().one()
+        event_count = db.exec_driver_sql(
+            "SELECT COUNT(*) FROM burnin_position_management_events "
+            "WHERE management_event_id='mgt-runner-tighten'"
+        ).scalar_one()
+    assert position["status"] == "CLOSED"
+    assert position["current_stop"] == pytest.approx(97.0)
+    assert position["exit_price"] == pytest.approx(97.0)
+    assert event_count == 1
