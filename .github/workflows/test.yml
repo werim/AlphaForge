@@ -130,6 +130,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_exchange_market_scanner.py tests/test_issue438_market_data_supervision.py
 
+      - name: Frozen OOS policy research gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue506_walk_forward.py tests/test_issue549_pullback_policy_research.py
+
       - name: SOAK decision evidence gate
         if: github.event_name == 'pull_request'
         run: |
