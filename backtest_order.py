@@ -860,7 +860,13 @@ def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int
             "alignment": {"alignment": regime.get("regime_alignment")},
         }
     scoring_market = {**dict(market_ctx), "mode": "BACKTEST", "mtf": existing_mtf}
-    signal = build_signal_payload(symbol, scoring_market, signal_id=f"{symbol}:{decision_ts}", default_mode="BACKTEST")
+    signal = build_signal_payload(
+        symbol,
+        scoring_market,
+        signal_id=f"{symbol}:{decision_ts}",
+        default_mode="BACKTEST",
+        decision_filters=decision_filter_config("BACKTEST"),
+    )
     scope = dict(expectancy_scope or {})
     stats_ctx = empty_stats_context()
     if expectancy_bind is not None:
