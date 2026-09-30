@@ -92,6 +92,7 @@ from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepo
     bootstrap_agent_schema, create_agent_shadow_engine)
 from alphaforge.multi_timeframe import BinanceMTFProvider
 from alphaforge.state_direction_shadow import StateDirectionShadowStore, build_state_direction_shadow_draft
+from alphaforge.regime_targeting import build_regime_target_policy
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -1442,7 +1443,7 @@ class RuntimeOrchestrator:
                     "stop_too_wide_extreme", "stop_too_wide_soft_eligible",
                     "risk_scale", "sizing_status", "sizing_reason",
                     "original_notional", "effective_notional",
-                    "original_quantity", "effective_quantity",
+                    "original_quantity", "effective_quantity", "target_policy",
                     "min_signal_score", "min_raw_rr", "min_effective_rr",
                     "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
@@ -3681,6 +3682,22 @@ class RuntimeOrchestrator:
             )
             return
 
+        mtf_target = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
+        regime_layer = mtf_target.get("regime") if isinstance(mtf_target.get("regime"), Mapping) else {}
+        setup_layer = mtf_target.get("setup") if isinstance(mtf_target.get("setup"), Mapping) else {}
+        target_policy = build_regime_target_policy(
+            side=market_ctx.get("side", signal_payload.get("side")),
+            entry=rr_metrics.get("expected_fill") or market_ctx.get("entry"),
+            stop=market_ctx.get("sl"),
+            target=market_ctx.get("structural_target", market_ctx.get("tp")),
+            effective_rr=effective_rr,
+            min_effective_rr=self.config.min_effective_rr,
+            regime=regime_layer.get("regime") or market_ctx.get("regime"),
+            setup_phase=setup_layer.get("phase") or market_ctx.get("setup_phase"),
+            target_source=market_ctx.get("target_source"),
+        )
+        market_ctx["target_policy"] = target_policy
+
         candidate_notional = next(
             (
                 market_ctx.get(key)
@@ -3749,6 +3766,8 @@ class RuntimeOrchestrator:
                 if not attached_campaign_id:
                     portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
                 market_ctx["notional"] = candidate_notional
+            market_ctx["portfolio_equity"] = inferred_equity
+            market_ctx["portfolio_available_balance"] = available_balance
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
         def _portfolio_snapshot_for(candidate_value: float | None):
@@ -4000,6 +4019,7 @@ class RuntimeOrchestrator:
             "effective_notional": market_ctx.get("effective_notional"),
             "original_quantity": market_ctx.get("original_quantity"),
             "effective_quantity": market_ctx.get("effective_quantity"),
+            "target_policy": market_ctx.get("target_policy"),
             "paper_position_sizing_mode": self.config.paper_position_sizing_mode,
             "risk_based_sizing": market_ctx.get("risk_based_sizing"),
             "min_stop_pct": float(self.config.min_sl_pct),
@@ -4491,6 +4511,16 @@ class RuntimeOrchestrator:
         risk_usd = abs(fill - stop) * quantity
         if not math.isfinite(risk_usd) or risk_usd <= 0:
             raise RuntimeError("PAPER_POSITION_RISK_INVALID")
+        equity_at_entry = market_ctx.get("portfolio_equity", market_ctx.get("equity"))
+        try:
+            equity_at_entry = float(equity_at_entry) if equity_at_entry is not None else None
+        except (TypeError, ValueError):
+            equity_at_entry = None
+        if equity_at_entry is not None and (not math.isfinite(equity_at_entry) or equity_at_entry <= 0):
+            equity_at_entry = None
+        risk_at_stop_pct_equity = (
+            None if equity_at_entry is None else risk_usd / equity_at_entry
+        )
         fill_timestamp = str(result.get("fill_timestamp") or canonical_utc_timestamp())
         cost_semantics = build_execution_cost_semantics(
             entry=planned_entry,
@@ -4526,6 +4556,13 @@ class RuntimeOrchestrator:
             "effective_notional": market_ctx.get("effective_notional"),
             "original_quantity": market_ctx.get("original_quantity"),
             "effective_quantity": market_ctx.get("effective_quantity"),
+            "paper_position_sizing_mode": self.config.paper_position_sizing_mode,
+            "risk_based_sizing": market_ctx.get("risk_based_sizing"),
+            "portfolio_equity": equity_at_entry,
+            "selected_notional": notional,
+            "risk_at_stop_usdt": risk_usd,
+            "risk_at_stop_pct_equity": risk_at_stop_pct_equity,
+            "target_policy": market_ctx.get("target_policy"),
             "execution_cost_semantics": cost_semantics.as_dict(),
             "executable_raw_rr": market_ctx.get("executable_raw_rr"),
             "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),
