@@ -36,6 +36,7 @@ PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_terminal_causes (id INTEGER PRIMARY KEY AUTOINCREMENT,terminal_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,terminal_cause TEXT NOT NULL,terminal_cause_source TEXT NOT NULL,terminal_event_id TEXT NOT NULL,terminal_at TEXT NOT NULL,run_status TEXT,campaign_status TEXT,details_json TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,timeframe TEXT,horizon_bars INTEGER,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_token TEXT,claimed_at TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_position_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_position_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,signal_id TEXT,source_decision_id TEXT,decision_time TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,setup_type TEXT,entry_time TEXT NOT NULL,planned_entry REAL,simulated_fill REAL,stop REAL,target REAL,quantity REAL,notional REAL,entry_spread REAL,entry_slippage REAL,entry_fee REAL,regime TEXT,source_provenance_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_time TEXT,exit_price REAL,exit_reason TEXT,gross_pnl REAL,gross_r REAL,exit_spread REAL,exit_slippage REAL,exit_fee REAL,funding REAL,latency_impact_penalty REAL,total_execution_cost REAL,net_pnl REAL,net_r REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,evidence_complete INTEGER NOT NULL DEFAULT 0,missing_fields_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(trade_id))""",
+"""CREATE TABLE IF NOT EXISTS burnin_position_management_events (id INTEGER PRIMARY KEY AUTOINCREMENT,management_event_id TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,event_time TEXT NOT NULL,action TEXT NOT NULL,requested_quantity REAL,execution_price REAL,previous_stop REAL,new_stop REAL,previous_remaining_quantity REAL,new_remaining_quantity REAL,gross_pnl REAL,execution_cost REAL,net_pnl REAL,evidence_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_exports (id INTEGER PRIMARY KEY AUTOINCREMENT,export_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,output_dir TEXT NOT NULL,manifest_path TEXT NOT NULL,generated_at TEXT NOT NULL,evidence_hash TEXT NOT NULL,checksums_json TEXT NOT NULL,status TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 ]
 
@@ -96,9 +97,31 @@ def bootstrap_campaign_schema(conn: Any) -> None:
     for stmt in ["ALTER TABLE burnin_pending_reject_labels ADD COLUMN timeframe TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN horizon_bars INTEGER", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claim_token TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claimed_at TEXT"]:
         try: _exec(conn, stmt)
         except Exception: pass
-    for stmt in ["ALTER TABLE burnin_pending_position_outcomes ADD COLUMN source_decision_id TEXT", "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN decision_time TEXT", "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN setup_type TEXT"]:
+    for stmt in [
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN source_decision_id TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN decision_time TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN setup_type TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_stop REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_target REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_quantity REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_notional REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_gross_pnl REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_execution_cost REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_net_pnl REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN trailing_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN management_version INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN last_management_at TEXT",
+    ]:
         try: _exec(conn, stmt)
         except Exception: pass
+    # Existing rows predate adaptive position management. Initialize the mutable
+    # management state from immutable entry evidence without rewriting that evidence.
+    _exec(conn, """UPDATE burnin_pending_position_outcomes
+        SET current_stop=COALESCE(current_stop,stop),
+            current_target=COALESCE(current_target,target),
+            remaining_quantity=COALESCE(remaining_quantity,quantity),
+            remaining_notional=COALESCE(remaining_notional,notional)
+        WHERE status='OPEN'""")
     # additive qualification columns; ignore on older SQLite if duplicate
     for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN last_operator_activity_at TEXT"]:
         try: _exec(conn, stmt)
@@ -731,6 +754,16 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
         "reject_reason": gv(r,"reject_reason"), "forward_label": gv(r,"forward_label"),
         "hypothetical_net_r_after_costs": gv(r,"hypothetical_net_r_after_costs")
     } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
+    management_rows = _exec(conn, """SELECT management_event_id,request_hash,trade_id,burnin_run_id,event_time,
+        action,requested_quantity,execution_price,previous_stop,new_stop,
+        previous_remaining_quantity,new_remaining_quantity,gross_pnl,execution_cost,
+        net_pnl,evidence_json FROM burnin_position_management_events
+        WHERE campaign_id=:cid ORDER BY id""", {"cid": campaign_id}).fetchall()
+    qualification_hash_payload["position_management_events"] = [
+        dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
+        for row in management_rows
+    ]
+    metrics["position_management_event_count"] = len(management_rows)
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     metrics["reject_candidate_feasibility_shadow"] = reject_candidate_feasibility_shadow(conn, campaign_id)
@@ -966,11 +999,11 @@ def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id:
         root=Path(output_dir)/f"burnin_campaign_{campaign_id}"; root.mkdir(parents=True,exist_ok=True)
         agg=aggregate_campaign(conn,campaign_id); run_ids=agg.get("metrics",{}).get("source_run_ids",[])
         (root/"campaign.json").write_text(json.dumps(c,indent=2,sort_keys=True,default=str))
-        tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
+        tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","position_management_events.csv":"burnin_position_management_events","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
         counts={}
         for fname,table in tables.items():
             if table == "burnin_campaign_runs": rows=conn.execute("SELECT cr.*,r.observed_duration_seconds FROM burnin_campaign_runs cr JOIN burnin_runs r ON r.burnin_run_id=cr.burnin_run_id WHERE cr.campaign_id=? ORDER BY cr.id",(campaign_id,)).fetchall()
-            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
+            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes","burnin_position_management_events"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
             else:
                 q=",".join("?" for _ in run_ids) or "''"; rows=conn.execute(f"SELECT * FROM {table} WHERE burnin_run_id IN ({q}) ORDER BY id",run_ids).fetchall()
             counts[fname]=len(rows); 
@@ -1115,8 +1148,8 @@ class BinanceReadOnlyCandleProvider:
 
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
-    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
+    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, position_management_provider: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.position_management_provider = position_management_provider; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
@@ -1178,7 +1211,7 @@ class BurnInCampaignRunner:
             with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
                 due = _exec(conn, "SELECT symbol, timeframe, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol,timeframe", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
-                positions = _exec(conn, "SELECT trade_id,symbol,entry_time FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
+                positions = _exec(conn, "SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
             candles: dict[str, Any] = {}
             for row in due:
                 r = _row_dict(row)
@@ -1199,11 +1232,38 @@ class BurnInCampaignRunner:
                 probe_start = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
                 try: self.candle_provider(symbols[0], probe_start, resolution_time, "1m")
                 except TypeError: self.candle_provider(symbols[0], probe_start, resolution_time)
+            management_actions: dict[str, list[dict[str, Any]]] = {}
+            if self.position_management_provider is not None:
+                for raw in positions:
+                    position = _row_dict(raw)
+                    trade_id = str(position.get("trade_id") or "")
+                    position_candles = (
+                        candles.get((position.get("symbol"), "position", trade_id)) or []
+                    )
+                    proposed = self.position_management_provider(
+                        dict(position), list(position_candles), resolution_time
+                    )
+                    if proposed is None:
+                        continue
+                    if isinstance(proposed, Mapping):
+                        proposed_actions = proposed.get("actions")
+                    else:
+                        proposed_actions = proposed
+                    if not isinstance(proposed_actions, (list, tuple)):
+                        raise ValueError("POSITION_MANAGEMENT_PROVIDER_ACTIONS_INVALID")
+                    actions = [dict(action) for action in proposed_actions if isinstance(action, Mapping)]
+                    if len(actions) != len(proposed_actions):
+                        raise ValueError("POSITION_MANAGEMENT_PROVIDER_ACTION_INVALID")
+                    if actions:
+                        management_actions[trade_id] = actions
             def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int]]:
                 self._persist_pending_failure_events(conn)
                 counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
-                position_counts = resolve_campaign_positions(conn, self.campaign_id, candles, now=resolution_time)
-                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts})
+                position_counts = resolve_campaign_positions(
+                    conn, self.campaign_id, candles, now=resolution_time,
+                    management_actions_by_trade=management_actions,
+                )
+                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts, "position_management_action_count": sum(len(value) for value in management_actions.values()), "position_management_provider_configured": self.position_management_provider is not None})
                 return counts, position_counts
             counts, position_counts = _with_fresh_lock_retry(self.engine, persist_resolution)
             self._pending_resolver_failure_events.clear()
