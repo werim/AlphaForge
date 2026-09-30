@@ -754,7 +754,7 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
         "reject_reason": gv(r,"reject_reason"), "forward_label": gv(r,"forward_label"),
         "hypothetical_net_r_after_costs": gv(r,"hypothetical_net_r_after_costs")
     } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
-    management_rows = _exec(conn, """SELECT management_event_id,trade_id,burnin_run_id,event_time,
+    management_rows = _exec(conn, """SELECT management_event_id,request_hash,trade_id,burnin_run_id,event_time,
         action,requested_quantity,execution_price,previous_stop,new_stop,
         previous_remaining_quantity,new_remaining_quantity,gross_pnl,execution_cost,
         net_pnl,evidence_json FROM burnin_position_management_events
