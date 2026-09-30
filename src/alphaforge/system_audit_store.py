@@ -575,12 +575,25 @@ def _accepted_outcome(
     ambiguous = bool(payload.get("ambiguous_intrabar_sequence")) or "ambiguous_intrabar_sequence" in missing
     complete = bool(outcome.get("evidence_complete")) and not ambiguous
     authoritative = attributable and complete
+    management_events = []
+    if _table_exists(source, "burnin_position_management_events"):
+        management_events = [
+            dict(value) for value in source.execute(
+                "SELECT * FROM burnin_position_management_events "
+                "WHERE burnin_run_id=? AND trade_id=? ORDER BY id",
+                (run_id, pending.get("trade_id")),
+            )
+        ]
     _insert_outcome(
         audit,
         envelope_id=envelope_id,
         kind="ACCEPTED_ACTUAL",
         source_outcome_id=str(outcome.get("outcome_id")),
-        payload={"outcome": outcome, "pending_position": pending},
+        payload={
+            "outcome": outcome,
+            "pending_position": pending,
+            "position_management_events": management_events,
+        },
         status=outcome.get("exit_reason"),
         gross_r=outcome.get("gross_r"),
         net_r=outcome.get("net_r"),
