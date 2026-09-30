@@ -1580,7 +1580,9 @@ class RuntimeOrchestrator:
                     latency_ms=execution_ctx.get("latency_ms"),
                     latency_source=execution_ctx.get("latency_source"),
                     liquidity_status=execution_ctx.get("liquidity_status"),
-                    volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+                    volatility_penalty_pct=market_ctx.get(
+                    "volatility_penalty_pct", execution_ctx.get("volatility_penalty_pct")
+                ),
                     volatility_source=execution_ctx.get("volatility_source"),
                     reject_flags=payload.get("all_failed_gates") or payload.get("reject_reasons"),
                     unavailable_fields=execution_ctx.get("unavailable_fields"),
@@ -3807,6 +3809,7 @@ class RuntimeOrchestrator:
                         None if capacity.max_correlation_group_exposure is None or capacity.correlation_group_exposure is None
                         else float(capacity.max_correlation_group_exposure) - float(capacity.correlation_group_exposure)
                     ),
+                    "available_balance": available_balance,
                 },
                 require_execution_limits=True,
             )
