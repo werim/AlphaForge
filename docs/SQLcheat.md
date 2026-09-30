@@ -1,5 +1,297 @@
 # AlphaForge SQL/operator cheat sheet
 
+
+## PINNED — Campaign Monitor
+
+> **Use this first for live PAPER/burn-in campaign inspection.**
+> Read-only only: every SQLite access below uses `sqlite3 -readonly`.
+> `NULL` / unavailable evidence is **not** PASS and is **not** zero.
+
+### Live terminal monitor — auto-select newest campaign DB
+
+Run from the AlphaForge repository root. Override `DB`, `CID`, or `INTERVAL` before running when needed.
+
+```bash
+DB="${DB:-$(find data/campaign -type f -name '*.db' -print0 2>/dev/null \
+  | xargs -0 ls -1t 2>/dev/null \
+  | head -1)}"
+
+if [[ -z "$DB" || ! -f "$DB" ]]; then
+  echo "ERROR: campaign DB not found"
+  exit 1
+fi
+
+CID="${CID:-$(sqlite3 -readonly "$DB" "
+SELECT campaign_id
+FROM burnin_campaigns
+ORDER BY created_at DESC
+LIMIT 1;
+")}"
+
+INTERVAL="${INTERVAL:-5}"
+
+echo "Monitoring:"
+echo "DB  = $DB"
+echo "CID = $CID"
+echo "Refresh = ${INTERVAL}s"
+sleep 1
+
+while true; do
+  printf '\033[2J\033[H'
+
+  echo "======================================================================"
+  echo " ALPHAFORGE CAMPAIGN MONITOR"
+  echo " $(date '+%Y-%m-%d %H:%M:%S')"
+  echo " DB:  $DB"
+  echo " CID: $CID"
+  echo "======================================================================"
+
+  sqlite3 -readonly -header -column "$DB" <<SQL
+
+.timeout 3000
+
+SELECT
+  campaign_status AS status,
+  active_run_id,
+  worker_pid,
+  restart_count,
+  last_heartbeat_at,
+  ROUND(
+    (julianday('now') - julianday(last_heartbeat_at)) * 86400,
+    1
+  ) AS heartbeat_age_sec,
+  qualification_status AS qual,
+  evidence_completeness_status AS evidence,
+  last_error
+FROM burnin_campaigns
+WHERE campaign_id='$CID';
+
+
+SELECT
+  cr.continuation_sequence AS seq,
+  cr.burnin_run_id AS run_id,
+  cr.status,
+  r.sample_count AS samples,
+  r.accepted_count AS accepted,
+  r.rejected_count AS rejected,
+  r.closed_trade_count AS closed,
+  r.open_trade_count AS open
+FROM burnin_campaign_runs cr
+JOIN burnin_runs r
+  ON r.burnin_run_id=cr.burnin_run_id
+WHERE cr.campaign_id='$CID'
+ORDER BY cr.continuation_sequence DESC
+LIMIT 5;
+
+
+WITH runs AS (
+  SELECT burnin_run_id
+  FROM burnin_campaign_runs
+  WHERE campaign_id='$CID'
+)
+SELECT 'DECISIONS' AS metric, COUNT(*) AS n
+FROM burnin_observations o
+JOIN runs r USING(burnin_run_id)
+
+UNION ALL
+SELECT 'ACCEPTED', COUNT(*)
+FROM burnin_observations o
+JOIN runs r USING(burnin_run_id)
+WHERE UPPER(COALESCE(o.decision,'')) IN ('ACCEPT','ACCEPTED')
+
+UNION ALL
+SELECT 'REJECTED', COUNT(*)
+FROM burnin_observations o
+JOIN runs r USING(burnin_run_id)
+WHERE UPPER(COALESCE(o.decision,''))='REJECTED'
+
+UNION ALL
+SELECT 'REJECT PENDING', COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+  AND UPPER(status) IN ('PENDING','READY','RESOLVING')
+
+UNION ALL
+SELECT 'REJECT RESOLVED', COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+  AND UPPER(status) IN ('RESOLVED','AMBIGUOUS')
+
+UNION ALL
+SELECT 'REJECT FAILED', COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+  AND UPPER(status)='FAILED'
+
+UNION ALL
+SELECT 'POSITIONS OPEN', COUNT(*)
+FROM burnin_pending_position_outcomes
+WHERE campaign_id='$CID'
+  AND UPPER(status)='OPEN'
+
+UNION ALL
+SELECT 'POSITIONS CLOSED', COUNT(*)
+FROM burnin_pending_position_outcomes
+WHERE campaign_id='$CID'
+  AND UPPER(status) IN ('CLOSED','RESOLVED');
+
+
+SELECT
+  status,
+  COUNT(*) AS n,
+  MIN(due_at) AS oldest_due,
+  SUM(
+    CASE
+      WHEN due_at <= datetime('now')
+       AND status IN ('PENDING','READY','RESOLVING')
+      THEN 1 ELSE 0
+    END
+  ) AS overdue
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+GROUP BY status
+ORDER BY status;
+
+
+SELECT
+  q.generated_at,
+  q.status,
+  q.sample_status AS sample,
+  q.expectancy_status AS expectancy,
+  q.execution_status AS execution,
+  q.reject_quality_status AS reject_quality,
+  q.drawdown_status AS drawdown,
+  q.reconciliation_status AS reconciliation,
+  q.evidence_completeness_status AS evidence
+FROM burnin_qualification_snapshots q
+WHERE q.campaign_id='$CID'
+   OR q.burnin_run_id IN (
+      SELECT burnin_run_id
+      FROM burnin_campaign_runs
+      WHERE campaign_id='$CID'
+   )
+ORDER BY q.generated_at DESC, q.id DESC
+LIMIT 1;
+
+
+SELECT
+  substr(o.observed_at,12,8) AS time,
+  o.symbol,
+  o.decision,
+  ROUND(
+    COALESCE(
+      CAST(json_extract(o.metrics_json,'$.score') AS REAL),
+      d.score
+    ),4
+  ) AS score,
+  ROUND(
+    COALESCE(
+      CAST(json_extract(o.metrics_json,'$.raw_rr') AS REAL),
+      CAST(json_extract(o.metrics_json,'$.candidate_raw_rr') AS REAL),
+      d.rr
+    ),3
+  ) AS raw_rr,
+  ROUND(
+    COALESCE(
+      CAST(json_extract(o.metrics_json,'$.effective_rr') AS REAL),
+      d.effective_rr
+    ),3
+  ) AS eff_rr,
+  COALESCE(
+    d.reject_reason,
+    json_extract(o.metrics_json,'$.primary_reject_reason'),
+    json_extract(o.metrics_json,'$.reject_reason'),
+    '-'
+  ) AS reason
+FROM burnin_observations o
+JOIN burnin_campaign_runs cr
+  ON cr.burnin_run_id=o.burnin_run_id
+LEFT JOIN order_decisions d
+  ON d.decision_id=json_extract(o.metrics_json,'$.reject_decision_id')
+WHERE cr.campaign_id='$CID'
+  AND UPPER(
+    COALESCE(
+      json_extract(o.metrics_json,'$.observation_kind'),
+      'CANONICAL_DECISION'
+    )
+  )='CANONICAL_DECISION'
+ORDER BY o.observed_at DESC, o.id DESC
+LIMIT 15;
+
+
+SELECT
+  substr(event_time,12,8) AS time,
+  event_type,
+  burnin_run_id,
+  substr(COALESCE(details_json,''),1,90) AS details
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+ORDER BY id DESC
+LIMIT 8;
+
+SQL
+
+  echo
+  echo "=== WORKER PROCESS ==="
+
+  PID="$(sqlite3 -readonly "$DB" \
+    "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")"
+
+  if [[ -n "$PID" ]]; then
+    ps -p "$PID" -o pid=,etime=,%cpu=,%mem=,command= 2>/dev/null \
+      || echo "PID $PID NOT RUNNING"
+  else
+    echo "No worker PID"
+  fi
+
+  echo
+  echo "Refresh: ${INTERVAL}s | Ctrl-C to exit"
+  sleep "$INTERVAL"
+done
+```
+
+### Monitor a specific DB / campaign
+
+```bash
+DB="data/campaign/POST550.db"
+CID="camp_..."
+INTERVAL=3
+```
+
+Then run the monitor block above.
+
+### One-shot campaign status
+
+Use this when you do not need the refresh loop:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+SELECT
+  campaign_id,
+  campaign_status,
+  active_run_id,
+  worker_pid,
+  restart_count,
+  last_heartbeat_at,
+  ROUND((julianday('now')-julianday(last_heartbeat_at))*86400,1) AS heartbeat_age_sec,
+  qualification_status,
+  evidence_completeness_status,
+  last_error
+FROM burnin_campaigns
+WHERE campaign_id='$CID';
+"
+```
+
+### Monitor interpretation
+
+- Growing `heartbeat_age_sec`: inspect runtime/worker liveness.
+- Persisted `worker_pid` but `ps` reports it missing: persisted campaign state and process state have diverged.
+- Growing resolver `overdue`: inspect reject resolver/backlog health.
+- `NULL`, unavailable, stale, malformed, or cross-scoped qualification evidence must not be interpreted as favorable evidence.
+- This monitor is observational only. Do not bootstrap schemas, migrate, repair, resume, restart, or mutate an active campaign from this workflow.
+
+---
+
 ## 1. Purpose
 
 This is the read-only SQL reference for AlphaForge PAPER, BURN-IN, qualification, reject-forward-outcome, runtime-health, and execution-quality audits. It records the current repository schema and the joins that are safe to use when inspecting a campaign.
