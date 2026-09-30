@@ -1004,7 +1004,9 @@ def resolve_position_closure(
         exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,
         exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,
         latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,
-        realized_gross_pnl=:gp,realized_execution_cost=:tc,realized_net_pnl=:np,
+        realized_gross_pnl=:gp,
+        realized_execution_cost=CASE WHEN :tc IS NULL THEN realized_execution_cost ELSE :tc END,
+        realized_net_pnl=CASE WHEN :np IS NULL THEN realized_net_pnl ELSE :np END,
         hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,
         missing_fields_json=:mf,resolved_at=:now,last_management_at=:now
         WHERE trade_id=:tid""", {
