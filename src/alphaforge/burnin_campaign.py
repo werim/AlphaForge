@@ -36,6 +36,7 @@ PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_terminal_causes (id INTEGER PRIMARY KEY AUTOINCREMENT,terminal_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,terminal_cause TEXT NOT NULL,terminal_cause_source TEXT NOT NULL,terminal_event_id TEXT NOT NULL,terminal_at TEXT NOT NULL,run_status TEXT,campaign_status TEXT,details_json TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,timeframe TEXT,horizon_bars INTEGER,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_token TEXT,claimed_at TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_position_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_position_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,signal_id TEXT,source_decision_id TEXT,decision_time TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,setup_type TEXT,entry_time TEXT NOT NULL,planned_entry REAL,simulated_fill REAL,stop REAL,target REAL,quantity REAL,notional REAL,entry_spread REAL,entry_slippage REAL,entry_fee REAL,regime TEXT,source_provenance_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_time TEXT,exit_price REAL,exit_reason TEXT,gross_pnl REAL,gross_r REAL,exit_spread REAL,exit_slippage REAL,exit_fee REAL,funding REAL,latency_impact_penalty REAL,total_execution_cost REAL,net_pnl REAL,net_r REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,evidence_complete INTEGER NOT NULL DEFAULT 0,missing_fields_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(trade_id))""",
+"""CREATE TABLE IF NOT EXISTS burnin_position_management_events (id INTEGER PRIMARY KEY AUTOINCREMENT,management_event_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,event_time TEXT NOT NULL,action TEXT NOT NULL,requested_quantity REAL,execution_price REAL,previous_stop REAL,new_stop REAL,previous_remaining_quantity REAL,new_remaining_quantity REAL,gross_pnl REAL,execution_cost REAL,net_pnl REAL,evidence_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_exports (id INTEGER PRIMARY KEY AUTOINCREMENT,export_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,output_dir TEXT NOT NULL,manifest_path TEXT NOT NULL,generated_at TEXT NOT NULL,evidence_hash TEXT NOT NULL,checksums_json TEXT NOT NULL,status TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 ]
 
@@ -96,9 +97,29 @@ def bootstrap_campaign_schema(conn: Any) -> None:
     for stmt in ["ALTER TABLE burnin_pending_reject_labels ADD COLUMN timeframe TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN horizon_bars INTEGER", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claim_token TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claimed_at TEXT"]:
         try: _exec(conn, stmt)
         except Exception: pass
-    for stmt in ["ALTER TABLE burnin_pending_position_outcomes ADD COLUMN source_decision_id TEXT", "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN decision_time TEXT", "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN setup_type TEXT"]:
+    for stmt in [
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN source_decision_id TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN decision_time TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN setup_type TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_stop REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_target REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_quantity REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_gross_pnl REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_execution_cost REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_net_pnl REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN trailing_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN management_version INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN last_management_at TEXT",
+    ]:
         try: _exec(conn, stmt)
         except Exception: pass
+    # Existing rows predate adaptive position management. Initialize the mutable
+    # management state from immutable entry evidence without rewriting that evidence.
+    _exec(conn, """UPDATE burnin_pending_position_outcomes
+        SET current_stop=COALESCE(current_stop,stop),
+            current_target=COALESCE(current_target,target),
+            remaining_quantity=COALESCE(remaining_quantity,quantity)
+        WHERE status='OPEN'""")
     # additive qualification columns; ignore on older SQLite if duplicate
     for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN last_operator_activity_at TEXT"]:
         try: _exec(conn, stmt)
