@@ -580,8 +580,8 @@ def _accepted_outcome(
         management_events = [
             dict(value) for value in source.execute(
                 "SELECT * FROM burnin_position_management_events "
-                "WHERE burnin_run_id=? AND trade_id=? ORDER BY id",
-                (run_id, pending.get("trade_id")),
+                "WHERE trade_id=? ORDER BY id",
+                (pending.get("trade_id"),),
             )
         ]
     _insert_outcome(
