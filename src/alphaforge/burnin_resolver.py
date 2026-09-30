@@ -551,6 +551,7 @@ def _insert_management_event(
     *,
     row: Mapping[str, Any],
     management_event_id: str,
+    request_hash: str,
     event_time: str,
     action: str,
     requested_quantity: float | None,
@@ -565,17 +566,18 @@ def _insert_management_event(
     evidence: Mapping[str, Any],
 ) -> None:
     _exec(conn, """INSERT INTO burnin_position_management_events(
-        management_event_id,trade_id,campaign_id,burnin_run_id,event_time,action,
+        management_event_id,request_hash,trade_id,campaign_id,burnin_run_id,event_time,action,
         requested_quantity,execution_price,previous_stop,new_stop,
         previous_remaining_quantity,new_remaining_quantity,gross_pnl,execution_cost,
         net_pnl,evidence_json,created_at,schema_version
     ) VALUES (
-        :event_id,:trade_id,:campaign_id,:burnin_run_id,:event_time,:action,
+        :event_id,:request_hash,:trade_id,:campaign_id,:burnin_run_id,:event_time,:action,
         :requested_quantity,:execution_price,:previous_stop,:new_stop,
         :previous_remaining_quantity,:new_remaining_quantity,:gross_pnl,:execution_cost,
         :net_pnl,:evidence_json,:created_at,:schema_version
     )""", {
         "event_id": management_event_id,
+        "request_hash": request_hash,
         "trade_id": row["trade_id"],
         "campaign_id": row["campaign_id"],
         "burnin_run_id": row["burnin_run_id"],
@@ -615,12 +617,27 @@ def apply_position_management_action(
     threshold. Those values must arrive as explicit, complete decision evidence.
     """
     bootstrap_campaign_schema(conn)
-    existing = _exec(conn, """SELECT management_event_id,trade_id,action FROM
+    normalized_action = str(action or "").strip().upper()
+    request_hash = canonical_hash({
+        "trade_id": trade_id,
+        "event_time": event_time,
+        "action": normalized_action,
+        "new_stop": new_stop,
+        "exit_quantity": exit_quantity,
+        "execution_price": execution_price,
+        "evidence": dict(evidence) if isinstance(evidence, Mapping) else evidence,
+        "exit_costs": dict(exit_costs) if isinstance(exit_costs, Mapping) else exit_costs,
+    })
+    existing = _exec(conn, """SELECT management_event_id,request_hash,trade_id,action FROM
         burnin_position_management_events WHERE management_event_id=:event_id""",
         {"event_id": management_event_id}).fetchone()
     if existing is not None:
         mapped = _row_dict(existing)
-        if mapped.get("trade_id") != trade_id or mapped.get("action") != str(action).upper():
+        if (
+            mapped.get("trade_id") != trade_id
+            or mapped.get("action") != normalized_action
+            or mapped.get("request_hash") != request_hash
+        ):
             raise ValueError("POSITION_MANAGEMENT_EVENT_ID_CONFLICT")
         return {"status": "IDEMPOTENT", **load_position_management_state(conn, trade_id)}
 
@@ -633,7 +650,6 @@ def apply_position_management_action(
         raise ValueError("POSITION_NOT_OPEN")
 
     evidence_payload = _validate_management_evidence(evidence)
-    normalized_action = str(action or "").strip().upper()
     side = _side(r.get("side"))
     fill = _finite_number(r.get("simulated_fill") or r.get("planned_entry"), positive=True)
     original_stop = _finite_number(r.get("stop"), positive=True)
@@ -668,7 +684,7 @@ def apply_position_management_action(
         ):
             raise ValueError("POSITION_MANAGEMENT_STOP_CROSSES_MARKET")
         _insert_management_event(
-            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=None, execution_price=None,
             previous_stop=current_stop, new_stop=stop_value,
             previous_remaining_quantity=remaining_qty, new_remaining_quantity=remaining_qty,
@@ -692,7 +708,7 @@ def apply_position_management_action(
         if bool(r.get("trailing_enabled")):
             raise ValueError("POSITION_MANAGEMENT_TRAILING_ALREADY_ENABLED")
         _insert_management_event(
-            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=None, execution_price=None,
             previous_stop=current_stop, new_stop=current_stop,
             previous_remaining_quantity=remaining_qty, new_remaining_quantity=remaining_qty,
@@ -736,7 +752,7 @@ def apply_position_management_action(
             "initial_quantity": original_qty,
         }
         _insert_management_event(
-            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=qty, execution_price=price,
             previous_stop=current_stop, new_stop=current_stop,
             previous_remaining_quantity=remaining_qty, new_remaining_quantity=new_remaining,
@@ -778,7 +794,7 @@ def apply_position_management_action(
         # outcome carries the protective event in its management ledger. The
         # caller transaction keeps the event + close atomic.
         _insert_management_event(
-            conn, row=r, management_event_id=management_event_id, event_time=event_time,
+            conn, row=r, management_event_id=management_event_id, request_hash=request_hash, event_time=event_time,
             action=normalized_action, requested_quantity=remaining_qty, execution_price=price,
             previous_stop=current_stop, new_stop=current_stop,
             previous_remaining_quantity=remaining_qty, new_remaining_quantity=0.0,
