@@ -565,6 +565,19 @@ def _insert_management_event(
     net_pnl: float | None,
     evidence: Mapping[str, Any],
 ) -> None:
+    active = _exec(
+        conn,
+        "SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:campaign_id",
+        {"campaign_id": row["campaign_id"]},
+    ).fetchone()
+    management_run_id = (
+        active[0] if active is not None and active[0] else row["burnin_run_id"]
+    )
+    event_evidence = {
+        **dict(evidence),
+        "position_entry_run_id": row["burnin_run_id"],
+        "management_run_id": management_run_id,
+    }
     _exec(conn, """INSERT INTO burnin_position_management_events(
         management_event_id,request_hash,trade_id,campaign_id,burnin_run_id,event_time,action,
         requested_quantity,execution_price,previous_stop,new_stop,
@@ -580,7 +593,7 @@ def _insert_management_event(
         "request_hash": request_hash,
         "trade_id": row["trade_id"],
         "campaign_id": row["campaign_id"],
-        "burnin_run_id": row["burnin_run_id"],
+        "burnin_run_id": management_run_id,
         "event_time": event_time,
         "action": action,
         "requested_quantity": requested_quantity,
@@ -592,7 +605,7 @@ def _insert_management_event(
         "gross_pnl": gross_pnl,
         "execution_cost": execution_cost,
         "net_pnl": net_pnl,
-        "evidence_json": json.dumps(dict(evidence), sort_keys=True, default=str),
+        "evidence_json": json.dumps(event_evidence, sort_keys=True, default=str),
         "created_at": utc_now(),
         "schema_version": CAMPAIGN_SCHEMA_VERSION,
     })
