@@ -396,7 +396,7 @@ def _row_dict(row: Any) -> dict[str, Any]:
     return dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
 
 
-def _finite_number(value: Any, *, positive: bool = false) -> float | None:
+def _finite_number(value: Any, *, positive: bool = False) -> float | None:
     if isinstance(value, bool):
         return None
     try:
