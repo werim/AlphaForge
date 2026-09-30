@@ -589,3 +589,44 @@ def test_management_event_mutation_breaks_source_evidence_baseline(tmp_path):
     ok, violation = _check_and_update_source_baseline(conn, _cid, run_id)
     assert ok is False
     assert violation["mutated_rows"]["position_management"]
+
+
+def test_management_event_after_resume_belongs_to_new_continuation(tmp_path):
+    _path, conn, cid = _setup(tmp_path)
+    entry_run = conn.execute(
+        "SELECT burnin_run_id FROM burnin_pending_position_outcomes WHERE trade_id='trade-505'"
+    ).fetchone()[0]
+    ok, _ = _check_and_update_source_baseline(conn, cid, entry_run)
+    assert ok is True
+
+    resumed = start_or_resume_campaign(conn, cid, resume=True)
+    assert resumed["burnin_run_id"] != entry_run
+
+    apply_position_management_action(
+        conn,
+        trade_id="trade-505",
+        management_event_id="mgt-after-resume",
+        action="TIGHTEN_STOP",
+        event_time="2026-09-30T12:01:00Z",
+        new_stop=95.0,
+        evidence=_management_evidence(101.0),
+    )
+
+    event = conn.execute(
+        "SELECT burnin_run_id,evidence_json FROM burnin_position_management_events "
+        "WHERE management_event_id='mgt-after-resume'"
+    ).fetchone()
+    evidence = json.loads(event["evidence_json"])
+    assert event["burnin_run_id"] == resumed["burnin_run_id"]
+    assert evidence["position_entry_run_id"] == entry_run
+    assert evidence["management_run_id"] == resumed["burnin_run_id"]
+
+    old_ok, old_details = _check_and_update_source_baseline(conn, cid, entry_run)
+    assert old_ok is True
+    assert old_details["baseline_reason"] == "TERMINAL_RECOVERY_REQUIRED"
+
+    new_ok, new_details = _check_and_update_source_baseline(
+        conn, cid, resumed["burnin_run_id"]
+    )
+    assert new_ok is True
+    assert new_details["baseline_created"] is True
