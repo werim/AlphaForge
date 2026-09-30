@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 import pytest
+import alphaforge.burnin_resolver as burnin_resolver
 from sqlalchemy import create_engine
 
 from alphaforge.burnin_campaign import (
@@ -14,6 +15,7 @@ from alphaforge.burnin_campaign import (
     export_campaign_bundle,
     start_or_resume_campaign,
 )
+from alphaforge.burnin_ops import _check_and_update_source_baseline
 from alphaforge.burnin_resolver import (
     apply_position_management_action,
     load_position_management_state,
@@ -519,3 +521,71 @@ def test_campaign_runner_invokes_management_provider_before_position_resolution(
     assert position["current_stop"] == pytest.approx(97.0)
     assert position["exit_price"] == pytest.approx(97.0)
     assert event_count == 1
+
+
+def test_stale_management_writer_fails_closed_without_event(tmp_path, monkeypatch):
+    _path, conn, _cid = _setup(tmp_path)
+
+    def race(target_conn, trade_id, expected_version):
+        assert expected_version == 0
+        target_conn.execute(
+            "UPDATE burnin_pending_position_outcomes "
+            "SET management_version=management_version+1 WHERE trade_id=?",
+            (trade_id,),
+        )
+
+    monkeypatch.setattr(burnin_resolver, "_position_management_pre_update_hook", race)
+    with pytest.raises(RuntimeError, match="CONCURRENT_STATE_CHANGE"):
+        apply_position_management_action(
+            conn,
+            trade_id="trade-505",
+            management_event_id="mgt-stale-writer",
+            action="TIGHTEN_STOP",
+            event_time="2026-09-30T12:01:00Z",
+            new_stop=95.0,
+            evidence=_management_evidence(101.0),
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM burnin_position_management_events "
+        "WHERE management_event_id='mgt-stale-writer'"
+    ).fetchone()[0] == 0
+    state = conn.execute(
+        "SELECT stop,current_stop,management_version FROM burnin_pending_position_outcomes "
+        "WHERE trade_id='trade-505'"
+    ).fetchone()
+    assert state["stop"] == pytest.approx(90.0)
+    assert state["current_stop"] == pytest.approx(90.0)
+    assert state["management_version"] == 1
+
+
+def test_management_event_mutation_breaks_source_evidence_baseline(tmp_path):
+    _path, conn, _cid = _setup(tmp_path)
+    run_id = conn.execute(
+        "SELECT burnin_run_id FROM burnin_pending_position_outcomes WHERE trade_id='trade-505'"
+    ).fetchone()[0]
+
+    ok, created = _check_and_update_source_baseline(conn, _cid, run_id)
+    assert ok is True
+    assert created["baseline_created"] is True
+
+    apply_position_management_action(
+        conn,
+        trade_id="trade-505",
+        management_event_id="mgt-baseline",
+        action="TIGHTEN_STOP",
+        event_time="2026-09-30T12:01:00Z",
+        new_stop=95.0,
+        evidence=_management_evidence(101.0),
+    )
+    ok, extended = _check_and_update_source_baseline(conn, _cid, run_id)
+    assert ok is True
+    assert extended["added_rows"]["position_management"]
+
+    conn.execute(
+        "UPDATE burnin_position_management_events "
+        "SET evidence_json='{}' WHERE management_event_id='mgt-baseline'"
+    )
+    ok, violation = _check_and_update_source_baseline(conn, _cid, run_id)
+    assert ok is False
+    assert violation["mutated_rows"]["position_management"]
