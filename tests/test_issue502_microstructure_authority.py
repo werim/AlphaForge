@@ -5,6 +5,7 @@ from alphaforge.execution import (
     evaluate_execution_safety,
     evaluate_microstructure_authority,
 )
+from alphaforge.order import normalize_execution_ctx
 
 
 def _measured_market(**overrides):
@@ -89,6 +90,37 @@ def test_missing_spoof_and_absorption_are_not_optimistic_zeroes() -> None:
     assert ctx["absorption_score"] is None
     assert ctx["spoof_status"] == "UNAVAILABLE"
     assert ctx["absorption_status"] == "UNAVAILABLE"
+
+
+def test_order_normalization_preserves_missing_microstructure_as_unavailable() -> None:
+    normalized = normalize_execution_ctx(
+        build_execution_context(
+            _measured_market(
+                spoof_risk=None,
+                spoof_status="UNAVAILABLE",
+                spoof_source="UNAVAILABLE",
+                absorption_score=None,
+                absorption_status="UNAVAILABLE",
+                absorption_source="UNAVAILABLE",
+            )
+        )
+    )
+    assert normalized["spoof_risk"] is None
+    assert normalized["absorption_score"] is None
+
+
+def test_boolean_microstructure_measurements_are_not_numeric_evidence() -> None:
+    ctx = build_execution_context(_measured_market(spoof_risk=True))
+    assert ctx["spoof_risk"] is None
+    result = evaluate_execution_safety(
+        ctx,
+        effective_rr=2.0,
+        min_effective_rr=1.1,
+        thresholds=_live_thresholds(),
+        require_measured=True,
+    )
+    assert result["accepted"] is False
+    assert result["primary_reject_reason"] == "MICROSTRUCTURE_CONTEXT_UNAVAILABLE"
 
 
 def test_live_microstructure_complete_measured_passes() -> None:
