@@ -3,8 +3,8 @@
 
 ## PINNED — Campaign Monitor
 
-> **Use this first for live PAPER/burn-in campaign inspection.**  
-> Read-only only: every SQLite access below uses `sqlite3 -readonly`.  
+> **Use this first for live PAPER/burn-in campaign inspection.**
+> Read-only only: every SQLite access below uses `sqlite3 -readonly`.
 > `NULL` / unavailable evidence is **not** PASS and is **not** zero.
 
 ### Live terminal monitor — auto-select newest campaign DB
