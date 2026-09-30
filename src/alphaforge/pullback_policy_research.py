@@ -258,6 +258,10 @@ def evaluate_policy_rows(
     if len(row_ids) != len(set(row_ids)):
         blockers.append("DUPLICATE_ROW_ID")
 
+    oos = tuple(row for row in materialized if row.role == SegmentRole.OOS_VALIDATION)
+    if not oos:
+        blockers.append("NO_OOS_VALIDATION_ROWS")
+
     untouched = tuple(
         row for row in materialized
         if row.role == SegmentRole.UNTOUCHED_TEST
@@ -272,21 +276,26 @@ def evaluate_policy_rows(
     ):
         blockers.append("UNDECLARED_UNTOUCHED_SEGMENT")
 
-    baseline_untouched = _variant_metrics(untouched, BASELINE_VARIANT)
+    baseline_oos = _variant_metrics(oos, BASELINE_VARIANT)
+    strict_oos = _variant_metrics(oos, STRICT_VARIANT)
     strict_untouched = _variant_metrics(untouched, STRICT_VARIANT)
 
     verdict = ResearchVerdict.INCONCLUSIVE
     if not blockers and manifest.untouched_admissible:
-        b_exp = baseline_untouched["expectancy_r"]
-        s_exp = strict_untouched["expectancy_r"]
-        b_dd = baseline_untouched["max_drawdown_r"]
-        s_dd = strict_untouched["max_drawdown_r"]
+        b_exp = baseline_oos["expectancy_r"]
+        s_exp = strict_oos["expectancy_r"]
         if b_exp is None or s_exp is None:
-            blockers.append("INSUFFICIENT_UNTOUCHED_ACCEPTED_ROWS")
-        elif s_exp > b_exp and s_dd <= b_dd:
-            verdict = ResearchVerdict.PASS_STRICT
-        else:
+            blockers.append("INSUFFICIENT_OOS_ACCEPTED_ROWS")
+        elif s_exp <= b_exp or strict_oos["max_drawdown_r"] > baseline_oos["max_drawdown_r"]:
             verdict = ResearchVerdict.RETAIN_BASELINE
+        else:
+            holdout_exp = strict_untouched["expectancy_r"]
+            if holdout_exp is None:
+                blockers.append("INSUFFICIENT_UNTOUCHED_ACCEPTED_ROWS")
+            elif holdout_exp > 0.0 and strict_untouched["net_r"] > 0.0:
+                verdict = ResearchVerdict.PASS_STRICT
+            else:
+                verdict = ResearchVerdict.RETAIN_BASELINE
 
     return {
         "schema_version": "pullback_reentry_policy_report_v1",
@@ -309,8 +318,12 @@ def evaluate_policy_rows(
             "baseline": _variant_metrics(materialized, BASELINE_VARIANT),
             "strict": _variant_metrics(materialized, STRICT_VARIANT),
         },
+        "oos_validation": {
+            "baseline": baseline_oos,
+            "strict": strict_oos,
+        },
         "untouched_test": {
-            "baseline": baseline_untouched,
+            "selected_variant": STRICT_VARIANT,
             "strict": strict_untouched,
         },
         "by_role_setup_regime_side": _group(
