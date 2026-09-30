@@ -188,6 +188,39 @@ def test_partial_exit_updates_exposure_exactly_once(tmp_path):
         apply_position_management_action(conn, **changed)
 
 
+def test_incomplete_final_cost_preserves_known_management_ledger_and_marks_evidence_incomplete(tmp_path):
+    _path, conn, _cid = _setup(tmp_path)
+
+    result = resolve_position_closure(
+        conn,
+        trade_id="trade-505",
+        exit_time="2026-09-30T12:05:00Z",
+        exit_price=95.0,
+        exit_reason="SL_HIT",
+        exit_costs=_exit_costs(funding=None),
+    )
+    assert result["evidence_complete"] is False
+
+    row = conn.execute(
+        """SELECT status,total_execution_cost,net_pnl,net_r,
+                  realized_gross_pnl,realized_execution_cost,realized_net_pnl,
+                  evidence_complete,missing_fields_json
+           FROM burnin_pending_position_outcomes WHERE trade_id='trade-505'"""
+    ).fetchone()
+    assert row["status"] == "CLOSED"
+    assert row["total_execution_cost"] is None
+    assert row["net_pnl"] is None
+    assert row["net_r"] is None
+    assert row["realized_gross_pnl"] == pytest.approx(-5.0)
+    # The running management ledger remains the last known-complete amount.
+    # Unknown final costs must stay unknown in canonical terminal fields rather
+    # than being coerced to zero merely to satisfy NOT NULL accumulator columns.
+    assert row["realized_execution_cost"] == pytest.approx(0.0)
+    assert row["realized_net_pnl"] == pytest.approx(0.0)
+    assert row["evidence_complete"] == 0
+    assert "funding" in json.loads(row["missing_fields_json"])
+
+
 def test_trailing_activation_requires_entry_authority_and_managed_stop_executes(tmp_path):
     _path, conn, cid = _setup(tmp_path, trailing_allowed=True)
     apply_position_management_action(
