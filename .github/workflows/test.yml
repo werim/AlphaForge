@@ -141,6 +141,13 @@ jobs:
           pytest -q tests/test_issue503_derivatives_contract.py
           pytest -q tests/test_runtime_live_authorization.py tests/test_live_readiness.py -k "runtime_live_authorization or mode_parity or final_gate"
 
+      - name: Microstructure authority gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue502_microstructure_authority.py
+          pytest -q tests/test_live_readiness.py -k "mode_parity"
+          pytest -q tests/test_execution_layer.py tests/test_issue421_execution_safety.py
+
       - name: SOAK decision evidence gate
         if: github.event_name == 'pull_request'
         run: |
