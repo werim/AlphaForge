@@ -381,6 +381,10 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "ENABLE_STATE_DIRECTION_RESOLUTION": getattr(runtime, "enable_state_direction_resolution", False),
         "SYMBOL_COOLDOWN_MINUTES": runtime.symbol_cooldown_sec / 60.0,
         "STALE_MARKET_DATA_SEC": runtime.stale_market_data_sec,
+        # LIVE/LIVE_PRECHECK always require authoritative measured microstructure.
+        # PAPER may remain estimated/optional but is explicitly non-LIVE-equivalent.
+        "REQUIRE_LIVE_MICROSTRUCTURE": mode_value in {"LIVE", "LIVE_PRECHECK"},
+        "MICROSTRUCTURE_MAX_AGE_SEC": runtime.stale_market_data_sec,
         "MAX_CONCURRENT_POSITIONS": runtime.max_concurrent_positions,
         "MIN_LIQUIDITY_USD": runtime.min_liquidity_usd,
         "min_volume_24h_usdt": runtime.min_liquidity_usd,
