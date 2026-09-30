@@ -79,6 +79,11 @@ async def _runtime_live_authorization_scenario(monkeypatch):
     assert adapter.calls == 0
 
     runtime._reconciliation_status = "CLEAN"
+    with pytest.raises(RuntimeError, match="derivatives_contract_passed"):
+        await _submit(runtime)
+    assert adapter.calls == 0
+
+    runtime._derivatives_contract_live_eligible = True
     control.active = True
     with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
         await _submit(runtime)

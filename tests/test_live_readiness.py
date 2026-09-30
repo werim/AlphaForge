@@ -135,7 +135,25 @@ def test_mode_parity_rejects_missing_protected_field_contract() -> None:
 
 
 def _reconciliation() -> dict[str, object]:
-    return {"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0, "exchange_connectivity_healthy": True, "authenticated": True}
+    return {
+        "provider_configured": True,
+        "evidence_status": "COMPLETE",
+        "orphan_positions": 0,
+        "orphan_orders": 0,
+        "duplicate_fills": 0,
+        "fail_closed_findings": 0,
+        "exchange_connectivity_healthy": True,
+        "authenticated": True,
+        "derivatives_contract": {
+            "account_model": "NOTIONAL_ONLY_1X",
+            "account_model_status": "PASS",
+            "leveraged_live_supported": False,
+            "funding_accrual_status": "COMPLETE_MEASURED_HOLD_AWARE",
+            "funding_live_equivalent": True,
+            "live_eligible": True,
+            "blocking_reasons": [],
+        },
+    }
 
 
 def _operational() -> dict[str, object]:

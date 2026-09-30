@@ -375,6 +375,9 @@ class RuntimeOrchestrator:
     _resolver_provider_recovery_pending: bool = field(default=False, init=False)
     _pending_reconciliation_persistence_failures: list[dict[str, Any]] = field(default_factory=list, init=False)
     _exchange_read_only_status: str = field(default="UNKNOWN", init=False)
+    _derivatives_contract_status: str = field(default="UNKNOWN", init=False)
+    _derivatives_contract_live_eligible: bool = field(default=False, init=False)
+    _derivatives_contract_evidence: dict[str, Any] = field(default_factory=dict, init=False)
     _unreconciled_symbols: set[str] = field(default_factory=set, init=False)
     _orphan_orders: list[dict[str, Any]] = field(default_factory=list, init=False)
     _orphan_positions: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -4086,6 +4089,7 @@ class RuntimeOrchestrator:
             "operator_acknowledged": bool(self.config.operator_live_acknowledged),
             "qualification_passed": qualification_passed,
             "reconciliation_passed": reconciliation_passed,
+            "derivatives_contract_passed": bool(self._derivatives_contract_live_eligible),
             "execution_owner_valid": bool(self._execution_ownership_snapshot().get("valid")),
             # This method re-reads RuntimeControlStore on every invocation.
             "kill_switch_active": bool(self._kill_switch_active()),
@@ -6181,6 +6185,18 @@ class RuntimeOrchestrator:
                     snapshot_source["recovery_transition"] = "CLEAN_RECONCILIATION_COMMITTED"
         else:
             snapshot_source = {"orders": [], "positions": [], "fills": []}
+        derivatives_contract = (
+            dict(snapshot_source.get("derivatives_contract") or {})
+            if isinstance(snapshot_source.get("derivatives_contract"), Mapping)
+            else {}
+        )
+        self._derivatives_contract_evidence = derivatives_contract
+        self._derivatives_contract_status = str(
+            derivatives_contract.get("account_model_status") or "UNAVAILABLE"
+        ).upper()
+        self._derivatives_contract_live_eligible = bool(
+            derivatives_contract.get("live_eligible", False)
+        )
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
         findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
             intended_orders=list(self._pending_orders.values()) if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} else [],

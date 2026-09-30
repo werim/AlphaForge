@@ -217,6 +217,7 @@ class LiveReadinessEvaluator:
         phase6_release = {"phase6_release_gate_evidence"}
         phase3_execution_realism = {"execution_cost_breakdown_present", "effective_rr_available", "execution_rejects_persisted", "effective_rr_threshold_provenance_valid", "no_accepted_trade_with_effective_rr_below_threshold", "no_accepted_trade_with_missing_critical_execution_context", "no_fake_zero_execution_costs"}
         phase4_portfolio_risk = {"portfolio_risk_snapshot_present", "portfolio_risk_rejects_persisted", "no_accepted_trade_over_position_limit", "no_accepted_trade_over_notional_limit", "no_accepted_trade_over_symbol_notional_limit", "no_accepted_trade_after_daily_loss_limit", "no_accepted_trade_with_unknown_portfolio_risk", "correlation_risk_evidence_present", "drawdown_guard_evidence_present", "portfolio_accounting_reconciliation_present", "backtest_and_paper_have_canonical_portfolio_risk_evidence"}
+        derivatives_execution = {"derivatives_contract_present", "notional_only_1x_verified", "leveraged_live_disabled", "hold_aware_funding_verified", "derivatives_live_eligible"}
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
@@ -225,6 +226,7 @@ class LiveReadinessEvaluator:
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("phase3_execution_realism_complete", self._checks_pass(checks, phase3_execution_realism), "requires execution cost breakdown, effective RR, execution reject persistence, no fake-zero costs, and no accepted trade with below-threshold/missing execution context"),
             CheckResult("phase4_portfolio_risk_complete", self._checks_pass(checks, phase4_portfolio_risk), "requires portfolio risk snapshots, persisted portfolio rejects, exposure/drawdown/correlation guards, and BACKTEST/PAPER canonical portfolio-risk evidence"),
+            CheckResult("derivatives_execution_contract_complete", self._checks_pass(checks, derivatives_execution), "requires measured 1x notional-only account evidence, leveraged LIVE disabled, and hold-aware funding evidence before LIVE derivatives authorization"),
             CheckResult("effective_rr_penalty_breakdown_complete", bool(mode_parity.get("effective_rr_penalty_breakdown_complete", False) or mode_parity.get("execution_context_complete", False)), "requires persisted execution-context/effective-RR penalty evidence"),
             CheckResult("exchange_connectivity_healthy", bool(reconciliation.get("exchange_connectivity_healthy", False)), "requires measured healthy exchange connectivity; PAPER success is insufficient"),
             CheckResult("authenticated_reconciliation_evidence_complete", self._checks_pass(checks, reconciliation_checks) and bool(reconciliation.get("authenticated", reconciliation.get("authenticated_reconciliation", False))), "requires authenticated read-only reconciliation evidence"),
@@ -245,7 +247,7 @@ class LiveReadinessEvaluator:
     @staticmethod
     def _verdict_from_gates(gates: list[CheckResult]) -> str:
         passed = {gate.name: gate.passed for gate in gates}
-        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "phase2_persisted_evidence_complete", "mode_parity_complete", "execution_realism_complete", "phase3_execution_realism_complete", "phase4_portfolio_risk_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
+        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "phase2_persisted_evidence_complete", "mode_parity_complete", "execution_realism_complete", "phase3_execution_realism_complete", "phase4_portfolio_risk_complete", "derivatives_execution_contract_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
         if not all(passed.get(name, False) for name in lower_gate_names):
             return "NOT_LIVE_READY"
         if not passed.get("kill_switch_verified", False):
@@ -727,6 +729,21 @@ class LiveReadinessEvaluator:
         evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
         complete = configured and evidence_status == "COMPLETE"
         no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
+        derivatives = (
+            dict(reconciliation.get("derivatives_contract") or {})
+            if isinstance(reconciliation.get("derivatives_contract"), Mapping)
+            else {}
+        )
+        derivatives_present = bool(derivatives)
+        notional_only_verified = (
+            derivatives.get("account_model") == "NOTIONAL_ONLY_1X"
+            and str(derivatives.get("account_model_status") or "").upper() == "PASS"
+        )
+        leveraged_live_disabled = derivatives.get("leveraged_live_supported") is False
+        hold_aware_funding_verified = bool(
+            derivatives.get("funding_live_equivalent", False)
+        ) and str(derivatives.get("funding_accrual_status") or "").upper() == "COMPLETE_MEASURED_HOLD_AWARE"
+        derivatives_live_eligible = bool(derivatives.get("live_eligible", False))
         parity_details = "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}"
         if execution_evidence_blocking:
             parity_details = f"LIVE_PRECHECK_EXECUTION_EVIDENCE_BLOCKING:{execution_evidence_status}"
@@ -748,7 +765,19 @@ class LiveReadinessEvaluator:
             parity_details = (
                 f"MODE_PARITY_SEMANTIC_VIOLATIONS:{semantic_count}"
             )
-        return [CheckResult("mode_parity", parity_ok, parity_details), CheckResult("live_reconciliation_provider", configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not configured else "provider_configured=true"), CheckResult("reconciliation_evidence_complete", complete, f"evidence_status={evidence_status}"), CheckResult("reconciliation_no_orphans", complete and no_orphans, f"snapshot={dict(reconciliation)}"), CheckResult("duplicate_execution_free", complete and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"), CheckResult("reconciliation_fail_closed_clear", complete and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}")]
+        return [
+            CheckResult("mode_parity", parity_ok, parity_details),
+            CheckResult("live_reconciliation_provider", configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not configured else "provider_configured=true"),
+            CheckResult("reconciliation_evidence_complete", complete, f"evidence_status={evidence_status}"),
+            CheckResult("reconciliation_no_orphans", complete and no_orphans, f"snapshot={dict(reconciliation)}"),
+            CheckResult("duplicate_execution_free", complete and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"),
+            CheckResult("reconciliation_fail_closed_clear", complete and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"),
+            CheckResult("derivatives_contract_present", derivatives_present, f"derivatives_contract={derivatives}"),
+            CheckResult("notional_only_1x_verified", notional_only_verified, f"account_model={derivatives.get('account_model')};status={derivatives.get('account_model_status')}"),
+            CheckResult("leveraged_live_disabled", leveraged_live_disabled, f"leveraged_live_supported={derivatives.get('leveraged_live_supported')}"),
+            CheckResult("hold_aware_funding_verified", hold_aware_funding_verified, f"funding_accrual_status={derivatives.get('funding_accrual_status')}"),
+            CheckResult("derivatives_live_eligible", derivatives_live_eligible, f"blocking_reasons={derivatives.get('blocking_reasons')}"),
+        ]
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
         stored_alert = latest_persisted_alert_delivery_evidence(self.engine)

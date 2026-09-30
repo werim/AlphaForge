@@ -1170,6 +1170,7 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
     )
     orchestrator._qualification_report = type("Qualified", (), {"qualified": True, "verdict": "LIVE_READY"})()
     orchestrator._reconciliation_status = "CLEAN"
+    orchestrator._derivatives_contract_live_eligible = True
     asyncio.run(orchestrator._scan_once())
     assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
 
