@@ -6,8 +6,10 @@ import sqlite3
 import pytest
 
 from alphaforge.burnin_campaign import (
+    aggregate_campaign,
     bootstrap_campaign_schema,
     create_campaign,
+    export_campaign_bundle,
     start_or_resume_campaign,
 )
 from alphaforge.burnin_resolver import (
@@ -427,3 +429,31 @@ def test_multiple_partial_exits_reconcile_full_trade_net_r_once(tmp_path):
     payload = json.loads(outcome["payload_json"])
     assert payload["partial_exit_count"] == 2
     assert payload["final_exit_quantity"] == pytest.approx(0.4)
+
+
+def test_management_ledger_is_bound_to_campaign_hash_and_export(tmp_path):
+    path, conn, cid = _setup(tmp_path)
+    before = aggregate_campaign(conn, cid)
+    assert before["status"] == "OK"
+
+    apply_position_management_action(
+        conn,
+        trade_id="trade-505",
+        management_event_id="mgt-evidence-bind",
+        action="TIGHTEN_STOP",
+        event_time="2026-09-30T12:01:00Z",
+        new_stop=95.0,
+        evidence=_management_evidence(105.0),
+    )
+    conn.commit()
+    after = aggregate_campaign(conn, cid)
+    assert after["evidence_hash"] != before["evidence_hash"]
+    assert after["metrics"]["position_management_event_count"] == 1
+    conn.close()
+
+    exported = export_campaign_bundle(path, tmp_path / "artifacts", cid)
+    manifest = exported["manifest"]
+    assert manifest["row_counts"]["position_management_events.csv"] == 1
+    ledger = (tmp_path / "artifacts" / f"burnin_campaign_{cid}" / "position_management_events.csv").read_text()
+    assert "mgt-evidence-bind" in ledger
+    assert "TIGHTEN_STOP" in ledger
