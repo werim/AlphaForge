@@ -1250,7 +1250,7 @@ def _run_source_ids(conn: sqlite3.Connection, campaign_id: str) -> list[str]:
 
 
 def _source_rows_snapshot(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
-    tables = {"observations": "burnin_observations", "trades": "burnin_trade_outcomes", "rejects": "burnin_reject_outcomes", "regimes": "burnin_regime_metrics", "execution": "burnin_execution_metrics", "calibration": "burnin_calibration_metrics", "drawdowns": "burnin_drawdown_events"}
+    tables = {"observations": "burnin_observations", "trades": "burnin_trade_outcomes", "rejects": "burnin_reject_outcomes", "position_management": "burnin_position_management_events", "regimes": "burnin_regime_metrics", "execution": "burnin_execution_metrics", "calibration": "burnin_calibration_metrics", "drawdowns": "burnin_drawdown_events"}
     table_rows: dict[str, dict[str, str]] = {}
     full_rows: dict[str, list[dict[str, Any]]] = {}
     for name, table in tables.items():
