@@ -812,7 +812,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
 
     def _to_float(v: Any) -> float | None:
-        if v is None:
+        if v is None or isinstance(v, bool):
             return None
         try:
             return float(v)
