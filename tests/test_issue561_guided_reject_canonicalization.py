@@ -95,6 +95,18 @@ def _guided_missing_payload(
         ],
         "geometry_status": "COMPLETE",
         "execution_ctx": _execution_ctx(),
+        "execution_safety": {
+            "all_failed_gates": ["LOW_EFFECTIVE_RR", "RR_TOO_LOW"],
+            "failed_gate_evidence": [
+                {"gate": "LOW_EFFECTIVE_RR", "observed": 0.40, "threshold": 1.10},
+                {"gate": "RR_TOO_LOW", "observed": 1.10, "threshold": 1.20},
+            ],
+        },
+        "all_failed_gates": ["LOW_EFFECTIVE_RR", "RR_TOO_LOW"],
+        "failed_gate_evidence": [
+            {"gate": "LOW_EFFECTIVE_RR", "observed": 0.40, "threshold": 1.10},
+            {"gate": "RR_TOO_LOW", "observed": 1.10, "threshold": 1.20},
+        ],
         "timeframe": "1m",
         "decision_timestamp": "2026-09-30T12:00:00Z",
         "mtf": {
@@ -153,6 +165,7 @@ def test_missing_guided_candidate_uses_specific_mtf_reason_and_scrubs_shadow_gat
     assert payload["entry"] is None
     assert payload["score"] is None
     assert payload["expectancy_after_costs"] is None
+    assert "execution_safety" not in payload
     assert payload["reject_quality_attributable"] is False
 
     shadow = payload["legacy_shadow_geometry"]
