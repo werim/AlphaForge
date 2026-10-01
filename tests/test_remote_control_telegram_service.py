@@ -33,6 +33,7 @@ def test_proactive_summary_and_exception_alert_are_restart_deduplicated(tmp_path
         return RemoteControlResult(command.name, 0, outputs[command.name], "")
 
     monkeypatch.setattr(telegram_service, "execute_telegram_observability", query)
+    monkeypatch.setattr(telegram_service.time, "time", lambda: clock_now.timestamp())
     try:
         for _ in range(2):
             telegram_service._maybe_send_proactive(
