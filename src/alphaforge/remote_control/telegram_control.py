@@ -355,6 +355,8 @@ def execute_paper_action(
         if not isinstance(payload, dict) or payload.get("status") != "PASS":
             return RemoteControlResult(operation, 1, "", "RECOVERY_NOT_VERIFIED")
         after = service.status(campaign_id)
+        if bool(after.get("recovery_required")):
+            return RemoteControlResult(operation, 1, "", "RECOVERY_POSTCONDITION_FAILED")
         after_status = str((after.get("campaign") or {}).get("campaign_status") or "UNKNOWN")
         return RemoteControlResult(operation, 0, f"RECOVERY verified_status={after_status}"[:max_output_chars], "")
     except TelegramControlError as exc:
