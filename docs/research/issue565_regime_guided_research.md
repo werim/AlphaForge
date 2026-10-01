@@ -42,7 +42,10 @@ make wider stacks authoritative. The version-controlled files under
 
 The current fixed direction thresholds are intentionally not changed in this
 issue. Wider-stack evidence must first show whether volatility-normalized
-features make those thresholds comparable. Until then, any wider-stack result is
+features make those thresholds comparable. The frozen identity therefore binds
+a `timeframe_semantics_hash` and requires each non-baseline stack to be marked
+`NORMALIZED` or `JUSTIFIED`; an `UNREVIEWED` wider stack is promotion-blocked
+even if its headline metrics look better. Until then, any wider-stack result is
 research-only and cannot be promoted merely because it trades less or shows
 higher headline RR/win rate.
 
