@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
 import pytest
 from sqlalchemy import text
 
@@ -22,7 +23,7 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
     assert Path(runtime.execution_ownership_engine.url.database).resolve() == campaign_db.resolve()
     with runtime.ai_brain.session_factory() as session:
         assert Path(session.bind.url.database).resolve() == campaign_db.resolve()
-    runtime.on_lifecycle_event({"signal_id": "canonical-signal", "symbol": "BTCUSDT", "mode": "PAPER", "lifecycle_state": "SIGNAL_CREATED", "timestamp": "2026-08-17T00:00:00Z", "details": {}})
+    asyncio.run(runtime.on_lifecycle_event({"signal_id": "canonical-signal", "symbol": "BTCUSDT", "mode": "PAPER", "lifecycle_state": "SIGNAL_CREATED", "timestamp": "2026-08-17T00:00:00Z", "details": {}}))
     runtime.on_reject_persist({"signal_id": "canonical-reject", "symbol": "BTCUSDT", "phase": "final", "reason": "LOW_CONFIDENCE", "confidence": .1, "score": .1, "rr": 1.0, "execution_ctx": {"evidence_status": "UNAVAILABLE"}})
     with engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE signal_id='canonical-signal'")).scalar_one() == 1
