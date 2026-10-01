@@ -1,3 +1,19 @@
+# #354 Telegram Control Center — read-only diagnostics — 2026-10-01
+
+## Why / root cause
+
+The Telegram adapter already allowlisted `/report`, `/rejects`, `/labels`, and `/errors`, but the controller executed only `/status`, `/health`, and `/help`. That created a misleading control surface: commands could pass authorization/parsing and still be rejected by the controller. The old #354 roadmap also centered on email and SSH tunneling, which is no longer the operator choice.
+
+## Change / behavior
+
+#354 is now Telegram-only. A dedicated read-only query layer opens the trusted campaign database with SQLite `mode=ro` and `query_only`, verifies the configured campaign/run identity, rejects stale active-run bindings, and returns compact structured summaries for report counts, canonical reject reasons, reject-label pipeline state, and structured operational incidents. No Telegram text can supply paths or SQL.
+
+`/help` now lists exactly the executable read-only commands. Existing allowlist, replay/audit, durable offset, pending-response retry, bounded response, and token redaction semantics remain intact. No campaign table is modified by the new query path.
+
+## Validation / risks / recommendation
+
+Focused tests prove command routing, no runtime-executor use for query commands, stale/wrong identity rejection, read-only byte preservation, structured-error redaction, missing-schema handling, and help/transport parity. Full PR CI remains required on the final documentation SHA. The running PUBLIC SOAK on `dev` is intentionally untouched; this work stays on a separate branch until that evidence run finishes. Later #354 phases cover macOS launchd, confirmation-gated PAPER controls, and scheduled/deduplicated Telegram alerts. LIVE remains NOT READY.
+
 # #455 BACKTEST ↔ PAPER pure MTF candidate parity — 2026-09-28
 
 ## Why / root cause
