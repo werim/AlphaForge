@@ -50,6 +50,7 @@ class FrozenResearchIdentity:
     config_hash: str
     data_hash: str
     universe_hash: str
+    timeframe_semantics_hash: str
     experiment_id: str
     stack_id: str
     segment_role: str
@@ -57,6 +58,7 @@ class FrozenResearchIdentity:
     minimum_segment_samples: int = 30
     evaluation_count: int = 1
     declared_fresh: bool = True
+    timeframe_semantics_status: str = "UNREVIEWED"
 
     def validate(self) -> tuple[str, ...]:
         blockers: list[str] = []
@@ -67,6 +69,7 @@ class FrozenResearchIdentity:
             ("config_hash", self.config_hash),
             ("data_hash", self.data_hash),
             ("universe_hash", self.universe_hash),
+            ("timeframe_semantics_hash", self.timeframe_semantics_hash),
         ):
             if len(value) != 64 or any(c not in "0123456789abcdefABCDEF" for c in value):
                 blockers.append(f"INVALID_{name.upper()}")
@@ -86,6 +89,12 @@ class FrozenResearchIdentity:
             int(self.evaluation_count) != 1 or not bool(self.declared_fresh)
         ):
             blockers.append("UNTOUCHED_HOLDOUT_REUSED_OR_SELECTED")
+        semantics_status = str(self.timeframe_semantics_status or "").upper()
+        if self.stack_id == "1h-15m-1m":
+            if semantics_status not in {"BASELINE", "NORMALIZED", "JUSTIFIED"}:
+                blockers.append("BASELINE_TIMEFRAME_SEMANTICS_UNREVIEWED")
+        elif semantics_status not in {"NORMALIZED", "JUSTIFIED"}:
+            blockers.append("TIMEFRAME_SEMANTICS_UNREVIEWED")
         return tuple(sorted(set(blockers)))
 
 
@@ -752,6 +761,8 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
                 "config_hash": identity.get("config_hash"),
                 "data_hash": identity.get("data_hash"),
                 "universe_hash": identity.get("universe_hash"),
+                "timeframe_semantics_hash": identity.get("timeframe_semantics_hash"),
+                "timeframe_semantics_status": identity.get("timeframe_semantics_status"),
                 "evaluation_count": identity.get("evaluation_count"),
                 "declared_fresh": identity.get("declared_fresh"),
                 "symbol": row.get("symbol"),
@@ -761,6 +772,18 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
                 "setup_phase": authoritative.get("setup_phase") if isinstance(authoritative, Mapping) else None,
                 "execution_confirmation": (
                     authoritative.get("execution_confirmation")
+                    if isinstance(authoritative, Mapping) else None
+                ),
+                "mtf_execution_confirmation_mode": (
+                    authoritative.get("mtf_execution_confirmation_mode")
+                    if isinstance(authoritative, Mapping) else None
+                ),
+                "shadow_mtf_execution_reason": (
+                    authoritative.get("shadow_mtf_execution_reason")
+                    if isinstance(authoritative, Mapping) else None
+                ),
+                "enforce_counterfactual_reject_reason": (
+                    authoritative.get("enforce_counterfactual_reject_reason")
                     if isinstance(authoritative, Mapping) else None
                 ),
                 "reclaim_confirmation": (
@@ -852,6 +875,13 @@ def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         persistence_confirmed = sum(
             row.get("two_bar_persistence_confirmation") is True for row in members
         )
+        exact_shadow_unconfirmed = sum(
+            str(row.get("shadow_mtf_execution_reason") or "").upper()
+            == "MTF_EXECUTION_NOT_CONFIRMED"
+            or str(row.get("enforce_counterfactual_reject_reason") or "").upper()
+            == "MTF_EXECUTION_NOT_CONFIRMED"
+            for row in members
+        )
         decision_times = sorted(
             parsed for row in members
             if (parsed := _parse_timestamp(row.get("decision_timestamp"))) is not None
@@ -888,6 +918,7 @@ def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "baseline_confirmation_count": confirmed,
             "reclaim_confirmation_count": reclaim_confirmed,
             "persistence_confirmation_count": persistence_confirmed,
+            "exact_shadow_unconfirmed_count": exact_shadow_unconfirmed,
         })
     return output
 
@@ -1023,6 +1054,24 @@ def _comparison_identity_blockers(
                 or "" in baseline_values
             ):
                 blockers.append(f"{role}_{field.upper()}_MISMATCH")
+        for stack, stack_rows in by_stack.items():
+            semantics_hashes = {
+                str(row.get("timeframe_semantics_hash") or "")
+                for row in stack_rows
+            }
+            semantics_statuses = {
+                str(row.get("timeframe_semantics_status") or "").upper()
+                for row in stack_rows
+            }
+            if len(semantics_hashes) != 1 or "" in semantics_hashes:
+                blockers.append(f"{role}_{stack}_TIMEFRAME_SEMANTICS_HASH_INVALID")
+            allowed = (
+                {"BASELINE", "NORMALIZED", "JUSTIFIED"}
+                if stack == baseline_stack_id
+                else {"NORMALIZED", "JUSTIFIED"}
+            )
+            if len(semantics_statuses) != 1 or not semantics_statuses <= allowed:
+                blockers.append(f"{role}_{stack}_TIMEFRAME_SEMANTICS_UNREVIEWED")
         baseline_segments = {str(row.get("segment_id") or "") for row in by_stack[baseline_stack_id]}
         candidate_segments = {str(row.get("segment_id") or "") for row in by_stack[candidate_stack_id]}
         if baseline_segments != candidate_segments or "" in baseline_segments:
