@@ -46,6 +46,7 @@ RESEARCH_STACKS: Mapping[str, ResearchStack] = {
 @dataclass(frozen=True, slots=True)
 class FrozenResearchIdentity:
     git_sha: str
+    base_config_hash: str
     config_hash: str
     data_hash: str
     universe_hash: str
@@ -54,12 +55,15 @@ class FrozenResearchIdentity:
     segment_role: str
     segment_id: str
     minimum_segment_samples: int = 30
+    evaluation_count: int = 1
+    declared_fresh: bool = True
 
     def validate(self) -> tuple[str, ...]:
         blockers: list[str] = []
         if len(self.git_sha) != 40 or any(c not in "0123456789abcdefABCDEF" for c in self.git_sha):
             blockers.append("INVALID_GIT_SHA")
         for name, value in (
+            ("base_config_hash", self.base_config_hash),
             ("config_hash", self.config_hash),
             ("data_hash", self.data_hash),
             ("universe_hash", self.universe_hash),
@@ -76,6 +80,12 @@ class FrozenResearchIdentity:
             blockers.append("MISSING_SEGMENT_ID")
         if int(self.minimum_segment_samples) < 1:
             blockers.append("INVALID_MINIMUM_SEGMENT_SAMPLES")
+        if int(self.evaluation_count) < 1:
+            blockers.append("INVALID_EVALUATION_COUNT")
+        if self.segment_role == "UNTOUCHED_HOLDOUT" and (
+            int(self.evaluation_count) != 1 or not bool(self.declared_fresh)
+        ):
+            blockers.append("UNTOUCHED_HOLDOUT_REUSED_OR_SELECTED")
         return tuple(sorted(set(blockers)))
 
 
@@ -712,6 +722,36 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
                 "segment_role": row.get("segment_role"),
                 "segment_id": row.get("segment_id"),
                 "stack_id": row.get("stack_id"),
+                "experiment_id": row.get("experiment_id"),
+                "identity_hash": row.get("identity_hash"),
+                "git_sha": (
+                    (json.loads(row.get("identity_json") or "{}")).get("git_sha")
+                    if row.get("identity_json") else None
+                ),
+                "base_config_hash": (
+                    (json.loads(row.get("identity_json") or "{}")).get("base_config_hash")
+                    if row.get("identity_json") else None
+                ),
+                "config_hash": (
+                    (json.loads(row.get("identity_json") or "{}")).get("config_hash")
+                    if row.get("identity_json") else None
+                ),
+                "data_hash": (
+                    (json.loads(row.get("identity_json") or "{}")).get("data_hash")
+                    if row.get("identity_json") else None
+                ),
+                "universe_hash": (
+                    (json.loads(row.get("identity_json") or "{}")).get("universe_hash")
+                    if row.get("identity_json") else None
+                ),
+                "evaluation_count": (
+                    (json.loads(row.get("identity_json") or "{}")).get("evaluation_count")
+                    if row.get("identity_json") else None
+                ),
+                "declared_fresh": (
+                    (json.loads(row.get("identity_json") or "{}")).get("declared_fresh")
+                    if row.get("identity_json") else None
+                ),
                 "symbol": row.get("symbol"),
                 "authoritative_decision": authoritative.get("decision") if isinstance(authoritative, Mapping) else None,
                 "reject_reason": authoritative.get("reject_reason") if isinstance(authoritative, Mapping) else None,
@@ -887,6 +927,12 @@ def research_report(
         (item["segment_role"], item["stack_id"]): item
         for item in summaries
     }
+    if candidate_stack_id is not None:
+        blockers.extend(_comparison_identity_blockers(
+            materialized,
+            baseline_stack_id=baseline_stack_id,
+            candidate_stack_id=candidate_stack_id,
+        ))
     verdict = "INCONCLUSIVE"
     if not blockers and candidate_stack_id is not None:
         required = [
@@ -936,6 +982,51 @@ def research_report(
         "blockers": tuple(sorted(set(blockers))),
         "verdict": verdict,
     }
+
+
+def _comparison_identity_blockers(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    baseline_stack_id: str,
+    candidate_stack_id: str,
+) -> list[str]:
+    blockers: list[str] = []
+    comparable = [
+        row for row in rows
+        if str(row.get("stack_id") or "") in {baseline_stack_id, candidate_stack_id}
+        and str(row.get("segment_role") or "") in {"OOS", "UNTOUCHED_HOLDOUT"}
+    ]
+    for role in ("OOS", "UNTOUCHED_HOLDOUT"):
+        role_rows = [row for row in comparable if row.get("segment_role") == role]
+        by_stack = {
+            stack: [row for row in role_rows if row.get("stack_id") == stack]
+            for stack in (baseline_stack_id, candidate_stack_id)
+        }
+        if not all(by_stack.values()):
+            continue
+        for field in ("experiment_id", "git_sha", "base_config_hash", "data_hash", "universe_hash"):
+            baseline_values = {str(row.get(field) or "") for row in by_stack[baseline_stack_id]}
+            candidate_values = {str(row.get(field) or "") for row in by_stack[candidate_stack_id]}
+            if (
+                len(baseline_values) != 1
+                or len(candidate_values) != 1
+                or baseline_values != candidate_values
+                or "" in baseline_values
+            ):
+                blockers.append(f"{role}_{field.upper()}_MISMATCH")
+        baseline_segments = {str(row.get("segment_id") or "") for row in by_stack[baseline_stack_id]}
+        candidate_segments = {str(row.get("segment_id") or "") for row in by_stack[candidate_stack_id]}
+        if baseline_segments != candidate_segments or "" in baseline_segments:
+            blockers.append(f"{role}_SEGMENT_ID_MISMATCH")
+        if role == "UNTOUCHED_HOLDOUT":
+            holdout_rows = by_stack[baseline_stack_id] + by_stack[candidate_stack_id]
+            if any(
+                int(row.get("evaluation_count") or 0) != 1
+                or row.get("declared_fresh") is not True
+                for row in holdout_rows
+            ):
+                blockers.append("UNTOUCHED_HOLDOUT_REUSED_OR_SELECTED")
+    return blockers
 
 
 def _strictly_better_expectancy(candidate: Mapping[str, Any], baseline: Mapping[str, Any]) -> bool:
