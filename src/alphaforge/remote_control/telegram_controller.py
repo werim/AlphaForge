@@ -41,7 +41,7 @@ EXECUTABLE_TELEGRAM_COMMANDS = (
     "/cancel <id>",
 )
 SAFE_QUERY_ERROR = "remote control query failed safely"
-SAFE_CONTROL_ERROR = "remote control action failed safely"
+SAFE_CONTROL_ERROR = "remote control executor failed safely"
 
 
 def process_telegram_request(
