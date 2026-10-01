@@ -7,6 +7,7 @@ LIVE authorization.
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -231,13 +232,17 @@ def compute_research_features(
     fast = _ma(regime, 8)
     slow = _ma(regime, 20)
     atr_regime = atr(regime)
-    raw_ma_delta = None
+    raw_ma_delta_price = None
+    raw_ma_delta_pct = None
     normalized_regime_strength = None
-    if fast is not None and slow is not None and slow > 0:
-        raw_ma_delta = (fast - slow) / slow
-    if fast is not None and slow is not None and atr_regime is not None and atr_regime > 0:
-        normalized_regime_strength = abs(fast - slow) / atr_regime
+    if fast is not None and slow is not None:
+        raw_ma_delta_price = fast - slow
+        if slow > 0:
+            raw_ma_delta_pct = raw_ma_delta_price / slow
+    if raw_ma_delta_price is not None and atr_regime is not None and atr_regime > 0:
+        normalized_regime_strength = abs(raw_ma_delta_price) / atr_regime
 
+    entry = _safe_positive(executable_entry)
     atr_setup = atr(setup)
     last_setup = setup[-1] if setup else None
     recent_setup = setup[-12:] if len(setup) >= 12 else ()
@@ -256,17 +261,16 @@ def compute_research_features(
         elif side == "SHORT":
             pullback_depth_atr = (close - float(support)) / atr_setup if support is not None else None
             swing_age = _bars_since_extreme(recent_setup, "high")
-        if support is not None:
-            support_distance_atr = (close - float(support)) / atr_setup
-        if resistance is not None:
-            resistance_distance_atr = (float(resistance) - close) / atr_setup
+        if support is not None and entry is not None:
+            support_distance_atr = (entry - float(support)) / atr_setup
+        if resistance is not None and entry is not None:
+            resistance_distance_atr = (float(resistance) - entry) / atr_setup
         full_range = float(resistance) - float(support)
         recent4 = recent_setup[-4:]
         short_range = max(float(row["high"]) for row in recent4) - min(float(row["low"]) for row in recent4)
         if full_range > 0:
             range_compression_ratio = short_range / full_range
 
-    entry = _safe_positive(executable_entry)
     stop = _safe_positive(structural_stop)
     stop_noise_ratio = None
     if entry is not None and stop is not None and atr_setup is not None and atr_setup > 0:
@@ -278,7 +282,11 @@ def compute_research_features(
         "decision_timestamp": _iso_ms(decision_ts_ms),
         "trade_side": side if side in {"LONG", "SHORT"} else None,
         "h1_regime_strength": {
-            "raw_ma_delta": raw_ma_delta,
+            "fast_ma": fast,
+            "slow_ma": slow,
+            "raw_ma_delta_price": raw_ma_delta_price,
+            "raw_ma_delta_pct": raw_ma_delta_pct,
+            "raw_ma_delta": raw_ma_delta_pct,
             "atr": atr_regime,
             "normalized_strength": normalized_regime_strength,
             "source_rows": len(regime),
@@ -432,7 +440,10 @@ def build_research_observation(
         key: authoritative.get(key)
         for key in (
             "decision", "reject_reason", "side", "entry", "sl", "tp",
-            "raw_rr", "effective_rr", "score", "risk_scale",
+            "raw_rr", "effective_rr", "score", "risk_scale", "setup_phase",
+            "mtf_execution_confirmation_mode", "shadow_mtf_execution_reason",
+            "enforce_counterfactual_reject_reason", "p_win", "p_tp_hit",
+            "confidence", "execution_confirmation",
         )
     }
     identity_payload = {**asdict(identity), "stack": asdict(stack)}
@@ -666,6 +677,78 @@ class RegimeGuidedResearchStore:
                 conn.close()
 
 
+def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return report-ready joined rows from the isolated research store."""
+    store = RegimeGuidedResearchStore(database)
+    conn, owned = store._connection()
+    try:
+        store._bootstrap(conn)
+        raw_rows = conn.execute(
+            """SELECT d.*,o.outcome_status,o.net_r,o.mfe_r,o.mae_r,
+                      o.execution_cost_drag_r,o.hold_duration_seconds,
+                      o.resolved_win,o.ambiguous,
+                      o.evidence_complete AS outcome_evidence_complete
+               FROM regime_guided_research_observations d
+               LEFT JOIN regime_guided_research_outcomes o
+                 ON o.research_id=d.research_id
+               ORDER BY d.decision_timestamp,d.research_id"""
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for raw in raw_rows:
+            row = dict(raw)
+            try:
+                authoritative = json.loads(row.get("authoritative_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                authoritative = {}
+            try:
+                features = json.loads(row.get("feature_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                features = {}
+            stop_noise = features.get("h3_stop_noise") if isinstance(features, Mapping) else {}
+            execution_variant = features.get("h4_execution_confirmation") if isinstance(features, Mapping) else {}
+            result.append({
+                "research_id": row.get("research_id"),
+                "decision_timestamp": row.get("decision_timestamp"),
+                "segment_role": row.get("segment_role"),
+                "segment_id": row.get("segment_id"),
+                "stack_id": row.get("stack_id"),
+                "symbol": row.get("symbol"),
+                "authoritative_decision": authoritative.get("decision") if isinstance(authoritative, Mapping) else None,
+                "reject_reason": authoritative.get("reject_reason") if isinstance(authoritative, Mapping) else None,
+                "effective_rr": authoritative.get("effective_rr") if isinstance(authoritative, Mapping) else None,
+                "setup_phase": authoritative.get("setup_phase") if isinstance(authoritative, Mapping) else None,
+                "execution_confirmation": (
+                    authoritative.get("execution_confirmation")
+                    if isinstance(authoritative, Mapping) else None
+                ),
+                "reclaim_confirmation": (
+                    execution_variant.get("reclaim_confirmation")
+                    if isinstance(execution_variant, Mapping) else None
+                ),
+                "two_bar_persistence_confirmation": (
+                    execution_variant.get("two_bar_persistence_confirmation")
+                    if isinstance(execution_variant, Mapping) else None
+                ),
+                "stop_noise_ratio": (
+                    stop_noise.get("stop_noise_ratio")
+                    if isinstance(stop_noise, Mapping) else None
+                ),
+                "outcome_status": row.get("outcome_status"),
+                "net_r": row.get("net_r"),
+                "mfe_r": row.get("mfe_r"),
+                "mae_r": row.get("mae_r"),
+                "execution_cost_drag_r": row.get("execution_cost_drag_r"),
+                "hold_duration_seconds": row.get("hold_duration_seconds"),
+                "resolved_win": None if row.get("resolved_win") is None else bool(row.get("resolved_win")),
+                "ambiguous": bool(row.get("ambiguous") or 0),
+                "evidence_complete": bool(row.get("outcome_evidence_complete") or 0),
+            })
+        return result
+    finally:
+        if owned:
+            conn.close()
+
+
 def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -689,11 +772,58 @@ def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             for row in complete
             if (value := _finite(row.get("execution_cost_drag_r"))) is not None
         ]
+        effective_rr = [
+            float(value)
+            for row in members
+            if (value := _finite(row.get("effective_rr"))) is not None
+        ]
+        stop_noise = [
+            float(value)
+            for row in members
+            if (value := _finite(row.get("stop_noise_ratio"))) is not None
+        ]
+        hold = [
+            float(value)
+            for row in complete
+            if (value := _finite(row.get("hold_duration_seconds"))) is not None
+        ]
+        accepted = sum(
+            str(row.get("authoritative_decision") or "").upper() in {"ACCEPT", "ACCEPTED"}
+            for row in members
+        )
+        reject_reasons = Counter(
+            str(row.get("reject_reason"))
+            for row in members
+            if row.get("reject_reason")
+        )
+        confirmed = sum(
+            str(row.get("execution_confirmation") or "").upper() == "CONFIRMED"
+            for row in members
+        )
+        reclaim_confirmed = sum(row.get("reclaim_confirmation") is True for row in members)
+        persistence_confirmed = sum(
+            row.get("two_bar_persistence_confirmation") is True for row in members
+        )
+        decision_times = sorted(
+            parsed for row in members
+            if (parsed := _parse_timestamp(row.get("decision_timestamp"))) is not None
+        )
+        inter_trade = [
+            (decision_times[index] - decision_times[index - 1]).total_seconds()
+            for index in range(1, len(decision_times))
+        ]
+        span_days = (
+            max((decision_times[-1] - decision_times[0]).total_seconds() / 86_400.0, 1.0)
+            if len(decision_times) >= 2 else None
+        )
         output.append({
             "segment_role": segment_role,
             "stack_id": stack_id,
             "candidate_count": len(members),
+            "accepted_count": accepted,
             "complete_outcome_count": len(complete),
+            "trades_per_day": accepted / span_days if span_days else None,
+            "median_inter_candidate_seconds": statistics.median(inter_trade) if inter_trade else None,
             "total_net_r": sum(net) if net else None,
             "mean_net_r": statistics.fmean(net) if net else None,
             "median_net_r": statistics.median(net) if net else None,
@@ -702,8 +832,27 @@ def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "mean_mfe_r": statistics.fmean(mfe) if mfe else None,
             "mean_mae_r": statistics.fmean(mae) if mae else None,
             "mean_execution_cost_drag_r": statistics.fmean(cost) if cost else None,
+            "median_effective_rr": statistics.median(effective_rr) if effective_rr else None,
+            "median_stop_noise_ratio": statistics.median(stop_noise) if stop_noise else None,
+            "mean_hold_duration_seconds": statistics.fmean(hold) if hold else None,
+            "reject_reason_distribution": dict(sorted(reject_reasons.items())),
+            "baseline_confirmation_count": confirmed,
+            "reclaim_confirmation_count": reclaim_confirmed,
+            "persistence_confirmation_count": persistence_confirmed,
         })
     return output
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _max_drawdown(values: Sequence[float]) -> float:
@@ -799,6 +948,24 @@ def _not_worse_drawdown(candidate: Mapping[str, Any], baseline: Mapping[str, Any
     c = _finite(candidate.get("max_drawdown_r"))
     b = _finite(baseline.get("max_drawdown_r"))
     return c is not None and b is not None and c <= b
+
+
+def write_research_report(
+    database: str | Path | sqlite3.Connection,
+    output_path: str | Path,
+    *,
+    baseline_stack_id: str = "1h-15m-1m",
+    candidate_stack_id: str | None = None,
+    minimum_segment_samples: int = 30,
+) -> dict[str, Any]:
+    report = research_report(
+        load_research_rows(database),
+        baseline_stack_id=baseline_stack_id,
+        candidate_stack_id=candidate_stack_id,
+        minimum_segment_samples=minimum_segment_samples,
+    )
+    Path(output_path).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    return report
 
 
 def stack_env(stack_id: str) -> dict[str, str]:
