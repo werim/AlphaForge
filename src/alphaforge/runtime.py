@@ -324,6 +324,9 @@ class RuntimeMetrics:
     heartbeat_persistence_degraded: bool = False
     reject_persistence_failures: int = 0
     reject_persistence_degraded: bool = False
+    lifecycle_persistence_failures: int = 0
+    lifecycle_persistence_recoveries: int = 0
+    lifecycle_persistence_degraded: bool = False
     persistence_enabled: bool = False
 
 
@@ -6757,7 +6760,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
             return candidates
         return await enrich_selected_market_geometry(candidates, cfg)
 
-    def _persist_lifecycle(payload: dict[str, Any]) -> None:
+    async def _persist_lifecycle(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
@@ -6767,29 +6770,74 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
             and str(details.get("decision") or "").upper() == "REJECTED"
         ):
             return
-        with SessionLocal() as session:
-            if not save_trade_lifecycle_event(
-                session,
-                signal_id=payload.get("signal_id"),
-                symbol=payload.get("symbol"),
-                mode=payload.get("mode"),
-                lifecycle_state=payload.get("lifecycle_state"),
-                previous_lifecycle_state=payload.get("previous_lifecycle_state"),
-                event_ts=payload.get("timestamp"),
-                event_type=payload.get("lifecycle_event_type"),
-                payload=details,
-                failure_reason=details.get("failure_reason"),
-                incident_payload=details.get("incident_payload"),
-                reject_reason=details.get("reject_reason") or details.get("reason"),
-                score=details.get("score"),
-                rr=details.get("rr"),
-                effective_rr=details.get("effective_rr"),
-                expectancy_bucket=details.get("expectancy_bucket"),
-                execution_ctx=details.get("execution_ctx", {}),
-                execution_ctx_missing=details.get("execution_ctx_missing"),
-            ):
-                raise RuntimeError("trade_lifecycle_event_persistence_failed")
-            session.commit()
+
+        lifecycle_kwargs = {
+            "signal_id": payload.get("signal_id"),
+            "symbol": payload.get("symbol"),
+            "mode": payload.get("mode"),
+            "lifecycle_state": payload.get("lifecycle_state"),
+            "previous_lifecycle_state": payload.get("previous_lifecycle_state"),
+            "event_ts": payload.get("timestamp"),
+            "event_type": payload.get("lifecycle_event_type"),
+            "payload": details,
+            "failure_reason": details.get("failure_reason"),
+            "incident_payload": details.get("incident_payload"),
+            "reject_reason": details.get("reject_reason") or details.get("reason"),
+            "score": details.get("score"),
+            "rr": details.get("rr"),
+            "effective_rr": details.get("effective_rr"),
+            "expectancy_bucket": details.get("expectancy_bucket"),
+            "execution_ctx": details.get("execution_ctx", {}),
+            "execution_ctx_missing": details.get("execution_ctx_missing"),
+        }
+
+        for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
+            conn = engine.connect()
+            old_timeout = None
+            try:
+                if engine.dialect.name == "sqlite":
+                    old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                    conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                    conn.commit()
+                if not save_trade_lifecycle_event(conn, _commit=True, **lifecycle_kwargs):
+                    raise RuntimeError("trade_lifecycle_event_persistence_failed")
+                if orchestrator.metrics.lifecycle_persistence_degraded:
+                    orchestrator.metrics.lifecycle_persistence_degraded = False
+                    orchestrator.metrics.lifecycle_persistence_recoveries += 1
+                return
+            except BaseException as exc:
+                with contextlib.suppress(Exception):
+                    conn.rollback()
+                if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+                    raise
+                conn.invalidate()
+                if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
+                    orchestrator.metrics.lifecycle_persistence_failures += 1
+                    orchestrator.metrics.lifecycle_persistence_degraded = True
+                    orchestrator._burnin_evidence_incomplete = True
+                    orchestrator._recovery_required = True
+                    orchestrator._runtime_status = "RECOVERY_REQUIRED"
+                    orchestrator._fail_closed_reason = (
+                        orchestrator._fail_closed_reason or "LIFECYCLE_PERSISTENCE_FAILED"
+                    )
+                    orchestrator._last_error = (
+                        "SQLITE_BUSY lifecycle persistence after "
+                        f"{attempt + 1} attempts; "
+                        f"signal_id={payload.get('signal_id')}; "
+                        f"lifecycle_state={payload.get('lifecycle_state')}"
+                    )
+                    logger.error(
+                        "lifecycle_persistence_degraded reason=%s",
+                        orchestrator._last_error,
+                    )
+                    return
+                await asyncio.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
+            finally:
+                if old_timeout is not None and not conn.invalidated:
+                    with contextlib.suppress(Exception):
+                        conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                        conn.commit()
+                conn.close()
 
     def _persist_reject(conn: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
         if not persistence_enabled:
