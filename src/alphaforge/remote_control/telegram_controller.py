@@ -11,12 +11,22 @@ from alphaforge.remote_control.commands import (
     map_remote_command,
 )
 from alphaforge.remote_control.telegram_adapter import VerifiedTelegramRemoteControlRequest, is_verified_telegram_request
+from alphaforge.remote_control.telegram_queries import TELEGRAM_QUERY_COMMANDS, execute_telegram_query
 
 
 TELEGRAM_EXECUTOR_COMMANDS = {"STATUS", "HEALTH"}
-TELEGRAM_CONTROLLER_COMMANDS = TELEGRAM_EXECUTOR_COMMANDS | {"HELP"}
-EXECUTABLE_TELEGRAM_COMMANDS = ("/status", "/health", "/help")
+TELEGRAM_CONTROLLER_COMMANDS = TELEGRAM_EXECUTOR_COMMANDS | set(TELEGRAM_QUERY_COMMANDS) | {"HELP"}
+EXECUTABLE_TELEGRAM_COMMANDS = (
+    "/status",
+    "/health",
+    "/report",
+    "/rejects",
+    "/labels",
+    "/errors",
+    "/help",
+)
 SAFE_EXECUTOR_ERROR = "remote control executor failed safely"
+SAFE_QUERY_ERROR = "remote control query failed safely"
 
 
 def process_telegram_request(
@@ -24,6 +34,7 @@ def process_telegram_request(
     *,
     config: RemoteControlConfig | Mapping[str, str] | None = None,
     executor: Callable[..., RemoteControlResult] | None = None,
+    query_executor: Callable[..., RemoteControlResult] = execute_telegram_query,
     timeout: float = 5.0,
     max_output_chars: int = 4096,
 ) -> RemoteControlDispatchResult:
@@ -33,19 +44,41 @@ def process_telegram_request(
     command = request.command
     if command.name == "HELP":
         return _help_result(max_output_chars=max_output_chars)
-    if command.name not in TELEGRAM_EXECUTOR_COMMANDS:
+    if command.name not in TELEGRAM_CONTROLLER_COMMANDS:
         return _safe_failure(command.name, "UNSUPPORTED_COMMAND", max_output_chars=max_output_chars)
     if command.argv != (command.name,):
         return _safe_failure(command.name, "UNSUPPORTED_COMMAND", max_output_chars=max_output_chars)
-    if executor is None:
-        return _safe_failure(command.name, "EXECUTOR_UNAVAILABLE", max_output_chars=max_output_chars)
 
     try:
         trusted_config = _trusted_config_values(config)
-        mapped_command = map_remote_command(command.name, trusted_config)
-        result = executor(mapped_command, config=trusted_config, timeout=timeout, max_output_chars=max_output_chars)
     except Exception:
         return _safe_failure(command.name, SAFE_EXECUTOR_ERROR, max_output_chars=max_output_chars)
+
+    if command.name in TELEGRAM_QUERY_COMMANDS:
+        try:
+            result = query_executor(
+                command,
+                config=trusted_config,
+                timeout=timeout,
+                max_output_chars=max_output_chars,
+            )
+        except Exception:
+            return _safe_failure(command.name, SAFE_QUERY_ERROR, max_output_chars=max_output_chars)
+    else:
+        if command.name not in TELEGRAM_EXECUTOR_COMMANDS:
+            return _safe_failure(command.name, "UNSUPPORTED_COMMAND", max_output_chars=max_output_chars)
+        if executor is None:
+            return _safe_failure(command.name, "EXECUTOR_UNAVAILABLE", max_output_chars=max_output_chars)
+        try:
+            mapped_command = map_remote_command(command.name, trusted_config)
+            result = executor(
+                mapped_command,
+                config=trusted_config,
+                timeout=timeout,
+                max_output_chars=max_output_chars,
+            )
+        except Exception:
+            return _safe_failure(command.name, SAFE_EXECUTOR_ERROR, max_output_chars=max_output_chars)
 
     if not isinstance(result, RemoteControlResult) or result.command != command.name:
         return _safe_failure(command.name, "INVALID_EXECUTOR_RESULT", max_output_chars=max_output_chars)
