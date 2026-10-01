@@ -486,3 +486,54 @@ def test_funding_carry_is_persisted_and_reported_separately(tmp_path) -> None:
     summary = stack_summary(rows)[0]
     assert summary["mean_execution_cost_drag_r"] == pytest.approx(0.12)
     assert summary["mean_funding_cost_r"] == pytest.approx(0.03)
+
+
+def test_wider_stack_is_not_promotion_admissible_without_normalized_or_justified_semantics() -> None:
+    invalid = FrozenResearchIdentity(
+        git_sha="a" * 40,
+        base_config_hash="e" * 64,
+        config_hash="b" * 64,
+        data_hash="c" * 64,
+        universe_hash="d" * 64,
+        timeframe_semantics_hash="2" * 64,
+        experiment_id="issue565-v1",
+        stack_id="4h-1h-15m",
+        segment_role="OOS",
+        segment_id="oos-1",
+        timeframe_semantics_status="UNREVIEWED",
+    )
+    assert "TIMEFRAME_SEMANTICS_UNREVIEWED" in invalid.validate()
+
+    rows = []
+    for role in ("OOS", "UNTOUCHED_HOLDOUT"):
+        for stack in ("1h-15m-1m", "4h-1h-15m"):
+            rows.append({
+                "segment_role": role,
+                "segment_id": role.lower() + "-1",
+                "stack_id": stack,
+                "experiment_id": "issue565-v1",
+                "git_sha": "a" * 40,
+                "base_config_hash": "e" * 64,
+                "config_hash": ("b" if stack == "1h-15m-1m" else "f") * 64,
+                "data_hash": "c" * 64,
+                "universe_hash": "d" * 64,
+                "timeframe_semantics_hash": ("1" if stack == "1h-15m-1m" else "2") * 64,
+                "timeframe_semantics_status": (
+                    "BASELINE" if stack == "1h-15m-1m" else "UNREVIEWED"
+                ),
+                "evaluation_count": 1,
+                "declared_fresh": True,
+                "evidence_complete": True,
+                "ambiguous": False,
+                "net_r": 0.2,
+            })
+    report = research_report(
+        rows,
+        candidate_stack_id="4h-1h-15m",
+        minimum_segment_samples=1,
+    )
+    assert report["verdict"] == "INCONCLUSIVE"
+    assert any(
+        "TIMEFRAME_SEMANTICS_UNREVIEWED" in blocker
+        for blocker in report["blockers"]
+    )
