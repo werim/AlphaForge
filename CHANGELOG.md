@@ -1,3 +1,21 @@
+# #354 Telegram Control Center read-only diagnostics — 2026-10-01
+
+### Added
+- Real Telegram read-only handlers for `/report`, `/rejects`, `/labels`, and `/errors`.
+- Trusted campaign/run identity checks and SQLite read-only/query-only access for Telegram diagnostics.
+- Regression coverage for stale identity, bounded structured output, no database mutation, and command routing.
+### Changed
+- `/help` now advertises only commands that are executable end-to-end: `/status`, `/health`, `/report`, `/rejects`, `/labels`, `/errors`, and `/help`.
+- #354 scope is Telegram-only; email/Gmail and SSH-tunnel control are no longer roadmap requirements.
+### Fixed
+- Removed the mismatch where the Telegram adapter accepted read-only diagnostic commands that the controller rejected as unsupported.
+### Removed
+- No production code removed in this slice; legacy email helpers remain inert compatibility code and are outside the revised #354 roadmap.
+### Breaking Changes
+- None. No runtime, campaign, strategy, threshold, execution, persistence authority, or LIVE behavior changes.
+### Known Issues
+- Mac launchd service, confirmed PAPER control actions, and scheduled/deduplicated Telegram alerts remain later #354 phases. LIVE NOT READY.
+
 # #455 BACKTEST ↔ PAPER MTF candidate parity — 2026-09-28
 
 ### Added
