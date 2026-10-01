@@ -271,3 +271,49 @@ def test_readonly_health_and_preflight_do_not_mutate_campaign_db(tmp_path: Path)
     assert "action=CONTINUE" in health.stdout
     assert preflight.stdout == "PREFLIGHT status=PASS blockers=none"
     assert db.read_bytes() == before
+
+
+def test_recovery_pass_requires_recovery_required_to_clear(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from alphaforge.dashboard.control_center import ControlCenterService
+    from alphaforge.remote_control import telegram_control
+
+    db = tmp_path / "campaign.db"
+    db.touch()
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.db_path = db
+            self.project_root = tmp_path
+            self.python = Path("/usr/bin/python3")
+            self.token = "local"
+            self.status_calls = 0
+
+        def validate(self, *, controls: bool = False) -> None:
+            assert controls is True
+
+        def execution_mode(self) -> str:
+            return "PAPER"
+
+        def status(self, campaign_id: str):
+            assert campaign_id == "camp_1"
+            self.status_calls += 1
+            return {
+                "campaign": {"active_run_id": "run_1", "campaign_status": "RECOVERY_REQUIRED"},
+                "recovery_required": True,
+            }
+
+    fake = FakeService()
+    monkeypatch.setattr(ControlCenterService, "from_environment", classmethod(lambda cls: fake))
+    monkeypatch.setattr(
+        telegram_control.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='{"status":"PASS"}', stderr=""),
+    )
+
+    result = telegram_control.execute_paper_action("RECOVERY", config=_config(db))
+
+    assert result.returncode == 1
+    assert result.stderr == "RECOVERY_POSTCONDITION_FAILED"
+    assert fake.status_calls == 2
