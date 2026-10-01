@@ -51,6 +51,7 @@ def _feature_inputs():
 def _identity(stack: str = "1h-15m-1m", role: str = "OOS") -> FrozenResearchIdentity:
     return FrozenResearchIdentity(
         git_sha="a" * 40,
+        base_config_hash="e" * 64,
         config_hash="b" * 64,
         data_hash="c" * 64,
         universe_hash="d" * 64,
@@ -334,7 +335,16 @@ def test_report_only_supports_separate_issue_after_oos_and_holdout() -> None:
             for index, net_r in enumerate(values):
                 rows.append({
                     "segment_role": role,
+                    "segment_id": role.lower() + "-1",
                     "stack_id": stack,
+                    "experiment_id": "issue565-v1",
+                    "git_sha": "a" * 40,
+                    "base_config_hash": "e" * 64,
+                    "config_hash": ("b" if stack == "1h-15m-1m" else "f") * 64,
+                    "data_hash": "c" * 64,
+                    "universe_hash": "d" * 64,
+                    "evaluation_count": 1,
+                    "declared_fresh": True,
                     "evidence_complete": True,
                     "ambiguous": False,
                     "net_r": net_r,
@@ -364,3 +374,33 @@ def test_stack_env_is_explicit_and_does_not_need_mutable_shared_env() -> None:
         "ALPHAFORGE_EXECUTION_TIMEFRAME": "15m",
         "ALPHAFORGE_RESEARCH_MACRO_CONTEXT_TIMEFRAME": "1d",
     }
+
+
+def test_stack_comparison_blocks_cross_scoped_or_reused_holdout_evidence() -> None:
+    rows = []
+    for role in ("OOS", "UNTOUCHED_HOLDOUT"):
+        for stack in ("1h-15m-1m", "4h-1h-15m"):
+            rows.append({
+                "segment_role": role,
+                "segment_id": role.lower() + "-1",
+                "stack_id": stack,
+                "experiment_id": "issue565-v1",
+                "git_sha": "a" * 40,
+                "base_config_hash": "e" * 64,
+                "config_hash": ("b" if stack == "1h-15m-1m" else "f") * 64,
+                "data_hash": ("c" if stack == "1h-15m-1m" else "9") * 64,
+                "universe_hash": "d" * 64,
+                "evaluation_count": 2 if role == "UNTOUCHED_HOLDOUT" else 1,
+                "declared_fresh": role != "UNTOUCHED_HOLDOUT",
+                "evidence_complete": True,
+                "ambiguous": False,
+                "net_r": 0.2,
+            })
+    report = research_report(
+        rows,
+        candidate_stack_id="4h-1h-15m",
+        minimum_segment_samples=1,
+    )
+    assert report["verdict"] == "INCONCLUSIVE"
+    assert "OOS_DATA_HASH_MISMATCH" in report["blockers"]
+    assert "UNTOUCHED_HOLDOUT_REUSED_OR_SELECTED" in report["blockers"]
