@@ -277,7 +277,7 @@ def test_geometry_diagnostic_busy_is_nonfatal_but_evidence_is_not_complete(tmp_p
         assert conn.execute(
             text(
                 "SELECT COUNT(*) FROM burnin_observations "
-                "WHERE observation_kind='DIAGNOSTIC'"
+                "WHERE json_extract(metrics_json,'$.observation_kind')='DIAGNOSTIC'"
             )
         ).scalar_one() == 0
 
