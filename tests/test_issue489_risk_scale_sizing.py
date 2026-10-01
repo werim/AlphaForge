@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from alphaforge.portfolio_risk import BacktestPortfolioState, scale_candidate_exposure
+from alphaforge.persistence import init_db
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
 
@@ -167,6 +168,7 @@ def test_live_precheck_projects_same_scaled_notional_without_submit(monkeypatch)
 
     monkeypatch.setattr(RuntimeOrchestrator, "_persist_burnin_decision", capture_decision)
     runtime = _runtime(ExecutionMode.LIVE_PRECHECK)
+    runtime.persistence_engine = init_db("sqlite+pysqlite:///:memory:")
     asyncio.run(runtime._process_symbol(_selection(_wide_softenable_market())))
 
     accepted = [row for row in captured if row.get("decision") == "ACCEPTED"]
