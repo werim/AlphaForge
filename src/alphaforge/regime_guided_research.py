@@ -332,17 +332,21 @@ def compute_research_features(
 def calibration_report(
     rows: Iterable[Mapping[str, Any]],
     *,
+    probability_field: str = "p_win",
+    outcome_field: str = "resolved_win",
     bucket_width: float = 0.1,
 ) -> dict[str, Any]:
     """H5 calibration diagnostics from resolved, attributable labels only."""
+    if not str(probability_field).strip() or not str(outcome_field).strip():
+        raise ValueError("calibration field names must be non-empty")
     width = _finite(bucket_width)
     if width is None or width <= 0.0 or width > 1.0:
         raise ValueError("bucket_width must be in (0,1]")
     usable: list[tuple[float, int, str, str, str]] = []
     excluded = 0
     for row in rows:
-        p = _finite(row.get("p_win"))
-        resolved = row.get("resolved_win")
+        p = _finite(row.get(probability_field))
+        resolved = row.get(outcome_field)
         complete = row.get("evidence_complete") is True
         ambiguous = row.get("ambiguous") is True
         if (
@@ -363,6 +367,8 @@ def calibration_report(
     if not usable:
         return {
             "status": "INCOMPLETE",
+            "probability_field": probability_field,
+            "outcome_field": outcome_field,
             "sample_count": 0,
             "excluded_count": excluded,
             "brier_score": None,
@@ -413,6 +419,8 @@ def calibration_report(
             })
     return {
         "status": "COMPLETE",
+        "probability_field": probability_field,
+        "outcome_field": outcome_field,
         "sample_count": len(usable),
         "excluded_count": excluded,
         "brier_score": sum((p - outcome) ** 2 for p, outcome, *_ in usable) / len(usable),
@@ -563,6 +571,7 @@ class RegimeGuidedResearchStore:
                 mfe_r REAL,
                 mae_r REAL,
                 execution_cost_drag_r REAL,
+                funding_cost_r REAL,
                 hold_duration_seconds REAL,
                 resolved_win INTEGER,
                 ambiguous INTEGER NOT NULL DEFAULT 0,
@@ -573,6 +582,11 @@ class RegimeGuidedResearchStore:
             );
             """
         )
+        try:
+            conn.execute("ALTER TABLE regime_guided_research_outcomes ADD COLUMN funding_cost_r REAL")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
     def record(self, observation: Mapping[str, Any]) -> str:
         required = {
@@ -631,6 +645,7 @@ class RegimeGuidedResearchStore:
         mfe_r: Any = None,
         mae_r: Any = None,
         execution_cost_drag_r: Any = None,
+        funding_cost_r: Any = None,
         hold_duration_seconds: Any = None,
         resolved_win: bool | None = None,
         ambiguous: bool = False,
@@ -650,13 +665,14 @@ class RegimeGuidedResearchStore:
                 """
                 INSERT INTO regime_guided_research_outcomes(
                     research_id,outcome_status,net_r,mfe_r,mae_r,execution_cost_drag_r,
-                    hold_duration_seconds,resolved_win,ambiguous,evidence_complete,
+                    funding_cost_r,hold_duration_seconds,resolved_win,ambiguous,evidence_complete,
                     outcome_json,resolved_at,schema_version
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(research_id) DO UPDATE SET
                     outcome_status=excluded.outcome_status,
                     net_r=excluded.net_r,mfe_r=excluded.mfe_r,mae_r=excluded.mae_r,
                     execution_cost_drag_r=excluded.execution_cost_drag_r,
+                    funding_cost_r=excluded.funding_cost_r,
                     hold_duration_seconds=excluded.hold_duration_seconds,
                     resolved_win=excluded.resolved_win,
                     ambiguous=excluded.ambiguous,
@@ -672,6 +688,7 @@ class RegimeGuidedResearchStore:
                     _finite(mfe_r),
                     _finite(mae_r),
                     _finite(execution_cost_drag_r),
+                    _finite(funding_cost_r),
                     _finite(hold_duration_seconds),
                     None if resolved_win is None else int(resolved_win),
                     int(bool(ambiguous)),
@@ -695,7 +712,7 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
         store._bootstrap(conn)
         raw_rows = conn.execute(
             """SELECT d.*,o.outcome_status,o.net_r,o.mfe_r,o.mae_r,
-                      o.execution_cost_drag_r,o.hold_duration_seconds,
+                      o.execution_cost_drag_r,o.funding_cost_r,o.hold_duration_seconds,
                       o.resolved_win,o.ambiguous,
                       o.evidence_complete AS outcome_evidence_complete
                FROM regime_guided_research_observations d
@@ -763,6 +780,7 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
                 "mfe_r": row.get("mfe_r"),
                 "mae_r": row.get("mae_r"),
                 "execution_cost_drag_r": row.get("execution_cost_drag_r"),
+                "funding_cost_r": row.get("funding_cost_r"),
                 "hold_duration_seconds": row.get("hold_duration_seconds"),
                 "resolved_win": None if row.get("resolved_win") is None else bool(row.get("resolved_win")),
                 "ambiguous": bool(row.get("ambiguous") or 0),
@@ -796,6 +814,11 @@ def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             float(value)
             for row in complete
             if (value := _finite(row.get("execution_cost_drag_r"))) is not None
+        ]
+        funding = [
+            float(value)
+            for row in complete
+            if (value := _finite(row.get("funding_cost_r"))) is not None
         ]
         effective_rr = [
             float(value)
@@ -857,6 +880,7 @@ def stack_summary(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "mean_mfe_r": statistics.fmean(mfe) if mfe else None,
             "mean_mae_r": statistics.fmean(mae) if mae else None,
             "mean_execution_cost_drag_r": statistics.fmean(cost) if cost else None,
+            "mean_funding_cost_r": statistics.fmean(funding) if funding else None,
             "median_effective_rr": statistics.median(effective_rr) if effective_rr else None,
             "median_stop_noise_ratio": statistics.median(stop_noise) if stop_noise else None,
             "mean_hold_duration_seconds": statistics.fmean(hold) if hold else None,
