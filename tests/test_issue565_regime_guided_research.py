@@ -57,11 +57,13 @@ def _identity(stack: str = "1h-15m-1m", role: str = "OOS") -> FrozenResearchIden
         config_hash="b" * 64,
         data_hash="c" * 64,
         universe_hash="d" * 64,
+        timeframe_semantics_hash="1" * 64,
         experiment_id="issue565-v1",
         stack_id=stack,
         segment_role=role,
         segment_id=f"{role.lower()}-1",
         minimum_segment_samples=2,
+        timeframe_semantics_status=("BASELINE" if stack == "1h-15m-1m" else "NORMALIZED"),
     )
 
 
@@ -345,6 +347,8 @@ def test_report_only_supports_separate_issue_after_oos_and_holdout() -> None:
                     "config_hash": ("b" if stack == "1h-15m-1m" else "f") * 64,
                     "data_hash": "c" * 64,
                     "universe_hash": "d" * 64,
+                    "timeframe_semantics_hash": ("1" if stack == "1h-15m-1m" else "2") * 64,
+                    "timeframe_semantics_status": ("BASELINE" if stack == "1h-15m-1m" else "NORMALIZED"),
                     "evaluation_count": 1,
                     "declared_fresh": True,
                     "evidence_complete": True,
@@ -392,6 +396,8 @@ def test_stack_comparison_blocks_cross_scoped_or_reused_holdout_evidence() -> No
                 "config_hash": ("b" if stack == "1h-15m-1m" else "f") * 64,
                 "data_hash": ("c" if stack == "1h-15m-1m" else "9") * 64,
                 "universe_hash": "d" * 64,
+                    "timeframe_semantics_hash": ("1" if stack == "1h-15m-1m" else "2") * 64,
+                    "timeframe_semantics_status": ("BASELINE" if stack == "1h-15m-1m" else "NORMALIZED"),
                 "evaluation_count": 2 if role == "UNTOUCHED_HOLDOUT" else 1,
                 "declared_fresh": role != "UNTOUCHED_HOLDOUT",
                 "evidence_complete": True,
