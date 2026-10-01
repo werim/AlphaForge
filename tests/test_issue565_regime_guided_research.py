@@ -15,8 +15,10 @@ from alphaforge.regime_guided_research import (
     calibration_report,
     build_research_observation,
     compute_research_features,
+    load_research_rows,
     research_report,
     stack_env,
+    stack_summary,
 )
 from alphaforge.runtime import ExecutionMode, RuntimeConfig
 
@@ -404,3 +406,77 @@ def test_stack_comparison_blocks_cross_scoped_or_reused_holdout_evidence() -> No
     assert report["verdict"] == "INCONCLUSIVE"
     assert "OOS_DATA_HASH_MISMATCH" in report["blockers"]
     assert "UNTOUCHED_HOLDOUT_REUSED_OR_SELECTED" in report["blockers"]
+
+
+def test_calibration_supports_p_tp_hit_without_reinterpreting_missing_labels() -> None:
+    report = calibration_report(
+        [
+            {
+                "p_tp_hit": 0.75, "resolved_tp_hit": True,
+                "evidence_complete": True, "ambiguous": False,
+                "side": "LONG", "setup_phase": "PULLBACK", "regime": "TRENDING",
+            },
+            {
+                "p_tp_hit": 0.25, "resolved_tp_hit": False,
+                "evidence_complete": True, "ambiguous": False,
+                "side": "SHORT", "setup_phase": "CONTINUATION", "regime": "TRENDING",
+            },
+            {
+                "p_tp_hit": 0.9, "resolved_tp_hit": None,
+                "evidence_complete": True, "ambiguous": False,
+            },
+        ],
+        probability_field="p_tp_hit",
+        outcome_field="resolved_tp_hit",
+    )
+    assert report["probability_field"] == "p_tp_hit"
+    assert report["outcome_field"] == "resolved_tp_hit"
+    assert report["sample_count"] == 2
+    assert report["excluded_count"] == 1
+    assert report["brier_score"] == pytest.approx(0.0625)
+
+
+def test_funding_carry_is_persisted_and_reported_separately(tmp_path) -> None:
+    regime, setup, execution, decision = _feature_inputs()
+    features = compute_research_features(
+        regime_candles=regime,
+        setup_candles=setup,
+        execution_candles=execution,
+        decision_ts_ms=decision,
+        trade_side="LONG",
+        executable_entry=104.0,
+        structural_stop=102.0,
+    )
+    observation = build_research_observation(
+        identity=_identity(),
+        symbol="BTCUSDT",
+        signal_id="signal-funding",
+        decision_ts_ms=decision,
+        authoritative={
+            "decision": "ACCEPTED", "reject_reason": None, "side": "LONG",
+            "entry": 104.0, "sl": 102.0, "tp": 108.0,
+            "raw_rr": 2.0, "effective_rr": 1.8, "score": 0.8,
+            "risk_scale": 1.0,
+        },
+        features=features,
+    )
+    path = tmp_path / "funding.db"
+    store = RegimeGuidedResearchStore(path)
+    rid = store.record(observation)
+    store.record_outcome(
+        rid,
+        outcome_status="RESOLVED",
+        net_r=0.5,
+        mfe_r=0.8,
+        mae_r=0.2,
+        execution_cost_drag_r=0.12,
+        funding_cost_r=0.03,
+        hold_duration_seconds=7200,
+        resolved_win=True,
+        evidence_complete=True,
+    )
+    rows = load_research_rows(path)
+    assert rows[0]["funding_cost_r"] == pytest.approx(0.03)
+    summary = stack_summary(rows)[0]
+    assert summary["mean_execution_cost_drag_r"] == pytest.approx(0.12)
+    assert summary["mean_funding_cost_r"] == pytest.approx(0.03)
