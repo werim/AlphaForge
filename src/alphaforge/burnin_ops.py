@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, asyncio, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
+import argparse, asyncio, contextlib, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
 from pathlib import Path, PureWindowsPath
 from urllib.parse import quote
 from decimal import Decimal
