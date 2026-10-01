@@ -1,3 +1,15 @@
+# AlphaForge 0.1.0 — #354 Telegram Control Center read-only diagnostics — 2026-10-01
+
+- Current phase: first Telegram-only control-center slice. Existing allowlist/replay/offset/delivery safety is extended with real `/report`, `/rejects`, `/labels`, and `/errors` handlers.
+- Runtime maturity/alignment: diagnostics use trusted campaign/run identity and SQLite `mode=ro` + `query_only`; stale trusted run identity fails closed. Trading runtime, decision semantics, thresholds, PAPER execution, and LIVE authorization are unchanged.
+- Lifecycle/persistence: Telegram query handlers do not write the campaign database. Transport/replay state remains isolated. Missing optional evidence is explicit `UNAVAILABLE_IN_SCHEMA`, not fabricated zero.
+- Validation: focused controller/query/transport regressions cover routing, stale identity, redaction, no-mutation, replay boundaries, and executable-help parity. PR CI is the final gate before merge.
+- Known critical risks: macOS launchd deployment, confirmation-gated PAPER controls, and scheduled/deduplicated alerts remain open in #354. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
 # AlphaForge 0.1.0 — #455 shared MTF candidate generation — 2026-09-28
 
 - Current phase: BACKTEST and PAPER now share one pure, exchange-independent 1h/15m/1m candidate builder. BACKTEST supplies only complete closed 1m-derived layers at or before the decision timestamp; future candles are discarded.
