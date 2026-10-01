@@ -2180,8 +2180,15 @@ def _main(argv: Sequence[str] | None = None) -> int:
             out = finalize(conn, db, args.campaign_id, args.output_dir); code = 0
         else:
             out = {"status": "ERROR", "error": "UNKNOWN_COMMAND"}; code = 2
+        with contextlib.suppress(Exception):
+            conn.close()
         print(json.dumps(out, indent=2, sort_keys=True, default=str)); return code
     except Exception as exc:
+        with contextlib.suppress(Exception):
+            local_conn = locals().get("conn")
+            if local_conn is not None:
+                local_conn.rollback()
+                local_conn.close()
         print(json.dumps({"status": "ERROR", "error": f"{exc.__class__.__name__}:{exc}"}, indent=2)); return 1
 
 

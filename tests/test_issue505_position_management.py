@@ -15,7 +15,7 @@ from alphaforge.burnin_campaign import (
     export_campaign_bundle,
     start_or_resume_campaign,
 )
-from alphaforge.burnin_ops import _check_and_update_source_baseline
+from alphaforge.burnin_ops import _check_and_update_source_baseline, bootstrap_ops_schema
 from alphaforge.burnin_resolver import (
     apply_position_management_action,
     load_position_management_state,
@@ -58,7 +58,7 @@ def _setup(tmp_path, *, entry_cost: float = 0.0, trailing_allowed: bool = True):
     path = tmp_path / "issue505.db"
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    bootstrap_campaign_schema(conn)
+    bootstrap_ops_schema(conn)
     campaign = create_campaign(
         conn,
         release_id="issue505",
@@ -246,11 +246,13 @@ def test_trailing_activation_requires_entry_authority_and_managed_stop_executes(
         cid,
         {
             "trade-505": [
+                {"timestamp": "2026-09-30T12:01:00Z", "high": 110.5, "low": 106.0},
+                {"timestamp": "2026-09-30T12:02:00Z", "high": 110.5, "low": 106.0},
                 {
                     "timestamp": "2026-09-30T12:03:00Z",
                     "high": 106.0,
                     "low": 104.0,
-                }
+                },
             ]
         },
         now="2026-09-30T12:04:00Z",
@@ -359,11 +361,12 @@ def test_management_action_loop_applies_before_terminal_candle(tmp_path):
         cid,
         {
             "trade-505": [
+                {"timestamp": "2026-09-30T12:01:00Z", "high": 101.0, "low": 98.0},
                 {
                     "timestamp": "2026-09-30T12:02:00Z",
                     "high": 101.0,
                     "low": 96.5,
-                }
+                },
             ]
         },
         now="2026-09-30T12:03:00Z",
@@ -403,11 +406,12 @@ def test_ambiguous_managed_stop_and_target_remains_non_qualifying(tmp_path):
         cid,
         {
             "trade-505": [
+                {"timestamp": "2026-09-30T12:01:00Z", "high": 110.0, "low": 100.0},
                 {
                     "timestamp": "2026-09-30T12:02:00Z",
                     "high": 121.0,
                     "low": 94.0,
-                }
+                },
             ]
         },
         now="2026-09-30T12:03:00Z",
