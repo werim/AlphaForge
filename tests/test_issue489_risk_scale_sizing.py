@@ -165,7 +165,11 @@ def test_live_precheck_projects_same_scaled_notional_without_submit(monkeypatch)
     def capture_decision(self, payload, **kwargs):
         captured.append(dict(payload))
 
+    async def persist_precheck(self, *args, **kwargs):
+        return True
+
     monkeypatch.setattr(RuntimeOrchestrator, "_persist_burnin_decision", capture_decision)
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_live_precheck_evidence", persist_precheck)
     runtime = _runtime(ExecutionMode.LIVE_PRECHECK)
     asyncio.run(runtime._process_symbol(_selection(_wide_softenable_market())))
 

@@ -48,6 +48,7 @@ from alphaforge.execution import (
     evaluate_stop_risk_policy,
 )
 from alphaforge.execution_ownership import acquire_execution_ownership, release_execution_ownership, validate_execution_ownership
+from alphaforge.sqlite_safety import SQLiteBusyExhausted, run_sqlite_write_with_retry
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.decision_invariant import (
     assert_pre_submit_invariant_parity,
@@ -327,6 +328,10 @@ class RuntimeMetrics:
     lifecycle_persistence_failures: int = 0
     lifecycle_persistence_recoveries: int = 0
     lifecycle_persistence_degraded: bool = False
+    paper_position_persistence_failures: int = 0
+    execution_ownership_persistence_failures: int = 0
+    geometry_diagnostic_persistence_failures: int = 0
+    live_precheck_persistence_failures: int = 0
     persistence_enabled: bool = False
 
 
@@ -4059,7 +4064,9 @@ class RuntimeOrchestrator:
              "entry": market_ctx.get("entry"), "sl": market_ctx.get("sl"),
              "tp": market_ctx.get("tp")}, actual_decision="ACCEPTED")
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
-            await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
+            precheck_persisted = await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
+            if not precheck_persisted:
+                return
             self._persist_burnin_decision(
                 accepted_burnin_payload,
                 lifecycle_state=LifecycleState.ORDER_PLACED.value,
@@ -4139,6 +4146,25 @@ class RuntimeOrchestrator:
             "mutation_mode": mode.value,
         }
 
+    def _mark_sqlite_persistence_recovery_required(
+        self,
+        *,
+        reason: str,
+        detail: str,
+        metric_field: str,
+    ) -> None:
+        setattr(
+            self.metrics,
+            metric_field,
+            int(getattr(self.metrics, metric_field, 0)) + 1,
+        )
+        self._burnin_evidence_incomplete = True
+        self._recovery_required = True
+        self._runtime_status = "RECOVERY_REQUIRED"
+        self._fail_closed_reason = self._fail_closed_reason or reason
+        self._last_error = detail
+        logger.error("runtime_sqlite_persistence_degraded reason=%s detail=%s", reason, detail)
+
     def _authorize_execution_ownership(self) -> dict[str, Any]:
         identity = self._execution_account_identity()
         mode = self.config.execution_mode
@@ -4171,14 +4197,32 @@ class RuntimeOrchestrator:
                 return evidence
             raise RuntimeError("EXECUTION_OWNERSHIP_PERSISTENCE_UNAVAILABLE")
 
-        lease = acquire_execution_ownership(
-            engine,
-            account_scope=scope,
-            mode=mode.value,
-            owner_instance_id=self.runtime_instance_id,
-            owner_startup_id=self.startup_id,
-            lease_ttl_sec=float(self.config.execution_lease_ttl_sec),
-        )
+        try:
+            lease = acquire_execution_ownership(
+                engine,
+                account_scope=scope,
+                mode=mode.value,
+                owner_instance_id=self.runtime_instance_id,
+                owner_startup_id=self.startup_id,
+                lease_ttl_sec=float(self.config.execution_lease_ttl_sec),
+            )
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+                detail=str(exc),
+                metric_field="execution_ownership_persistence_failures",
+            )
+            evidence = {
+                **identity,
+                "owner_instance_id": self.runtime_instance_id,
+                "owner_startup_id": self.startup_id,
+                "fencing_token": None,
+                "lease_expires_at": None,
+                "acquired": False,
+                "reason": "EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+            }
+            self._last_execution_ownership = evidence
+            return evidence
         evidence = {**identity, **lease.as_dict()}
         self._last_execution_ownership = evidence
         if not lease.acquired:
@@ -4217,14 +4261,26 @@ class RuntimeOrchestrator:
                 "valid": False,
                 "reason": "EXECUTION_OWNERSHIP_UNAVAILABLE",
             }
-        lease = validate_execution_ownership(
-            engine,
-            account_scope=self._execution_account_scope,
-            owner_instance_id=self.runtime_instance_id,
-            owner_startup_id=self.startup_id,
-            fencing_token=self._execution_fencing_token,
-            min_validity_sec=float(self.config.execution_lease_min_validity_sec),
-        )
+        try:
+            lease = validate_execution_ownership(
+                engine,
+                account_scope=self._execution_account_scope,
+                owner_instance_id=self.runtime_instance_id,
+                owner_startup_id=self.startup_id,
+                fencing_token=self._execution_fencing_token,
+                min_validity_sec=float(self.config.execution_lease_min_validity_sec),
+            )
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+                detail=str(exc),
+                metric_field="execution_ownership_persistence_failures",
+            )
+            return {
+                **identity,
+                "valid": False,
+                "reason": "EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+            }
         return {**identity, **lease.as_dict(), "valid": bool(lease.acquired)}
 
     def _validate_execution_ownership(self) -> dict[str, Any]:
@@ -4246,13 +4302,17 @@ class RuntimeOrchestrator:
         engine = self._resolve_execution_ownership_engine()
         if engine is None:
             return False
-        released = release_execution_ownership(
-            engine,
-            account_scope=self._execution_account_scope,
-            owner_instance_id=self.runtime_instance_id,
-            owner_startup_id=self.startup_id,
-            fencing_token=self._execution_fencing_token,
-        )
+        try:
+            released = release_execution_ownership(
+                engine,
+                account_scope=self._execution_account_scope,
+                owner_instance_id=self.runtime_instance_id,
+                owner_startup_id=self.startup_id,
+                fencing_token=self._execution_fencing_token,
+            )
+        except SQLiteBusyExhausted as exc:
+            logger.warning("execution_ownership_release_deferred reason=%s", exc)
+            return False
         if released:
             self._execution_lease_expires_at = time.time()
         return released
@@ -4425,6 +4485,8 @@ class RuntimeOrchestrator:
         paper_notional = None
         if mode == ExecutionMode.PAPER and campaign_attached and result_status not in {"rejected", "exchange_reject", "timeout", "error", "missing_ack"}:
             paper_notional = self._persist_pending_paper_position(symbol, order_id, decision, market_ctx, result)
+            if paper_notional is None:
+                return False
         self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         if result_status == "no_submit_verified":
@@ -4452,7 +4514,7 @@ class RuntimeOrchestrator:
         self._active_position_episode_ids[symbol] = order_id
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
-    def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float:
+    def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float | None:
         campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         engine = self._resolve_persistence_engine()
         if not campaign_id or not self._burnin_run_id or engine is None:
@@ -4577,7 +4639,7 @@ class RuntimeOrchestrator:
             "execution_direction": execution.get("direction"),
             "mtf": mtf,
         }
-        with engine.begin() as conn:
+        def _persist(conn):
             decision_rows = conn.execute(text("""
                 SELECT decision_id FROM order_decisions
                 WHERE signal_id=:signal_id AND decision='ACCEPTED'
@@ -4597,7 +4659,21 @@ class RuntimeOrchestrator:
                 regime=regime.get("regime") or market_ctx.get("regime") or "UNKNOWN",
                 source_provenance=provenance,
             )
-        return notional
+            return notional
+
+        try:
+            return run_sqlite_write_with_retry(
+                engine,
+                _persist,
+                operation_name="paper_pending_position",
+            )
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="PAPER_POSITION_PERSISTENCE_FAILED",
+                detail=f"{exc}; trade_id={trade_id}; symbol={symbol}",
+                metric_field="paper_position_persistence_failures",
+            )
+            return None
 
     @staticmethod
     def _portfolio_risk_dt(value: Any) -> datetime | None:
@@ -4927,10 +5003,15 @@ class RuntimeOrchestrator:
             self._symbol_cooldown_until.pop(symbol, None)
             self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_CLOSED.value
 
-    async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> None:
+    async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> bool:
         engine = self._resolve_persistence_engine()
         if engine is None:
-            return
+            self._mark_sqlite_persistence_recovery_required(
+                reason="LIVE_PRECHECK_EVIDENCE_PERSISTENCE_FAILED",
+                detail="LIVE_PRECHECK persistence engine unavailable",
+                metric_field="live_precheck_persistence_failures",
+            )
+            return False
         from alphaforge.persistence import save_order_decision
         paper_signal = {**dict(signal_payload), "mode": ExecutionMode.PAPER.value}
         precheck_signal = {**dict(signal_payload), "mode": ExecutionMode.LIVE_PRECHECK.value}
@@ -4940,9 +5021,11 @@ class RuntimeOrchestrator:
         mismatch = [field for field in fields if paper_eval.get(field) != live_eval.get(field)]
         execution_ctx = dict(market_ctx.get("execution_ctx") or build_execution_context(market_ctx))
         input_hash = self._snapshot_hash({"signal": paper_signal, "market": {**dict(market_ctx), "mode": ExecutionMode.PAPER.value}, "regime": dict(regime_ctx), "stats": dict(stats_ctx)})
-        with sessionmaker(bind=engine, expire_on_commit=False, future=True)() as session:
-            save_order_decision(
-                session,
+        def _persist(conn):
+            persisted = save_order_decision(
+                conn,
+                _commit=False,
+                _raise_on_error=True,
                 decision_id=f"live_precheck:{signal_payload.get('signal_id')}",
                 signal_id=signal_payload.get("signal_id"),
                 symbol=symbol,
@@ -4969,7 +5052,23 @@ class RuntimeOrchestrator:
                 parity_result="PASS" if not mismatch else "FAIL",
                 order_payload={"paper": paper_eval, "live_precheck": live_eval, "mismatch_fields": mismatch, "no_submit_verified": True, "input_snapshot_hash": input_hash},
             )
-            session.commit()
+            if not persisted:
+                raise RuntimeError("LIVE_PRECHECK_DECISION_EVIDENCE_WRITE_FAILED")
+            return True
+
+        try:
+            return bool(run_sqlite_write_with_retry(
+                engine,
+                _persist,
+                operation_name="live_precheck_decision_evidence",
+            ))
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="LIVE_PRECHECK_EVIDENCE_PERSISTENCE_FAILED",
+                detail=f"{exc}; signal_id={signal_payload.get('signal_id')}",
+                metric_field="live_precheck_persistence_failures",
+            )
+            return False
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         execution_ctx = dict(market_ctx.get("execution_ctx") or {})
@@ -6100,12 +6199,13 @@ class RuntimeOrchestrator:
                     "source_exchange": payload.get("source_exchange"),
                     "timeframe": payload.get("timeframe"), "geometry_reason": reason}
         observation_id = "geometry_provider_diagnostic_" + canonical_hash(identity)[:20]
-        with engine.begin() as conn:
+
+        def _persist(conn):
             exists = conn.execute(text(
                 "SELECT 1 FROM burnin_observations WHERE observation_id=:oid"
             ), {"oid": observation_id}).first()
             if exists:
-                return
+                return False
             persist_burnin_observation(
                 conn, observation_id=observation_id, burnin_run_id=self._burnin_run_id,
                 release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id),
@@ -6119,7 +6219,25 @@ class RuntimeOrchestrator:
                 missing_fields=("execution_candle_open_ts",),
                 observation_kind=DIAGNOSTIC_OBSERVATION_KIND,
             )
-        self.metrics.burnin_observations += 1
+            return True
+
+        try:
+            inserted = run_sqlite_write_with_retry(
+                engine,
+                _persist,
+                operation_name="geometry_diagnostic",
+            )
+        except SQLiteBusyExhausted as exc:
+            self.metrics.geometry_diagnostic_persistence_failures += 1
+            self._burnin_evidence_incomplete = True
+            logger.warning(
+                "geometry_diagnostic_persistence_degraded reason=%s observation_id=%s",
+                exc,
+                observation_id,
+            )
+            return
+        if inserted:
+            self.metrics.burnin_observations += 1
 
     def _evaluate_market_timestamp(
         self, market_ts_raw: Any, *, now: float

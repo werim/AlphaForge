@@ -8,6 +8,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from alphaforge.sqlite_safety import run_sqlite_write_with_retry
+
 
 DDL = """
 CREATE TABLE IF NOT EXISTS execution_account_leases (
@@ -38,8 +40,11 @@ class ExecutionOwnership:
 
 
 def ensure_execution_ownership_schema(engine: Engine) -> None:
-    with engine.begin() as conn:
-        conn.execute(text(DDL))
+    run_sqlite_write_with_retry(
+        engine,
+        lambda conn: conn.execute(text(DDL)),
+        operation_name="execution_ownership_schema",
+    )
 
 
 def _validate_inputs(
@@ -87,7 +92,7 @@ def acquire_execution_ownership(
     expires = ts + ttl
     ensure_execution_ownership_schema(engine)
 
-    with engine.begin() as conn:
+    def _persist(conn):
         inserted = conn.execute(
             text(
                 """
@@ -144,7 +149,7 @@ def acquire_execution_ownership(
                 },
             )
 
-        row = conn.execute(
+        return conn.execute(
             text(
                 """
                 SELECT account_scope, mode, owner_instance_id, owner_startup_id,
@@ -155,6 +160,12 @@ def acquire_execution_ownership(
             ),
             {"scope": scope},
         ).mappings().one()
+
+    row = run_sqlite_write_with_retry(
+        engine,
+        _persist,
+        operation_name="execution_ownership_acquire",
+    )
 
     acquired = (
         str(row["owner_instance_id"]) == str(owner_instance_id)
@@ -250,8 +261,9 @@ def release_execution_ownership(
         return False
     ts = float(time.time() if now is None else now)
     ensure_execution_ownership_schema(engine)
-    with engine.begin() as conn:
-        result = conn.execute(
+
+    def _release(conn):
+        return conn.execute(
             text(
                 """
                 UPDATE execution_account_leases
@@ -269,5 +281,11 @@ def release_execution_ownership(
                 "token": int(fencing_token),
                 "now": ts,
             },
-        )
-    return int(result.rowcount or 0) == 1
+        ).rowcount
+
+    rowcount = run_sqlite_write_with_retry(
+        engine,
+        _release,
+        operation_name="execution_ownership_release",
+    )
+    return int(rowcount or 0) == 1

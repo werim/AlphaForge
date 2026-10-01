@@ -1472,7 +1472,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
     monkeypatch.setattr(
         RuntimeOrchestrator,
         "_persist_pending_paper_position",
-        lambda self, *args, **kwargs: calls.append("pending_position"),
+        lambda self, *args, **kwargs: (calls.append("pending_position"), 10.0)[1],
     )
     monkeypatch.setattr(
         RuntimeOrchestrator,
