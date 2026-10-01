@@ -714,6 +714,12 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
                 features = json.loads(row.get("feature_json") or "{}")
             except (TypeError, json.JSONDecodeError):
                 features = {}
+            try:
+                identity = json.loads(row.get("identity_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                identity = {}
+            if not isinstance(identity, Mapping):
+                identity = {}
             stop_noise = features.get("h3_stop_noise") if isinstance(features, Mapping) else {}
             execution_variant = features.get("h4_execution_confirmation") if isinstance(features, Mapping) else {}
             result.append({
@@ -724,34 +730,13 @@ def load_research_rows(database: str | Path | sqlite3.Connection) -> list[dict[s
                 "stack_id": row.get("stack_id"),
                 "experiment_id": row.get("experiment_id"),
                 "identity_hash": row.get("identity_hash"),
-                "git_sha": (
-                    (json.loads(row.get("identity_json") or "{}")).get("git_sha")
-                    if row.get("identity_json") else None
-                ),
-                "base_config_hash": (
-                    (json.loads(row.get("identity_json") or "{}")).get("base_config_hash")
-                    if row.get("identity_json") else None
-                ),
-                "config_hash": (
-                    (json.loads(row.get("identity_json") or "{}")).get("config_hash")
-                    if row.get("identity_json") else None
-                ),
-                "data_hash": (
-                    (json.loads(row.get("identity_json") or "{}")).get("data_hash")
-                    if row.get("identity_json") else None
-                ),
-                "universe_hash": (
-                    (json.loads(row.get("identity_json") or "{}")).get("universe_hash")
-                    if row.get("identity_json") else None
-                ),
-                "evaluation_count": (
-                    (json.loads(row.get("identity_json") or "{}")).get("evaluation_count")
-                    if row.get("identity_json") else None
-                ),
-                "declared_fresh": (
-                    (json.loads(row.get("identity_json") or "{}")).get("declared_fresh")
-                    if row.get("identity_json") else None
-                ),
+                "git_sha": identity.get("git_sha"),
+                "base_config_hash": identity.get("base_config_hash"),
+                "config_hash": identity.get("config_hash"),
+                "data_hash": identity.get("data_hash"),
+                "universe_hash": identity.get("universe_hash"),
+                "evaluation_count": identity.get("evaluation_count"),
+                "declared_fresh": identity.get("declared_fresh"),
                 "symbol": row.get("symbol"),
                 "authoritative_decision": authoritative.get("decision") if isinstance(authoritative, Mapping) else None,
                 "reject_reason": authoritative.get("reject_reason") if isinstance(authoritative, Mapping) else None,
