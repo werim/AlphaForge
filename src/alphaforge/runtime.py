@@ -3152,9 +3152,10 @@ class RuntimeOrchestrator:
 
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
         """Fail closed and durably diagnose an attached-campaign scope violation."""
-        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        campaign_id = self._campaign_id
         if not self._burnin_run_id or not campaign_id:
-            # Standalone Phase-7/diagnostic burn-in has no campaign scope contract.
+            # Only a successfully attached campaign owns an authoritative universe
+            # scope. Environment identity alone is evidence provenance, not attach proof.
             return
         normalized_symbol = str(symbol or "").upper()
         normalized_source = str(source_exchange or "").lower()
