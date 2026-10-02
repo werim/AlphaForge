@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 PORTFOLIO_REJECT_REASONS = {
     "MAX_OPEN_POSITIONS", "MAX_CONCURRENT_POSITIONS", "MAX_NOTIONAL_EXPOSURE",
@@ -57,6 +58,9 @@ class PortfolioRiskSnapshot:
     risk_flags: list[str] = field(default_factory=list)
     reject_reason: str = ""
     diagnostics_json: str = "{}"
+    symbol_notional_exposures: dict[str, float] = field(default_factory=dict)
+    correlation_group_exposures: dict[str, float] = field(default_factory=dict)
+    correlated_position_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -70,6 +74,64 @@ class PortfolioRiskDecision:
     size_multiplier: float = 1.0
     max_allowed_size: float | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+PORTFOLIO_ALLOCATOR_VERSION = "joint_portfolio_allocator_v1"
+PORTFOLIO_ALLOCATION_SCHEMA_VERSION = "portfolio_allocation_v1"
+PORTFOLIO_ALLOCATION_ACTIONS = frozenset(
+    {"APPROVE", "REDUCE_SIZE", "REJECT", "HOLD_CASH"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateAllocationDecision:
+    candidate_id: str
+    symbol: str
+    side: str
+    action: str
+    reason_codes: tuple[str, ...]
+    requested_notional: float | None
+    allocated_notional: float
+    requested_risk: float | None
+    allocated_risk: float | None
+    requested_quantity: float | None
+    allocated_quantity: float | None
+    correlation_group: str
+    correlation_contribution: float
+    concentration_contribution: float
+    candidate_inputs: dict[str, Any]
+    preference_components: dict[str, float | None]
+    hard_gate_accepted: bool
+    hard_gate_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["reason_codes"] = list(self.reason_codes)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioAllocationDecision:
+    allocation_cycle_id: str
+    timestamp: str
+    mode: str
+    action: str
+    candidate_set_hash: str
+    portfolio_snapshot_hash: str
+    config_hash: str
+    universe_hash: str
+    evidence_hash: str
+    git_sha: str
+    release_id: str
+    runtime_identity: str
+    allocator_version: str
+    schema_version: str
+    candidates: tuple[CandidateAllocationDecision, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["candidates"] = [candidate.to_dict() for candidate in self.candidates]
+        return payload
 
 
 def now_iso() -> str:
@@ -308,6 +370,9 @@ def snapshot_from_state(*, mode: str, symbol: str, side: str = "LONG", candidate
     cfgget = (lambda k, d=None: getattr(config, k, d)) if config is not None and not isinstance(config, Mapping) else (lambda k, d=None: (config or {}).get(k, d))
     positions = open_positions or {}
     total = 0.0; sym = 0.0; long = 0.0; short = 0.0; group_exp = 0.0; group_count = 0
+    symbol_exposures: dict[str, float] = {}
+    group_exposures: dict[str, float] = {}
+    group_counts: dict[str, int] = {}
     group = correlation_group_for_symbol(symbol, correlation_overrides)
     candidate_side = str(side or "LONG").upper()
     for psym, pdata in positions.items():
@@ -317,6 +382,14 @@ def snapshot_from_state(*, mode: str, symbol: str, side: str = "LONG", candidate
         else:
             notional = _num(pdata, None); pside = "LONG"
         if notional is None: continue
+        normalized_symbol = str(psym).upper()
+        position_group = correlation_group_for_symbol(psym, correlation_overrides)
+        symbol_exposures[normalized_symbol] = symbol_exposures.get(normalized_symbol, 0.0) + abs(notional)
+        correlation_sides = (pside,) if pside in {"LONG", "SHORT"} else ("LONG", "SHORT")
+        for correlation_side in correlation_sides:
+            correlation_key = f"{position_group}:{correlation_side}"
+            group_exposures[correlation_key] = group_exposures.get(correlation_key, 0.0) + abs(notional)
+            group_counts[correlation_key] = group_counts.get(correlation_key, 0) + 1
         total += abs(notional)
         if str(psym).upper() == str(symbol).upper(): sym += abs(notional)
         if pside == "SHORT": short += abs(notional)
@@ -341,7 +414,7 @@ def snapshot_from_state(*, mode: str, symbol: str, side: str = "LONG", candidate
         None if symbol_consecutive_loss_count is None or symbol_loss_limit is None
         else int(symbol_consecutive_loss_count) >= int(symbol_loss_limit)
     )
-    return PortfolioRiskSnapshot(mode=mode, timestamp=ts, equity=equity, available_balance=available_balance, open_position_count=len(positions), max_open_positions=cfgget("max_open_positions", cfgget("max_concurrent_positions")), concurrent_position_count=len(positions), max_concurrent_positions=cfgget("max_concurrent_positions"), total_notional_exposure=total, max_notional_exposure=cfgget("max_notional_exposure"), symbol_notional_exposure=sym, max_symbol_notional=cfgget("max_symbol_notional"), side_exposure_long=long, side_exposure_short=short, net_exposure=net, gross_exposure=gross, leverage_estimate=None if equity in (None, 0) else gross / float(equity), symbol_cooldown_remaining_sec=cooldown_remaining, trades_today_symbol=trades_today_symbol, trades_today_global=trades_today_global, daily_realized_pnl=daily_realized_pnl, daily_loss_pct=daily_loss_pct, max_daily_loss_pct=cfgget("max_daily_loss_pct"), rolling_peak_equity=rolling_peak_equity, rolling_drawdown_pct=rolling_drawdown_pct, max_rolling_drawdown_pct=cfgget("max_rolling_drawdown_pct"), consecutive_loss_count=consecutive_loss_count, symbol_consecutive_loss_count=symbol_consecutive_loss_count, loss_cluster_active=global_loss_active, symbol_loss_cluster_active=symbol_loss_active, risk_state_complete=risk_state_complete, risk_state_source=risk_state_source, risk_state_missing_fields=list(risk_state_missing_fields or []), correlation_group=group, correlation_group_exposure=group_exp, max_correlation_group_exposure=cfgget("max_correlation_group_exposure"), correlated_position_count=group_count, max_correlated_positions=cfgget("max_correlated_positions"), diagnostics_json=json.dumps({"candidate_notional": candidate_notional, "candidate_side": candidate_side, "correlation_direction": candidate_side, "risk_state_source": risk_state_source, "risk_state_complete": risk_state_complete, "risk_state_missing_fields": list(risk_state_missing_fields or [])}, sort_keys=True))
+    return PortfolioRiskSnapshot(mode=mode, timestamp=ts, equity=equity, available_balance=available_balance, open_position_count=len(positions), max_open_positions=cfgget("max_open_positions", cfgget("max_concurrent_positions")), concurrent_position_count=len(positions), max_concurrent_positions=cfgget("max_concurrent_positions"), total_notional_exposure=total, max_notional_exposure=cfgget("max_notional_exposure"), symbol_notional_exposure=sym, max_symbol_notional=cfgget("max_symbol_notional"), side_exposure_long=long, side_exposure_short=short, net_exposure=net, gross_exposure=gross, leverage_estimate=None if equity in (None, 0) else gross / float(equity), symbol_cooldown_remaining_sec=cooldown_remaining, trades_today_symbol=trades_today_symbol, trades_today_global=trades_today_global, daily_realized_pnl=daily_realized_pnl, daily_loss_pct=daily_loss_pct, max_daily_loss_pct=cfgget("max_daily_loss_pct"), rolling_peak_equity=rolling_peak_equity, rolling_drawdown_pct=rolling_drawdown_pct, max_rolling_drawdown_pct=cfgget("max_rolling_drawdown_pct"), consecutive_loss_count=consecutive_loss_count, symbol_consecutive_loss_count=symbol_consecutive_loss_count, loss_cluster_active=global_loss_active, symbol_loss_cluster_active=symbol_loss_active, risk_state_complete=risk_state_complete, risk_state_source=risk_state_source, risk_state_missing_fields=list(risk_state_missing_fields or []), correlation_group=group, correlation_group_exposure=group_exp, max_correlation_group_exposure=cfgget("max_correlation_group_exposure"), correlated_position_count=group_count, max_correlated_positions=cfgget("max_correlated_positions"), diagnostics_json=json.dumps({"candidate_notional": candidate_notional, "candidate_side": candidate_side, "correlation_direction": candidate_side, "risk_state_source": risk_state_source, "risk_state_complete": risk_state_complete, "risk_state_missing_fields": list(risk_state_missing_fields or [])}, sort_keys=True), symbol_notional_exposures=symbol_exposures, correlation_group_exposures=group_exposures, correlated_position_counts=group_counts)
 
 
 def evaluate_portfolio_risk(candidate: Mapping[str, Any] | Any, portfolio_snapshot: PortfolioRiskSnapshot, config: Mapping[str, Any] | Any | None = None, mode: str = "PAPER") -> PortfolioRiskDecision:
@@ -399,6 +472,571 @@ def evaluate_portfolio_risk(candidate: Mapping[str, Any] | Any, portfolio_snapsh
     if portfolio_snapshot.symbol_loss_cluster_active or portfolio_snapshot.loss_cluster_active:
         return fail("LOSS_CLUSTER_ACTIVE")
     return PortfolioRiskDecision(True, "", [], "ACCEPTED", 1.0, notional, diagnostics)
+
+
+_REDUCIBLE_CAPACITY_REASONS = frozenset({
+    "MAX_NOTIONAL_EXPOSURE",
+    "MAX_SYMBOL_NOTIONAL_EXPOSURE",
+    "CORRELATION_OVEREXPOSURE",
+    "SAME_SIDE_OVEREXPOSURE",
+    "NET_EXPOSURE_TOO_HIGH",
+})
+_ALLOCATION_CONFIG_KEYS = (
+    "max_open_positions",
+    "max_concurrent_positions",
+    "max_notional_exposure",
+    "max_symbol_notional",
+    "max_same_side_exposure",
+    "max_net_exposure",
+    "max_correlation_group_exposure",
+    "max_correlated_positions",
+    "max_daily_loss_pct",
+    "max_rolling_drawdown_pct",
+    "max_daily_symbol_trades",
+    "max_symbol_trades_per_day",
+    "max_trades_symbol_per_day",
+    "max_daily_global_trades",
+    "max_global_trades_per_day",
+    "max_trades_global_per_day",
+    "reject_unknown_portfolio_risk",
+    "portfolio_risk_diagnostic_fail_open",
+)
+
+
+def _allocation_json_safe(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _allocation_json_safe(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (set, frozenset)):
+        return [_allocation_json_safe(item) for item in sorted(value, key=str)]
+    if isinstance(value, (list, tuple)):
+        return [_allocation_json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return "INVALID_NON_FINITE"
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _allocation_hash(value: Any) -> str:
+    encoded = json.dumps(
+        _allocation_json_safe(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _config_get(config: Mapping[str, Any] | Any | None, key: str, default: Any = None) -> Any:
+    if isinstance(config, Mapping):
+        return config.get(key, default)
+    return getattr(config, key, default) if config is not None else default
+
+
+def _candidate_mapping(candidate: Mapping[str, Any] | Any) -> dict[str, Any]:
+    if isinstance(candidate, Mapping):
+        return dict(candidate)
+    try:
+        return asdict(candidate)
+    except (TypeError, ValueError):
+        return dict(getattr(candidate, "__dict__", {}))
+
+
+def _first_number(candidate: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if key in candidate and candidate.get(key) is not None:
+            return _num(candidate.get(key), None)
+    return None
+
+
+def _normalized_allocation_candidate(candidate: Mapping[str, Any] | Any) -> dict[str, Any]:
+    raw = _candidate_mapping(candidate)
+    symbol = str(raw.get("symbol") or "").strip().upper()
+    side = str(raw.get("side") or "LONG").strip().upper()
+    requested_quantity = _first_number(raw, "requested_quantity", "quantity", "qty")
+    entry = _first_number(raw, "entry", "entry_price", "price")
+    requested_notional = _first_number(
+        raw,
+        "requested_notional",
+        "notional",
+        "notional_usdt",
+        "order_notional",
+        "effective_notional",
+    )
+    if requested_notional is None and requested_quantity is not None and entry is not None:
+        requested_notional = abs(requested_quantity * entry)
+    candidate_id = str(
+        raw.get("candidate_id")
+        or raw.get("signal_id")
+        or f"{symbol}:{side}"
+    )
+    correlation_group = str(
+        raw.get("correlation_group") or correlation_group_for_symbol(symbol)
+    )
+    preference_components = {
+        "expected_net_r": _first_number(
+            raw, "expected_net_r", "expected_net_R", "expectancy_after_costs"
+        ),
+        "effective_rr": _first_number(raw, "effective_rr", "expected_effective_r"),
+        "score": _first_number(raw, "score", "decision_score", "symbol_score"),
+        "execution_quality": _first_number(
+            raw, "execution_quality", "liquidity_score"
+        ),
+    }
+    return {
+        "raw": raw,
+        "candidate_inputs": _allocation_json_safe(raw),
+        "candidate_id": candidate_id,
+        "symbol": symbol,
+        "side": side,
+        "entry": entry,
+        "requested_quantity": requested_quantity,
+        "requested_notional": requested_notional,
+        "requested_risk": _first_number(
+            raw, "requested_risk", "risk_at_stop_usdt", "risk_at_stop"
+        ),
+        "correlation_group": correlation_group,
+        "preference_components": preference_components,
+    }
+
+
+def _preference_sort_key(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
+    components = candidate["preference_components"]
+    values = tuple(
+        -float(components[key]) if components[key] is not None else math.inf
+        for key in ("expected_net_r", "effective_rr", "score", "execution_quality")
+    )
+    return (*values, candidate["candidate_id"], candidate["symbol"], candidate["side"])
+
+
+def _candidate_snapshot(
+    base: PortfolioRiskSnapshot,
+    candidate: Mapping[str, Any],
+    *,
+    total_exposure: float,
+    symbol_exposures: Mapping[str, float],
+    side_long: float,
+    side_short: float,
+    net_exposure: float,
+    allocated_positions: int,
+    group_exposures: Mapping[str, float],
+    group_counts: Mapping[str, int],
+) -> PortfolioRiskSnapshot:
+    raw = candidate["raw"]
+    symbol = candidate["symbol"]
+    side = candidate["side"]
+    group = candidate["correlation_group"]
+    group_key = f"{group}:{side}"
+    overrides: dict[str, Any] = {}
+    for field_name in (
+        "symbol_cooldown_remaining_sec",
+        "trades_today_symbol",
+        "symbol_consecutive_loss_count",
+        "symbol_loss_cluster_active",
+        "risk_state_complete",
+        "risk_state_source",
+    ):
+        if raw.get(field_name) is not None:
+            overrides[field_name] = raw[field_name]
+    return replace(
+        base,
+        mode=str(base.mode),
+        open_position_count=(
+            None if base.open_position_count is None
+            else int(base.open_position_count) + allocated_positions
+        ),
+        concurrent_position_count=(
+            None if base.concurrent_position_count is None
+            else int(base.concurrent_position_count) + allocated_positions
+        ),
+        total_notional_exposure=total_exposure,
+        gross_exposure=side_long + side_short,
+        symbol_notional_exposure=float(symbol_exposures.get(symbol, 0.0)),
+        side_exposure_long=side_long,
+        side_exposure_short=side_short,
+        net_exposure=net_exposure,
+        correlation_group=group,
+        correlation_group_exposure=float(group_exposures.get(group_key, 0.0)),
+        correlated_position_count=int(group_counts.get(group_key, 0)),
+        **overrides,
+    )
+
+
+def allocate_portfolio_candidates(
+    candidates: Sequence[Mapping[str, Any] | Any],
+    portfolio_snapshot: PortfolioRiskSnapshot,
+    config: Mapping[str, Any] | Any | None,
+    *,
+    mode: str,
+) -> PortfolioAllocationDecision:
+    """Allocate a simultaneous candidate set against one immutable snapshot.
+
+    The greedy pass is deterministic because preference and identity tie-breaks
+    are explicit.  It only simulates already allocated exposure; the supplied
+    snapshot and real portfolio are never mutated.
+    """
+    normalized = [_normalized_allocation_candidate(item) for item in candidates]
+    identities = [item["candidate_id"] for item in normalized]
+    if len(set(identities)) != len(identities):
+        raise ValueError("DUPLICATE_ALLOCATION_CANDIDATE_ID")
+    ordered = sorted(normalized, key=_preference_sort_key)
+
+    candidate_identity_payload = [
+        {
+            "candidate_id": item["candidate_id"],
+            "candidate_inputs": item["candidate_inputs"],
+            "normalized": {
+                key: item[key]
+                for key in (
+                    "symbol", "side", "entry", "requested_quantity",
+                    "requested_notional", "requested_risk", "correlation_group",
+                    "preference_components",
+                )
+            },
+        }
+        for item in sorted(normalized, key=lambda row: row["candidate_id"])
+    ]
+    candidate_set_hash = _allocation_hash(candidate_identity_payload)
+    snapshot_payload = portfolio_snapshot.to_dict()
+    portfolio_snapshot_hash = _allocation_hash(snapshot_payload)
+    config_payload = {
+        key: _config_get(config, key)
+        for key in _ALLOCATION_CONFIG_KEYS
+        if _config_get(config, key) is not None
+    }
+    config_hash = _allocation_hash(config_payload)
+    universe_hash = str(
+        _config_get(config, "universe_hash")
+        or _allocation_hash(sorted(item["symbol"] for item in normalized))
+    )
+
+    total_exposure = float(portfolio_snapshot.total_notional_exposure or 0.0)
+    side_long = float(portfolio_snapshot.side_exposure_long or 0.0)
+    side_short = float(portfolio_snapshot.side_exposure_short or 0.0)
+    net_exposure = float(portfolio_snapshot.net_exposure or 0.0)
+    symbol_exposures = {
+        str(key).upper(): float(value)
+        for key, value in portfolio_snapshot.symbol_notional_exposures.items()
+    }
+    group_exposures = {
+        str(key): float(value)
+        for key, value in portfolio_snapshot.correlation_group_exposures.items()
+    }
+    group_counts = {
+        str(key): int(value)
+        for key, value in portfolio_snapshot.correlated_position_counts.items()
+    }
+    if not symbol_exposures and portfolio_snapshot.symbol_notional_exposure:
+        # Legacy snapshots do not identify which symbol the scalar belongs to.
+        # Applying it conservatively to every candidate cannot create capacity.
+        for item in normalized:
+            symbol_exposures[item["symbol"]] = float(
+                portfolio_snapshot.symbol_notional_exposure
+            )
+    if not group_exposures and portfolio_snapshot.correlation_group:
+        for side in {item["side"] for item in normalized}:
+            key = f"{portfolio_snapshot.correlation_group}:{side}"
+            group_exposures[key] = float(
+                portfolio_snapshot.correlation_group_exposure or 0.0
+            )
+            group_counts[key] = int(portfolio_snapshot.correlated_position_count or 0)
+
+    decisions: list[CandidateAllocationDecision] = []
+    allocated_positions = 0
+    for item in ordered:
+        raw = item["raw"]
+        requested = item["requested_notional"]
+        requested_risk = item["requested_risk"]
+        requested_quantity = item["requested_quantity"]
+        group_key = f"{item['correlation_group']}:{item['side']}"
+        simulated = _candidate_snapshot(
+            portfolio_snapshot,
+            item,
+            total_exposure=total_exposure,
+            symbol_exposures=symbol_exposures,
+            side_long=side_long,
+            side_short=side_short,
+            net_exposure=net_exposure,
+            allocated_positions=allocated_positions,
+            group_exposures=group_exposures,
+            group_counts=group_counts,
+        )
+        hard = evaluate_portfolio_risk(
+            {
+                "symbol": item["symbol"],
+                "side": item["side"],
+                "entry": item["entry"],
+                "quantity": requested_quantity,
+                "notional": requested,
+            },
+            simulated,
+            config,
+            mode=mode,
+        )
+        explicit_hard_reason = str(raw.get("hard_gate_reason") or "")
+        explicit_hard_failure = raw.get("hard_gate_accepted") is False or bool(
+            explicit_hard_reason
+        )
+        non_capacity_failure = (
+            explicit_hard_failure
+            or (
+                not hard.accepted
+                and hard.reject_reason not in _REDUCIBLE_CAPACITY_REASONS
+            )
+        )
+        reasons: list[str] = []
+        allocated = 0.0
+        if non_capacity_failure:
+            reasons.append(explicit_hard_reason or hard.reject_reason or "HARD_GATE_REJECTED")
+        elif requested is None or requested <= 0 or not math.isfinite(requested):
+            reasons.append("INVALID_POSITION_SIZE")
+        else:
+            capacity = float(requested)
+            open_limit = simulated.max_open_positions
+            concurrent_limit = simulated.max_concurrent_positions
+            if open_limit is not None and simulated.open_position_count is not None:
+                if int(simulated.open_position_count) >= int(open_limit):
+                    capacity = 0.0
+                    reasons.append("MAX_OPEN_POSITIONS")
+            if concurrent_limit is not None and simulated.concurrent_position_count is not None:
+                if int(simulated.concurrent_position_count) >= int(concurrent_limit):
+                    capacity = 0.0
+                    reasons.append("MAX_CONCURRENT_POSITIONS")
+            if simulated.max_correlated_positions is not None:
+                if int(group_counts.get(group_key, 0)) >= int(simulated.max_correlated_positions):
+                    capacity = 0.0
+                    reasons.append("CORRELATION_OVEREXPOSURE")
+
+            caps = (
+                (
+                    simulated.max_notional_exposure,
+                    total_exposure,
+                    "MAX_NOTIONAL_EXPOSURE",
+                ),
+                (
+                    simulated.max_symbol_notional,
+                    float(symbol_exposures.get(item["symbol"], 0.0)),
+                    "MAX_SYMBOL_NOTIONAL_EXPOSURE",
+                ),
+                (
+                    simulated.max_correlation_group_exposure,
+                    float(group_exposures.get(group_key, 0.0)),
+                    "CORRELATION_OVEREXPOSURE",
+                ),
+            )
+            for limit, current, reason in caps:
+                if limit is not None:
+                    remaining = max(0.0, float(limit) - float(current))
+                    if remaining < capacity:
+                        capacity = remaining
+                        reasons.append(reason)
+
+            same_side_limit = _config_get(config, "max_same_side_exposure")
+            if same_side_limit is not None:
+                current_side = side_short if item["side"] == "SHORT" else side_long
+                remaining = max(0.0, float(same_side_limit) - current_side)
+                if remaining < capacity:
+                    capacity = remaining
+                    reasons.append("SAME_SIDE_OVEREXPOSURE")
+            net_limit = _config_get(config, "max_net_exposure")
+            if net_limit is not None:
+                remaining = (
+                    float(net_limit) + net_exposure
+                    if item["side"] == "SHORT"
+                    else float(net_limit) - net_exposure
+                )
+                remaining = max(0.0, remaining)
+                if remaining < capacity:
+                    capacity = remaining
+                    reasons.append("NET_EXPOSURE_TOO_HIGH")
+
+            allocated = max(0.0, min(float(requested), capacity))
+            if allocated > 0:
+                final_snapshot = _candidate_snapshot(
+                    portfolio_snapshot,
+                    item,
+                    total_exposure=total_exposure,
+                    symbol_exposures=symbol_exposures,
+                    side_long=side_long,
+                    side_short=side_short,
+                    net_exposure=net_exposure,
+                    allocated_positions=allocated_positions,
+                    group_exposures=group_exposures,
+                    group_counts=group_counts,
+                )
+                final_gate = evaluate_portfolio_risk(
+                    {
+                        "symbol": item["symbol"],
+                        "side": item["side"],
+                        "entry": item["entry"],
+                        "notional": allocated,
+                    },
+                    final_snapshot,
+                    config,
+                    mode=mode,
+                )
+                if not final_gate.accepted:
+                    allocated = 0.0
+                    reasons.append(final_gate.reject_reason or "HARD_GATE_REJECTED")
+
+        if allocated <= 0:
+            action = "REJECT"
+            allocated = 0.0
+            if not reasons:
+                reasons.append("NO_PORTFOLIO_CAPACITY")
+        elif allocated + 1e-12 < float(requested):
+            action = "REDUCE_SIZE"
+        else:
+            action = "APPROVE"
+            reasons = []
+
+        scale = 0.0 if not requested or requested <= 0 else allocated / float(requested)
+        allocated_quantity = (
+            None if requested_quantity is None else requested_quantity * scale
+        )
+        allocated_risk = None if requested_risk is None else requested_risk * scale
+        decision = CandidateAllocationDecision(
+            candidate_id=item["candidate_id"],
+            symbol=item["symbol"],
+            side=item["side"],
+            action=action,
+            reason_codes=tuple(dict.fromkeys(reasons)),
+            requested_notional=requested,
+            allocated_notional=allocated,
+            requested_risk=requested_risk,
+            allocated_risk=allocated_risk,
+            requested_quantity=requested_quantity,
+            allocated_quantity=allocated_quantity,
+            correlation_group=item["correlation_group"],
+            correlation_contribution=allocated,
+            concentration_contribution=(
+                0.0
+                if portfolio_snapshot.equity in (None, 0)
+                else allocated / float(portfolio_snapshot.equity)
+            ),
+            candidate_inputs=dict(item["candidate_inputs"]),
+            preference_components=dict(item["preference_components"]),
+            hard_gate_accepted=bool(hard.accepted),
+            hard_gate_reason=str(explicit_hard_reason or hard.reject_reason or ""),
+        )
+        decisions.append(decision)
+        if allocated > 0:
+            allocated_positions += 1
+            total_exposure += allocated
+            symbol_exposures[item["symbol"]] = (
+                float(symbol_exposures.get(item["symbol"], 0.0)) + allocated
+            )
+            group_exposures[group_key] = float(group_exposures.get(group_key, 0.0)) + allocated
+            group_counts[group_key] = int(group_counts.get(group_key, 0)) + 1
+            if item["side"] == "SHORT":
+                side_short += allocated
+                net_exposure -= allocated
+            else:
+                side_long += allocated
+                net_exposure += allocated
+
+    if not any(item.allocated_notional > 0 for item in decisions):
+        overall_action = "HOLD_CASH"
+    elif all(item.action == "APPROVE" for item in decisions):
+        overall_action = "APPROVE"
+    else:
+        overall_action = "REDUCE_SIZE"
+
+    identity_payload = {
+        "mode": str(mode).upper(),
+        "candidate_set_hash": candidate_set_hash,
+        "portfolio_snapshot_hash": portfolio_snapshot_hash,
+        "config_hash": config_hash,
+        "universe_hash": universe_hash,
+        "allocator_version": PORTFOLIO_ALLOCATOR_VERSION,
+    }
+    cycle_id = str(
+        _config_get(config, "allocation_cycle_id")
+        or "palloc_" + _allocation_hash(identity_payload)[:24]
+    )
+    timestamp = str(portfolio_snapshot.timestamp)
+    core = {
+        **identity_payload,
+        "allocation_cycle_id": cycle_id,
+        "timestamp": timestamp,
+        "action": overall_action,
+        "git_sha": str(
+            _config_get(config, "git_sha", _config_get(config, "git_commit", "UNKNOWN_GIT_COMMIT"))
+        ),
+        "release_id": str(_config_get(config, "release_id", "UNKNOWN_RELEASE")),
+        "runtime_identity": str(
+            _config_get(config, "runtime_identity", _config_get(config, "runtime_instance_id", "UNKNOWN_RUNTIME"))
+        ),
+        "schema_version": PORTFOLIO_ALLOCATION_SCHEMA_VERSION,
+        "candidates": [item.to_dict() for item in decisions],
+    }
+    return PortfolioAllocationDecision(
+        allocation_cycle_id=cycle_id,
+        timestamp=timestamp,
+        mode=str(mode).upper(),
+        action=overall_action,
+        candidate_set_hash=candidate_set_hash,
+        portfolio_snapshot_hash=portfolio_snapshot_hash,
+        config_hash=config_hash,
+        universe_hash=universe_hash,
+        evidence_hash=_allocation_hash(core),
+        git_sha=core["git_sha"],
+        release_id=core["release_id"],
+        runtime_identity=core["runtime_identity"],
+        allocator_version=PORTFOLIO_ALLOCATOR_VERSION,
+        schema_version=PORTFOLIO_ALLOCATION_SCHEMA_VERSION,
+        candidates=tuple(decisions),
+    )
+
+
+def apply_candidate_allocation(
+    candidate: Mapping[str, Any],
+    allocation: CandidateAllocationDecision,
+) -> dict[str, Any]:
+    """Project an allocator decision into the values consumed by sizing/order code."""
+    projected = dict(candidate)
+    projected["portfolio_allocation"] = allocation.to_dict()
+    projected["allocation_action"] = allocation.action
+    if allocation.action in {"APPROVE", "REDUCE_SIZE"}:
+        current_notional = _first_number(
+            projected,
+            "notional",
+            "notional_usdt",
+            "order_notional",
+            "effective_notional",
+        )
+        downstream_notional = (
+            allocation.allocated_notional
+            if current_notional is None
+            else min(current_notional, allocation.allocated_notional)
+        )
+        downstream_scale = (
+            0.0
+            if allocation.allocated_notional <= 0
+            else downstream_notional / allocation.allocated_notional
+        )
+        projected["allocated_notional"] = downstream_notional
+        projected["allocated_risk"] = (
+            None
+            if allocation.allocated_risk is None
+            else allocation.allocated_risk * downstream_scale
+        )
+        for key in ("notional", "notional_usdt", "order_notional", "effective_notional"):
+            if key in projected or key == "notional":
+                projected[key] = downstream_notional
+        if allocation.allocated_quantity is not None:
+            downstream_quantity = allocation.allocated_quantity * downstream_scale
+            projected["quantity"] = downstream_quantity
+            projected["qty"] = downstream_quantity
+            if "effective_quantity" in projected:
+                projected["effective_quantity"] = downstream_quantity
+    else:
+        projected["allocated_notional"] = 0.0
+        projected["allocated_risk"] = 0.0
+    return projected
 
 
 @dataclass(slots=True)

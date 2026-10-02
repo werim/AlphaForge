@@ -76,6 +76,7 @@ from alphaforge.symbol_selector import (
     select_symbols,  # compatibility surface for external test/runtime adapters
 )
 from alphaforge.universe_evidence import persist_universe_selection
+from alphaforge.portfolio_allocation_evidence import persist_portfolio_allocation
 from alphaforge.persistence import (
     fetch_expectancy_stat_detail,
     init_db,
@@ -89,7 +90,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
-from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
+from alphaforge.portfolio_risk import allocate_portfolio_candidates, evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
     normalize_mtf_execution_confirmation_mode, runtime_filter_config)
@@ -1466,6 +1467,10 @@ class RuntimeOrchestrator:
                     "risk_scale", "sizing_status", "sizing_reason",
                     "original_notional", "effective_notional",
                     "original_quantity", "effective_quantity", "target_policy",
+                    "portfolio_allocation_cycle_id",
+                    "allocation_action", "allocation_scale",
+                    "allocation_requested_notional", "allocated_notional",
+                    "allocated_risk",
                     "min_signal_score", "min_raw_rr", "min_effective_rr",
                     "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
@@ -1540,6 +1545,16 @@ class RuntimeOrchestrator:
                     "stop_distance_basis": payload.get("stop_distance_basis"),
                     "stop_risk_evidence_status": payload.get("stop_risk_evidence_status"),
                     "risk_scale": payload.get("risk_scale"),
+                    "portfolio_allocation_cycle_id": payload.get(
+                        "portfolio_allocation_cycle_id"
+                    ),
+                    "allocation_action": payload.get("allocation_action"),
+                    "allocation_scale": payload.get("allocation_scale"),
+                    "allocation_requested_notional": payload.get(
+                        "allocation_requested_notional"
+                    ),
+                    "allocated_notional": payload.get("allocated_notional"),
+                    "allocated_risk": payload.get("allocated_risk"),
                     "stop_too_wide_softened": payload.get("stop_too_wide_softened"),
                     "reject_execution_basis": payload.get("reject_execution_basis"),
                     "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
@@ -2899,6 +2914,14 @@ class RuntimeOrchestrator:
                 ):
                     raise RuntimeError("selected_candidate_enricher changed candidate identity")
                 row.diagnostics["inputs"] = dict(after)
+
+        if selected and self.config.execution_mode in {
+            ExecutionMode.BACKTEST,
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        }:
+            if not self._allocate_selected_candidates(selected, universe_selection):
+                return
         self.metrics.last_scan_ts = canonical_utc_timestamp()
 
         for symbol_result in selected:
@@ -2926,6 +2949,176 @@ class RuntimeOrchestrator:
             await self._process_symbol(symbol_result)
             if candle_key is not None and candle_ts is not None:
                 self._latest_execution_candle_by_market[candle_key] = candle_ts
+
+    def _allocate_selected_candidates(
+        self,
+        selected: list[SymbolSelectionResult],
+        universe_selection: Any,
+    ) -> bool:
+        """Jointly allocate one selected scan set before any portfolio mutation."""
+        allocation_now = float(universe_selection.decision_timestamp)
+        historical_by_symbol: dict[str, dict[str, Any]] = {}
+        attached_campaign = bool(
+            self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        )
+        if self.config.execution_mode is ExecutionMode.PAPER and attached_campaign:
+            for row in selected:
+                historical_by_symbol[row.symbol] = self._paper_portfolio_risk_state(
+                    row.symbol, now_ts=allocation_now
+                )
+
+        first = selected[0]
+        first_inputs = dict(first.diagnostics.get("inputs", {}))
+        first_history = historical_by_symbol.get(first.symbol, {})
+        equity = first_inputs.get("equity", first_inputs.get("available_balance"))
+        available_balance = first_inputs.get("available_balance", equity)
+        if first_history.get("risk_state_source") == "BURNIN_CAMPAIGN_EVIDENCE":
+            equity = first_history.get("equity")
+            available_balance = first_history.get("available_balance")
+        elif equity is None and self.config.execution_mode is ExecutionMode.PAPER:
+            equity = self.config.paper_initial_equity
+            available_balance = self.config.paper_initial_equity
+
+        snapshot = snapshot_from_state(
+            mode=self.config.execution_mode.value,
+            symbol=first.symbol,
+            side=str(first_inputs.get("side") or "LONG"),
+            equity=equity,
+            available_balance=available_balance,
+            open_positions={
+                symbol: {
+                    "notional": notional,
+                    "side": self._active_position_sides.get(symbol, "UNKNOWN"),
+                }
+                for symbol, notional in self._active_positions.items()
+            },
+            config=self.config,
+            now=allocation_now,
+            cooldown_until=self._symbol_cooldown_until,
+            daily_realized_pnl=first_history.get("daily_realized_pnl"),
+            trades_today_symbol=first_history.get("trades_today_symbol"),
+            trades_today_global=first_history.get("trades_today_global"),
+            consecutive_loss_count=first_history.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=first_history.get(
+                "symbol_consecutive_loss_count"
+            ),
+            rolling_peak_equity=first_history.get("rolling_peak_equity"),
+            rolling_drawdown_pct=first_history.get("rolling_drawdown_pct"),
+            risk_state_complete=first_history.get("risk_state_complete"),
+            risk_state_source=first_history.get("risk_state_source"),
+            risk_state_missing_fields=list(
+                first_history.get("risk_state_missing_fields") or []
+            ),
+        )
+        snapshot.timestamp = datetime.fromtimestamp(
+            allocation_now, tz=timezone.utc
+        ).isoformat()
+
+        allocation_candidates: list[dict[str, Any]] = []
+        for row in selected:
+            inputs = dict(row.diagnostics.get("inputs", {}))
+            requested_notional = next(
+                (
+                    inputs.get(key)
+                    for key in ("notional", "notional_usdt", "order_notional")
+                    if inputs.get(key) is not None
+                ),
+                None,
+            )
+            if requested_notional is None and self.config.execution_mode is ExecutionMode.PAPER:
+                requested_notional = self.config.paper_candidate_notional
+            if requested_notional is None:
+                requested_notional = min(
+                    float(self.config.max_symbol_notional or 0.0),
+                    float(self.config.max_notional_exposure or 0.0),
+                ) * 0.1
+            history = historical_by_symbol.get(row.symbol, {})
+            symbol_loss_count = history.get("symbol_consecutive_loss_count")
+            symbol_loss_active = (
+                None
+                if symbol_loss_count is None
+                else int(symbol_loss_count) >= int(self.config.symbol_loss_streak_limit)
+            )
+            cooldown_until = max(
+                float(self._symbol_cooldown_until.get(row.symbol, 0.0) or 0.0),
+                float(history.get("persisted_cooldown_until") or 0.0),
+            )
+            try:
+                entry = float(inputs.get("entry"))
+                stop = float(inputs.get("sl", inputs.get("stop")))
+                requested_risk = float(requested_notional) * abs(entry - stop) / entry
+            except (TypeError, ValueError, ZeroDivisionError):
+                requested_risk = None
+            allocation_candidates.append({
+                **inputs,
+                "candidate_id": f"{universe_selection.cycle_id}:{row.symbol}",
+                "symbol": row.symbol,
+                "notional": requested_notional,
+                "requested_risk": requested_risk,
+                "score": inputs.get("score", row.symbol_score),
+                "symbol_cooldown_remaining_sec": max(0.0, cooldown_until - allocation_now),
+                "trades_today_symbol": history.get("trades_today_symbol"),
+                "symbol_consecutive_loss_count": history.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                "symbol_loss_cluster_active": symbol_loss_active,
+                "risk_state_complete": history.get("risk_state_complete"),
+                "risk_state_source": history.get("risk_state_source"),
+            })
+
+        allocation_config = {
+            **{
+                name: getattr(self.config, name)
+                for name in self.config.__dataclass_fields__
+            },
+            "allocation_cycle_id": f"palloc:{universe_selection.cycle_id}",
+            "universe_hash": universe_selection.universe_hash,
+            "git_sha": self._git_commit(),
+            "release_id": os.getenv(
+                "ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id
+            ),
+            "runtime_identity": self.runtime_instance_id,
+        }
+        allocation = allocate_portfolio_candidates(
+            allocation_candidates,
+            snapshot,
+            allocation_config,
+            mode=self.config.execution_mode.value,
+        )
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            if self._universe_evidence_engine is None:
+                self._universe_evidence_engine = init_db("sqlite+pysqlite:///:memory:")
+            engine = self._universe_evidence_engine
+        try:
+            run_sqlite_write_with_retry(
+                engine,
+                lambda conn: persist_portfolio_allocation(conn, allocation),
+                operation_name="portfolio_allocation_cycle",
+            )
+        except Exception as exc:  # noqa: BLE001 - missing authority fails closed
+            logger.exception(
+                "portfolio_allocation_persistence_failed cycle_id=%s",
+                allocation.allocation_cycle_id,
+            )
+            self._last_scan_gate_blockers = [
+                "PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED"
+            ]
+            self._fail_closed_reason = (
+                "PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED"
+            )
+            self._last_error = str(exc)
+            return False
+
+        by_id = {candidate.candidate_id: candidate for candidate in allocation.candidates}
+        for row in selected:
+            inputs = dict(row.diagnostics.get("inputs", {}))
+            candidate_id = f"{universe_selection.cycle_id}:{row.symbol}"
+            candidate_allocation = by_id[candidate_id]
+            inputs["portfolio_allocation_cycle_id"] = allocation.allocation_cycle_id
+            inputs["portfolio_allocation"] = candidate_allocation.to_dict()
+            row.diagnostics["inputs"] = inputs
+        return True
 
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
         """Fail closed and durably diagnose an attached-campaign scope violation."""
@@ -4010,6 +4203,108 @@ class RuntimeOrchestrator:
             )
             return
 
+        allocation_evidence = market_ctx.get("portfolio_allocation")
+        if isinstance(allocation_evidence, Mapping):
+            allocation_action = str(
+                allocation_evidence.get("action") or "REJECT"
+            ).upper()
+            allocation_reasons = list(
+                allocation_evidence.get("reason_codes") or []
+            )
+            if allocation_action not in {"APPROVE", "REDUCE_SIZE"}:
+                reject_reason = str(
+                    allocation_reasons[0]
+                    if allocation_reasons
+                    else "NO_PORTFOLIO_CAPACITY"
+                )
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": allocation_reasons or [reject_reason],
+                    "confidence": order_plan.confidence,
+                    "score": getattr(score_ctx, "total_score", None),
+                    "rr": signal_payload.get("risk_reward"),
+                    "effective_rr": effective_rr,
+                    "explanation": "joint_portfolio_allocation_gate",
+                    "execution_ctx": execution_ctx,
+                    "portfolio_allocation_cycle_id": market_ctx.get(
+                        "portfolio_allocation_cycle_id"
+                    ),
+                    "portfolio_allocation": dict(allocation_evidence),
+                    "allocated_notional": 0.0,
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
+                )
+                return
+            try:
+                allocated_cap = float(allocation_evidence.get("allocated_notional"))
+            except (TypeError, ValueError):
+                allocated_cap = None
+            if allocated_cap is None or allocated_cap <= 0:
+                reject_reason = "PORTFOLIO_ALLOCATION_INVALID"
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": [reject_reason],
+                    "confidence": order_plan.confidence,
+                    "score": getattr(score_ctx, "total_score", None),
+                    "rr": signal_payload.get("risk_reward"),
+                    "effective_rr": effective_rr,
+                    "explanation": "joint_portfolio_allocation_invalid",
+                    "execution_ctx": execution_ctx,
+                    "portfolio_allocation": dict(allocation_evidence),
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
+                )
+                return
+            pre_allocation_notional = float(sizing_projection["effective_notional"])
+            downstream_notional = min(pre_allocation_notional, float(allocated_cap))
+            allocation_scale = downstream_notional / pre_allocation_notional
+            allocated_risk = allocation_evidence.get("allocated_risk")
+            if allocated_risk is not None:
+                try:
+                    allocated_risk = float(allocated_risk) * (
+                        downstream_notional / float(allocated_cap)
+                    )
+                except (TypeError, ValueError, ZeroDivisionError):
+                    allocated_risk = None
+            sizing_projection["effective_notional"] = downstream_notional
+            if sizing_projection.get("effective_quantity") is not None:
+                sizing_projection["effective_quantity"] = (
+                    float(sizing_projection["effective_quantity"]) * allocation_scale
+                )
+            market_ctx.update({
+                "allocation_action": allocation_action,
+                "allocation_scale": allocation_scale,
+                "allocation_requested_notional": allocation_evidence.get(
+                    "requested_notional"
+                ),
+                "allocated_notional": downstream_notional,
+                "allocated_risk": allocated_risk,
+                "effective_notional": downstream_notional,
+                "effective_quantity": sizing_projection.get("effective_quantity"),
+            })
+
         candidate_notional = float(sizing_projection["effective_notional"])
         market_ctx["notional"] = candidate_notional
         for alias in ("notional_usdt", "order_notional"):
@@ -4115,6 +4410,16 @@ class RuntimeOrchestrator:
             "portfolio_risk_state": portfolio_decision.risk_state,
             "portfolio_diagnostics": portfolio_decision.diagnostics,
             "risk_flags": portfolio_decision.risk_flags,
+            "portfolio_allocation_cycle_id": market_ctx.get(
+                "portfolio_allocation_cycle_id"
+            ),
+            "allocation_action": market_ctx.get("allocation_action"),
+            "allocation_scale": market_ctx.get("allocation_scale"),
+            "allocation_requested_notional": market_ctx.get(
+                "allocation_requested_notional"
+            ),
+            "allocated_notional": market_ctx.get("allocated_notional"),
+            "allocated_risk": market_ctx.get("allocated_risk"),
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),
@@ -4678,6 +4983,16 @@ class RuntimeOrchestrator:
             "effective_notional": market_ctx.get("effective_notional"),
             "original_quantity": market_ctx.get("original_quantity"),
             "effective_quantity": market_ctx.get("effective_quantity"),
+            "portfolio_allocation_cycle_id": market_ctx.get(
+                "portfolio_allocation_cycle_id"
+            ),
+            "allocation_action": market_ctx.get("allocation_action"),
+            "allocation_scale": market_ctx.get("allocation_scale"),
+            "allocation_requested_notional": market_ctx.get(
+                "allocation_requested_notional"
+            ),
+            "allocated_notional": market_ctx.get("allocated_notional"),
+            "allocated_risk": market_ctx.get("allocated_risk"),
             "paper_position_sizing_mode": self.config.paper_position_sizing_mode,
             "risk_based_sizing": market_ctx.get("risk_based_sizing"),
             "portfolio_equity": equity_at_entry,

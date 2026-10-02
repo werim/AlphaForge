@@ -1688,3 +1688,36 @@ For EXPECTED_FILL_RUNTIME_PARITY, hypothetical_entry should equal executable_ent
     sqlite3 -readonly -header -column "$DB" "SELECT COALESCE(json_extract(p.source_provenance_json,'$.reject_execution_basis'),'MISSING') AS execution_basis,COALESCE(json_extract(p.source_provenance_json,'$.reject_quality_attributable'),1) AS attributable,COUNT(*) AS n FROM burnin_pending_reject_labels p WHERE p.campaign_id='$CID' GROUP BY execution_basis,attributable ORDER BY n DESC;"
 
 Authoritative reject-forward expectancy rows should be backed by EXPECTED_FILL_RUNTIME_PARITY. Legacy rows can remain in the DB for diagnosis but must not silently enter execution-aligned calibration.
+
+## 26. Joint portfolio allocation evidence
+
+`portfolio_allocation_cycles` is the immutable cycle authority for #346. Its
+`candidate_set_hash`, `portfolio_snapshot_hash`, `config_hash`, and
+`universe_hash` bind the allocation to the complete simultaneous input set.
+`portfolio_allocation_candidates` records the deterministic preference inputs,
+hard-gate result, requested size, allocated size, correlation contribution,
+final action, and reasons. `HOLD_CASH` is a valid cycle action.
+
+Latest allocation cycles:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT timestamp,allocation_cycle_id,mode,action,candidate_set_hash,portfolio_snapshot_hash,config_hash,universe_hash,git_sha,release_id,runtime_identity,allocator_version,schema_version FROM portfolio_allocation_cycles ORDER BY timestamp DESC,allocation_cycle_id DESC LIMIT 20;"
+```
+
+Reconstruct one cycle in canonical allocation order:
+
+```bash
+ACID='palloc:replace-me'
+sqlite3 -readonly -header -column "$DB" "SELECT candidate_index,candidate_id,symbol,side,action,reason_codes_json,requested_notional,allocated_notional,requested_risk,allocated_risk,requested_quantity,allocated_quantity,correlation_group,correlation_contribution,concentration_contribution,hard_gate_accepted,hard_gate_reason,candidate_inputs_json,preference_components_json FROM portfolio_allocation_candidates WHERE allocation_cycle_id='$ACID' ORDER BY candidate_index;"
+```
+
+Check that no cycle allocated beyond its own requested notional and that reject
+rows did not receive capital:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT allocation_cycle_id,candidate_id,action,requested_notional,allocated_notional FROM portfolio_allocation_candidates WHERE allocated_notional<0 OR (requested_notional IS NOT NULL AND allocated_notional>requested_notional) OR (action='REJECT' AND allocated_notional<>0);"
+```
+
+Exact retry of an existing `allocation_cycle_id` is accepted only when the
+stored payload and evidence hash match. A conflicting reuse fails closed; do
+not update or delete immutable allocation evidence to make a replay pass.
