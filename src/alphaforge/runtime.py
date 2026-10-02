@@ -3152,7 +3152,9 @@ class RuntimeOrchestrator:
 
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
         """Fail closed and durably diagnose an attached-campaign scope violation."""
-        if not self._burnin_run_id:
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        if not self._burnin_run_id or not campaign_id:
+            # Standalone Phase-7/diagnostic burn-in has no campaign scope contract.
             return
         normalized_symbol = str(symbol or "").upper()
         normalized_source = str(source_exchange or "").lower()
@@ -3163,7 +3165,6 @@ class RuntimeOrchestrator:
         )
         if source_allowed and symbol_allowed:
             return
-        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         details = {"campaign_id": campaign_id, "burnin_run_id": self._burnin_run_id,
                    "universe_scope_mode": DYNAMIC_UNIVERSE_SCOPE_MODE if self._campaign_dynamic_universe else "FIXED_ALLOWLIST",
                    "declared_symbols": sorted(self._campaign_symbols),
