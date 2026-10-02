@@ -465,3 +465,84 @@ def test_campaign_provider_contamination_is_read_only_structural_failure(tmp_pat
     assert result["campaign_scope"]["out_of_scope_source_exchanges"] == ["hyperliquid"]
     assert result["campaign_scope"]["provider_mismatch_decision_count"] > 0
     assert conn.total_changes == before
+
+
+
+def _mark_campaign_dynamic_with_selection(conn, cid, run, selected_symbols):
+    provenance = json.loads(conn.execute(
+        "SELECT source_provenance_json FROM burnin_campaigns WHERE campaign_id=?", (cid,)
+    ).fetchone()[0])
+    provenance["universe_scope_mode"] = "CANONICAL_DYNAMIC_V1"
+    provenance["universe_scope_authority"] = "alphaforge.symbol_selector.build_selected_universe"
+    conn.execute(
+        "UPDATE burnin_campaigns SET symbols_json='[]', source_provenance_json=? WHERE campaign_id=?",
+        (json.dumps(provenance, sort_keys=True), cid),
+    )
+    cycle_id = "universe:test:dynamic"
+    conn.execute("""INSERT INTO universe_selection_cycles(
+        cycle_id,decision_timestamp,execution_mode,selected_symbols_json,candidate_count,
+        config_hash,strategy_config_hash,universe_hash,evidence_hash,git_sha,
+        source_provenance_json,ranking_version,schema_version,payload_json)
+        VALUES(?,1,'PAPER',?,?,'cfg','strategy','u','e','git','["TEST"]','v1','v1','{}')""",
+        (cycle_id, json.dumps(selected_symbols), len(selected_symbols)))
+    for index, symbol in enumerate(selected_symbols):
+        conn.execute("""INSERT INTO universe_selection_candidates(
+            cycle_id,candidate_index,symbol,eligibility_state,exclusion_reasons_json,
+            observed_inputs_json,ranking_components_json,ranking_score,ranking_order,
+            selected,evidence_availability_json)
+            VALUES(?,?,?,'ELIGIBLE','[]','{}','{}',1.0,?,1,'{}')""",
+            (cycle_id, index, symbol, index + 1))
+    conn.execute("""INSERT INTO burnin_universe_selection_links(
+        link_id,campaign_id,burnin_run_id,cycle_id,decision_timestamp,schema_version)
+        VALUES(?,?,?,?,1,'v1')""",
+        (f"link:{cid}:{run}", cid, run, cycle_id))
+    conn.commit()
+
+
+def test_dynamic_campaign_reject_scope_uses_selector_evidence(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute(
+        "SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)
+    ).fetchone()[0]
+    _mark_campaign_dynamic_with_selection(conn, cid, run, ["BTCUSDT"])
+
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,symbol,reject_reason,created_at,payload_json)
+        VALUES('reject:dynamic-bch','dynamic-bch','BCHUSDT','LOW_CONFIDENCE',
+               '2026-01-01T00:00:00Z',?)""",
+        (json.dumps({
+            "campaign_id": cid,
+            "symbol": "BCHUSDT",
+            "source_exchange": "binance",
+        }),))
+    add_reject_observation(conn, run, "reject:dynamic-bch", incomplete=True)
+    conn.commit()
+
+    result = report(conn, cid)
+
+    assert result["status"] == "FAIL"
+    assert result["campaign_scope"]["universe_scope_mode"] == "CANONICAL_DYNAMIC_V1"
+    assert result["campaign_scope"]["dynamic_selection_link_count"] == 1
+    assert result["campaign_scope"]["declared_symbols"] == ["BTCUSDT"]
+    assert "CAMPAIGN_UNIVERSE_MISMATCH" in result["reason_codes"]
+    assert "BCHUSDT" in result["campaign_scope"]["out_of_universe_symbols"]
+
+
+def test_dynamic_campaign_reject_scope_missing_selection_evidence_fails_closed(tmp_path):
+    _, conn, cid = database(tmp_path)
+    provenance = json.loads(conn.execute(
+        "SELECT source_provenance_json FROM burnin_campaigns WHERE campaign_id=?", (cid,)
+    ).fetchone()[0])
+    provenance["universe_scope_mode"] = "CANONICAL_DYNAMIC_V1"
+    conn.execute(
+        "UPDATE burnin_campaigns SET symbols_json='[]', source_provenance_json=? WHERE campaign_id=?",
+        (json.dumps(provenance, sort_keys=True), cid),
+    )
+    conn.commit()
+
+    result = report(conn, cid)
+
+    assert result["status"] == "FAIL"
+    assert "DYNAMIC_UNIVERSE_EVIDENCE_MISSING" in result["reason_codes"]
+    assert result["campaign_scope"]["dynamic_selection_link_count"] == 0
+    assert result["campaign_scope"]["dynamic_universe_evidence_available"] is False
