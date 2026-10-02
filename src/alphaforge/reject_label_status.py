@@ -189,7 +189,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             observed_providers.add(provider)
     out_of_universe_symbols = sorted(observed_symbols - declared_symbols) if declared_symbols else []
     dynamic_universe_evidence_missing = bool(
-        dynamic_universe and observed_symbols and not dynamic_universe_evidence_available
+        dynamic_universe and not dynamic_universe_evidence_available
     )
     out_of_scope_providers = sorted(observed_providers - declared_providers) if declared_providers else []
     infrastructure_reasons = {
