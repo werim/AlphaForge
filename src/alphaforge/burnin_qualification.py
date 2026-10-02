@@ -124,11 +124,14 @@ class BurnInQualificationEngine:
         if not self._has_schema():
             return self._snapshot(burnin_run_id,"UNKNOWN","BURN_IN_INSUFFICIENT",["BURNIN_SCHEMA_OR_EVIDENCE_MISSING"],[],th,{})
         blockers: list[str]=[]; warnings: list[str]=[]; metrics: dict[str, Any]={}
-        with self.engine.begin() as conn:
+        with self.engine.connect() as conn:
             run=conn.execute(text("SELECT * FROM burnin_runs WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().first()
             if not run:
                 snap=self._snapshot(burnin_run_id,"UNKNOWN","BURN_IN_INSUFFICIENT",["BURNIN_SCHEMA_OR_EVIDENCE_MISSING","NO_BURNIN_RUN"],[],th,{})
-                self.persist_snapshot(conn,snap); return snap
+                conn.commit()
+                self.persist_snapshot(conn,snap)
+                conn.commit()
+                return snap
             release_id=str(run["release_id"]); phase=str(run.get("phase") or "PHASE7")
             mode=str(run["execution_mode"]).upper()
             if mode not in {"PAPER","LIVE_PRECHECK"}: blockers.append(f"INVALID_EXECUTION_MODE:{mode}")
@@ -140,7 +143,6 @@ class BurnInQualificationEngine:
             cal=conn.execute(text("SELECT * FROM burnin_calibration_metrics WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
             execm=conn.execute(text("SELECT * FROM burnin_execution_metrics WHERE burnin_run_id=:id ORDER BY id DESC LIMIT 1"),{"id":burnin_run_id}).mappings().first()
             dds=conn.execute(text("SELECT * FROM burnin_drawdown_events WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
-            derived = update_burnin_run_counters(conn, burnin_run_id)
             decision_predicate = canonical_decision_sql("o")
             obs_counts = conn.execute(text(f"SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations o WHERE burnin_run_id=:id AND {decision_predicate}"), {"id": burnin_run_id}).mappings().first() or {}
             canonical_reject_ids={str(r[0]) for r in conn.execute(text(f"SELECT json_extract(metrics_json,'$.reject_decision_id') FROM burnin_observations o WHERE burnin_run_id=:id AND UPPER(COALESCE(decision,''))='REJECTED' AND {decision_predicate}"), {"id":burnin_run_id}).all() if r[0]}
@@ -217,7 +219,7 @@ class BurnInQualificationEngine:
             sample_status="PASS"
             for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",qualified_closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
                 if obs < limit: sample_status="INSUFFICIENT"; blockers.append(f"{name}:{obs}<{limit}")
-            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=qualified_closed,qualified_closed_trade_count=qualified_closed,operational_closed_trade_count=operational_closed,incomplete_closed_trade_count=operational_closed-qualified_closed,open_trade_count=max(0,accepted-operational_closed),completed_rejected_forward_outcomes=len(attributable_rejects),diagnostic_completed_rejected_forward_outcomes=len(completed_rejects),identity_linked_rejected_forward_outcomes=len(identity_linked_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),orphan_rejected_forward_outcomes=len(completed_rejects)-len(identity_linked_rejects),qualification_reject_identity_unit="CANONICAL_DECISION",qualification_reject_identity_mode=identity_mode,pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(qualification_ambiguous_rejects),diagnostic_ambiguous_rejected_forward_outcomes=len(diagnostic_ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
+            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=qualified_closed,qualified_closed_trade_count=qualified_closed,operational_closed_trade_count=operational_closed,incomplete_closed_trade_count=operational_closed-qualified_closed,open_trade_count=max(0,accepted-operational_closed),completed_rejected_forward_outcomes=len(attributable_rejects),diagnostic_completed_rejected_forward_outcomes=len(completed_rejects),identity_linked_rejected_forward_outcomes=len(identity_linked_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),orphan_rejected_forward_outcomes=len(completed_rejects)-len(identity_linked_rejects),qualification_reject_identity_unit="CANONICAL_DECISION",qualification_reject_identity_mode=identity_mode,pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(qualification_ambiguous_rejects),diagnostic_ambiguous_rejected_forward_outcomes=len(diagnostic_ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=run.get("observed_duration_seconds"))
             self._check_guided_geometry_viability(
                 canonical_observation_metrics, blockers, warnings, metrics,
                 canonical_decision_count=samples,
@@ -237,6 +239,18 @@ class BurnInQualificationEngine:
             evidence_status="PASS" if not any(b in {"BURNIN_SCHEMA_OR_EVIDENCE_MISSING"} or b.startswith("MISSING_PROVENANCE") or b.startswith("INCOMPLETE_COST") for b in blockers) else "FAIL"
             missing_markers=("MISSING","INSUFFICIENT","NO_","BURNIN_SCHEMA")
             status="CANARY_QUALIFIED" if not blockers else ("BURN_IN_INSUFFICIENT" if any(any(m in b for m in missing_markers) for b in blockers) or sample_status=="INSUFFICIENT" else "BURN_IN_FAILED")
+
+            # Qualification analysis is intentionally read-only until this point.
+            # End the read snapshot before acquiring SQLite's single writer slot,
+            # then persist counters and qualification evidence in one short write
+            # transaction.  This prevents expensive qualification computation from
+            # starving runtime heartbeat/lifecycle/reject/allocation writers.
+            conn.commit()
+            derived = update_burnin_run_counters(conn, burnin_run_id)
+            metrics["observed_duration_seconds"] = (
+                derived.get("observed_duration_seconds")
+                or run.get("observed_duration_seconds")
+            )
             snap=self._snapshot(burnin_run_id,release_id,status,blockers,warnings,th,metrics,sample_status,expectancy_status,exec_status,regime_status,reject_status,cal_status,dd_status,conc_status,rec_status,evidence_status)
             self.persist_snapshot(conn,snap)
             suspension=self.suspension_reasons(snap)
@@ -244,6 +258,7 @@ class BurnInQualificationEngine:
                 snap.status="CANARY_SUSPENDED"; snap.blockers.extend(suspension); self.persist_snapshot(conn,snap)
             if suspension:
                 self.persist_suspension(conn,snap,suspension)
+            conn.commit()
             return snap
     def _check_guided_geometry_viability(
         self,
