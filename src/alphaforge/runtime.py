@@ -75,7 +75,7 @@ from alphaforge.symbol_selector import (
     selection_results,
     select_symbols,  # compatibility surface for external test/runtime adapters
 )
-from alphaforge.universe_evidence import persist_universe_selection
+from alphaforge.universe_evidence import persist_universe_selection, persist_burnin_universe_selection_link
 from alphaforge.portfolio_allocation_evidence import persist_portfolio_allocation
 from alphaforge.persistence import (
     fetch_expectancy_stat_detail,
@@ -88,7 +88,7 @@ from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, campaign_uses_dynamic_universe, DYNAMIC_UNIVERSE_SCOPE_MODE, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
 from alphaforge.portfolio_risk import allocate_portfolio_candidates, evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
@@ -394,6 +394,7 @@ class RuntimeOrchestrator:
     _campaign_intervals: tuple[str, ...] = field(default=(), init=False)
     _campaign_id: str | None = field(default=None, init=False)
     _campaign_symbols: frozenset[str] = field(default_factory=frozenset, init=False)
+    _campaign_dynamic_universe: bool = field(default=False, init=False)
     _campaign_source_exchanges: frozenset[str] = field(default_factory=frozenset, init=False)
     _fatal_task_exception: BaseException | None = field(default=None, init=False)
     _fatal_task_name: str | None = field(default=None, init=False)
@@ -1217,13 +1218,20 @@ class RuntimeOrchestrator:
     def _phase8_execution_cost_config_hash(self) -> str:
         return self._phase8_runtime_hashes().get("execution_cost_config_hash", "")
 
-    def _phase8_runtime_hashes(self, symbols: list[str] | None = None, intervals: list[str] | None = None) -> dict[str, Any]:
+    def _phase8_runtime_hashes(self, symbols: list[str] | None = None, intervals: list[str] | None = None, *, dynamic_universe: bool = False) -> dict[str, Any]:
         cfg = self._canonical_filter_config()
         resolved_symbols = list(symbols if symbols is not None else (cfg.get("symbols") or cfg.get("active_symbols") or []))
         resolved_intervals = list(intervals if intervals is not None else (cfg.get("intervals") or cfg.get("timeframes") or []))
         configured_release = os.getenv("ALPHAFORGE_RELEASE_ID")
         release_id = configured_release or self.config.phase7_burnin_release_id
-        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=release_id, paper_slippage_bps=self.paper_slippage_bps)
+        ident = build_phase8_campaign_identity(
+            self.config,
+            resolved_symbols,
+            resolved_intervals,
+            release_id=release_id,
+            paper_slippage_bps=self.paper_slippage_bps,
+            dynamic_universe=dynamic_universe,
+        )
         return {**ident, "execution_mode": self.config.execution_mode.value, "release_id_source": "environment:ALPHAFORGE_RELEASE_ID" if configured_release else "runtime_config:phase7_burnin_release_id"}
 
 
@@ -1255,10 +1263,15 @@ class RuntimeOrchestrator:
             self._campaign_id = campaign_id
             self._campaign_intervals = tuple(str(value) for value in (campaign.get("intervals") or []))
             self._campaign_symbols = frozenset(str(value).upper() for value in (campaign.get("symbols") or []))
+            self._campaign_dynamic_universe = campaign_uses_dynamic_universe(campaign)
             provenance = dict(campaign.get("source_provenance") or {})
             observed_provider_scope = canonical_paper_source_exchanges(provenance)
             run_identity = run_attachment_identity(run) if run else {}
-            runtime_identity = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
+            runtime_identity = self._phase8_runtime_hashes(
+                campaign.get("symbols") or [],
+                campaign.get("intervals") or [],
+                dynamic_universe=self._campaign_dynamic_universe,
+            )
             expected_provider_scope = tuple(runtime_identity["config_payload"]["paper_source_exchanges"])
             self._campaign_source_exchanges = frozenset(expected_provider_scope)
             provider_drift = observed_provider_scope != expected_provider_scope
@@ -1299,12 +1312,17 @@ class RuntimeOrchestrator:
                 with contextlib.suppress(Exception): conn.commit()
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
-            if not self._campaign_symbols or not self._campaign_source_exchanges:
-                reason = ("PHASE8_CAMPAIGN_UNIVERSE_INVALID" if not self._campaign_symbols
+            invalid_symbol_scope = (
+                (self._campaign_dynamic_universe and bool(self._campaign_symbols))
+                or (not self._campaign_dynamic_universe and not self._campaign_symbols)
+            )
+            if invalid_symbol_scope or not self._campaign_source_exchanges:
+                reason = ("PHASE8_CAMPAIGN_UNIVERSE_INVALID" if invalid_symbol_scope
                           else "PHASE8_CAMPAIGN_PROVIDER_IDENTITY_INVALID")
                 fail_active_campaign_run(conn, campaign_id, reason,
                                          details={"source_provenance": provenance,
-                                                  "symbols": sorted(self._campaign_symbols)})
+                                                  "symbols": sorted(self._campaign_symbols),
+                                                  "dynamic_universe": self._campaign_dynamic_universe})
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
@@ -2816,10 +2834,15 @@ class RuntimeOrchestrator:
         else:
             self._market_data_failure_streak = 0
             self._market_data_health_status = market_data_status
-        if self._burnin_run_id and self._campaign_symbols:
-            candidates = [candidate for candidate in candidates
-                          if str(candidate.get("symbol") or "").upper() in self._campaign_symbols
-                          and str(candidate.get("source_exchange") or "").lower() in self._campaign_source_exchanges]
+        if self._burnin_run_id and self._campaign_source_exchanges:
+            candidates = [
+                candidate for candidate in candidates
+                if str(candidate.get("source_exchange") or "").lower() in self._campaign_source_exchanges
+                and (
+                    self._campaign_dynamic_universe
+                    or str(candidate.get("symbol") or "").upper() in self._campaign_symbols
+                )
+            ]
             deduplicated: dict[str, dict[str, Any]] = {}
             for candidate in candidates:
                 deduplicated.setdefault(str(candidate.get("symbol") or "").upper(), candidate)
@@ -2875,6 +2898,13 @@ class RuntimeOrchestrator:
                 engine = self._universe_evidence_engine
             with engine.begin() as conn:
                 persist_universe_selection(conn, universe_selection)
+                if self._campaign_id and self._burnin_run_id:
+                    persist_burnin_universe_selection_link(
+                        conn,
+                        universe_selection,
+                        campaign_id=self._campaign_id,
+                        burnin_run_id=self._burnin_run_id,
+                    )
         except Exception as exc:  # noqa: BLE001 - selection cannot proceed without canonical evidence
             logger.exception("universe_selection_persistence_failed cycle_id=%s", universe_selection.cycle_id)
             self._last_scan_gate_blockers = ["UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"]
@@ -3122,14 +3152,26 @@ class RuntimeOrchestrator:
 
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
         """Fail closed and durably diagnose an attached-campaign scope violation."""
-        if not self._burnin_run_id or not self._campaign_symbols:
-            return
-        normalized_symbol = str(symbol or "").upper()
-        normalized_source = str(source_exchange or "").lower()
-        if normalized_symbol in self._campaign_symbols and normalized_source in self._campaign_source_exchanges:
+        scope_configured = bool(self._campaign_source_exchanges) and (
+            self._campaign_dynamic_universe or bool(self._campaign_symbols)
+        )
+        if not self._burnin_run_id or not scope_configured:
+            # Campaign/run identity may be used by persistence fixtures without
+            # attaching a universe contract. Enforce only once provider + fixed
+            # allowlist or provider + dynamic-selector scope is actually loaded.
             return
         campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        normalized_symbol = str(symbol or "").upper()
+        normalized_source = str(source_exchange or "").lower()
+        source_allowed = normalized_source in self._campaign_source_exchanges
+        symbol_allowed = (
+            self._campaign_dynamic_universe
+            or normalized_symbol in self._campaign_symbols
+        )
+        if source_allowed and symbol_allowed:
+            return
         details = {"campaign_id": campaign_id, "burnin_run_id": self._burnin_run_id,
+                   "universe_scope_mode": DYNAMIC_UNIVERSE_SCOPE_MODE if self._campaign_dynamic_universe else "FIXED_ALLOWLIST",
                    "declared_symbols": sorted(self._campaign_symbols),
                    "declared_source_exchanges": sorted(self._campaign_source_exchanges),
                    "observed_symbol": normalized_symbol, "observed_source_exchange": normalized_source,

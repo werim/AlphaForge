@@ -75,6 +75,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           pytest -q tests/test_issue421_full_chain_replay.py tests/test_multi_timeframe.py tests/test_runtime.py tests/test_state_direction_shadow.py
+          pytest -q tests/test_issue581_burnin_dynamic_universe.py tests/test_reject_label_status.py
 
       - name: RR-stage evidence semantics gate
         if: github.event_name == 'pull_request'

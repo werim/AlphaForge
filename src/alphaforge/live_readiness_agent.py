@@ -114,9 +114,28 @@ class LiveReadinessAgent:
                 if decision_id: counts[decision_id]=counts.get(decision_id,0)+1
             du=[{"decision_id":decision_id,"n":count} for decision_id,count in counts.items() if count>1]
             g9=self.miss("DUPLICATE_EXECUTION","burnin_observations + order_decisions","scoped decision identity exists") if not scoped_signal_ids else self.g("DUPLICATE_EXECUTION",BLOCKED if du else PASS,"DUPLICATE_EXECUTION_DETECTED" if du else "NO_DUPLICATES","burnin_observations + order_decisions",du,"no duplicate decision IDs in active run")
+            provenance=obj((c or {}).get("source_provenance_json"))
+            dynamic_universe=str(provenance.get("universe_scope_mode") or "").upper()=="CANONICAL_DYNAMIC_V1"
             try: declared={str(x).upper() for x in json.loads(c.get("symbols_json") or "[]")} if c else set()
-            except (TypeError,ValueError): declared=set()
-            outside=sorted({str(x["symbol"]).upper() for x in obs if x.get("symbol")}-declared); g10=self.miss("CONTAMINATION","campaign universe + burnin_observations","no out-of-universe observations") if not obs else self.g("CONTAMINATION",BLOCKED if outside else PASS,"OUT_OF_UNIVERSE_OBSERVATION" if outside else "NO_CONTAMINATION","campaign universe + burnin_observations",outside,"no out-of-universe observations")
+            except (TypeError,ValueError,json.JSONDecodeError): declared=set()
+            if dynamic_universe:
+                selected_rows=db.rows(
+                    """SELECT DISTINCT UPPER(usc.symbol) AS symbol
+                       FROM burnin_universe_selection_links l
+                       JOIN universe_selection_candidates usc ON usc.cycle_id=l.cycle_id
+                       WHERE l.campaign_id=? AND l.burnin_run_id=? AND usc.selected=1""",
+                    (self.cid,self.scope["burnin_run_id"]),
+                ) if {"burnin_universe_selection_links","universe_selection_candidates"}.issubset(tabs) else []
+                declared={str(row.get("symbol") or "").upper() for row in selected_rows if row.get("symbol")}
+            outside=sorted({str(x["symbol"]).upper() for x in obs if x.get("symbol")}-declared)
+            contamination_source=("burnin_universe_selection_links + universe_selection_candidates + burnin_observations"
+                                  if dynamic_universe else "campaign universe + burnin_observations")
+            if not obs:
+                g10=self.miss("CONTAMINATION",contamination_source,"no out-of-universe observations")
+            elif dynamic_universe and not declared:
+                g10=self.g("CONTAMINATION",BLOCKED,"DYNAMIC_UNIVERSE_EVIDENCE_MISSING",contamination_source,{"outside":outside,"selected_symbols":[]},"every observed symbol has campaign-scoped canonical selection evidence")
+            else:
+                g10=self.g("CONTAMINATION",BLOCKED if outside else PASS,"OUT_OF_UNIVERSE_OBSERVATION" if outside else "NO_CONTAMINATION",contamination_source,{"outside":outside,"selected_symbols":sorted(declared) if dynamic_universe else None},"no out-of-universe observations")
             lifecycle_rows=db.rows("SELECT signal_id,lifecycle_state,mode FROM trade_lifecycle_events WHERE UPPER(mode)='PAPER'") if "trade_lifecycle_events" in tabs else []
             scoped_lifecycle=scoped_rows(lifecycle_rows,scoped_signal_ids)
             lifecycle_errors=[x for x in scoped_lifecycle if str(x.get("lifecycle_state") or "").upper() in {"ERROR","EXECUTION_ERROR"}]
