@@ -68,6 +68,30 @@ UNIVERSE_SELECTION_DDL: tuple[str, ...] = (
     BEFORE DELETE ON universe_selection_candidates
     BEGIN SELECT RAISE(ABORT, 'universe selection evidence is immutable'); END
     """,
+    """
+    CREATE TABLE IF NOT EXISTS burnin_universe_selection_links (
+        link_id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        burnin_run_id TEXT NOT NULL,
+        cycle_id TEXT NOT NULL,
+        decision_timestamp REAL NOT NULL,
+        schema_version TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(campaign_id, burnin_run_id, cycle_id),
+        FOREIGN KEY (cycle_id) REFERENCES universe_selection_cycles(cycle_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_burnin_universe_selection_links_scope ON burnin_universe_selection_links(campaign_id, burnin_run_id, decision_timestamp)",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_burnin_universe_selection_links_no_update
+    BEFORE UPDATE ON burnin_universe_selection_links
+    BEGIN SELECT RAISE(ABORT, 'burn-in universe selection link is immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_burnin_universe_selection_links_no_delete
+    BEFORE DELETE ON burnin_universe_selection_links
+    BEGIN SELECT RAISE(ABORT, 'burn-in universe selection link is immutable'); END
+    """,
 )
 
 
@@ -155,4 +179,58 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
         )
         if stored is None or tuple(stored) != expected:
             raise RuntimeError(f"UNIVERSE_SELECTION_CANDIDATE_IDEMPOTENCY_CONFLICT:{selection.cycle_id}:{index}")
+    return True
+
+
+
+def persist_burnin_universe_selection_link(
+    conn: Any,
+    selection: SelectedUniverse,
+    *,
+    campaign_id: str,
+    burnin_run_id: str,
+) -> bool:
+    """Bind immutable selector evidence to one burn-in continuation."""
+    campaign_id = str(campaign_id or "").strip()
+    burnin_run_id = str(burnin_run_id or "").strip()
+    if not campaign_id or not burnin_run_id:
+        raise ValueError("campaign_id and burnin_run_id are required")
+    link_id = f"burnin-universe:{campaign_id}:{burnin_run_id}:{selection.cycle_id}"
+    params = {
+        "link_id": link_id,
+        "campaign_id": campaign_id,
+        "burnin_run_id": burnin_run_id,
+        "cycle_id": selection.cycle_id,
+        "decision_timestamp": float(selection.decision_timestamp),
+        "schema_version": selection.schema_version,
+    }
+    _execute(conn, """
+        INSERT INTO burnin_universe_selection_links (
+            link_id, campaign_id, burnin_run_id, cycle_id,
+            decision_timestamp, schema_version
+        ) VALUES (
+            :link_id, :campaign_id, :burnin_run_id, :cycle_id,
+            :decision_timestamp, :schema_version
+        ) ON CONFLICT(campaign_id, burnin_run_id, cycle_id) DO NOTHING
+    """, params)
+    stored = _execute(
+        conn,
+        """
+        SELECT link_id, campaign_id, burnin_run_id, cycle_id,
+               decision_timestamp, schema_version
+        FROM burnin_universe_selection_links
+        WHERE campaign_id=:campaign_id AND burnin_run_id=:burnin_run_id
+          AND cycle_id=:cycle_id
+        """,
+        params,
+    ).fetchone()
+    expected = (
+        params["link_id"], params["campaign_id"], params["burnin_run_id"],
+        params["cycle_id"], params["decision_timestamp"], params["schema_version"],
+    )
+    if stored is None or tuple(stored) != expected:
+        raise RuntimeError(
+            f"BURNIN_UNIVERSE_SELECTION_LINK_IDEMPOTENCY_CONFLICT:"
+            f"{campaign_id}:{burnin_run_id}:{selection.cycle_id}"
+        )
     return True
