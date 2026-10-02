@@ -89,7 +89,7 @@ def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypat
     assert unsupported_identity["config_payload"]["reject_evaluation_timeframe"] == "5m"
 
     responses = iter([
-        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
         [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
         [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
         [],

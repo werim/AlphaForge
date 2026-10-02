@@ -1,4 +1,5 @@
 import os
+import time
 
 import pytest
 
@@ -101,15 +102,16 @@ def test_env_min_effective_rr_changes_shared_pre_submit_decision(monkeypatch):
 def test_env_spread_funding_liquidity_symbol_filters_are_canonical(monkeypatch):
     cfg = _cfg(monkeypatch, ALPHAFORGE_MAX_SPREAD_PCT="0.001", ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT="0.0001", MIN_LIQUIDITY_USD="10000000")
     filters = runtime_filter_config(cfg.runtime, mode="PAPER")
+    observed_at = time.time()
     rows = select_symbols([
-        {"symbol": "WIDE", "volume_24h_usdt": 20_000_000, "spread_pct": 0.002, "liquidity_score": 0.9, "volatility_pct": 1, "trend_strength": 0.8, "chop_score": 0.1},
-        {"symbol": "FUND", "volume_24h_usdt": 20_000_000, "spread_pct": 0.0005, "liquidity_score": 0.9, "volatility_pct": 1, "trend_strength": 0.8, "chop_score": 0.1, "funding_rate_pct": 0.0002},
-        {"symbol": "THIN", "volume_24h_usdt": 5_000_000, "spread_pct": 0.0005, "liquidity_score": 0.9, "volatility_pct": 1, "trend_strength": 0.8, "chop_score": 0.1},
+        {"symbol": "WIDEUSDT", "market_ts": observed_at, "volume_24h_usdt": 20_000_000, "spread_pct": 0.002, "liquidity_score": 0.9, "volatility_pct": 1, "trend_strength": 0.8, "chop_score": 0.1},
+        {"symbol": "FUNDUSDT", "market_ts": observed_at, "volume_24h_usdt": 20_000_000, "spread_pct": 0.0005, "liquidity_score": 0.9, "volatility_pct": 1, "trend_strength": 0.8, "chop_score": 0.1, "funding_rate_pct": 0.0002},
+        {"symbol": "THINUSDT", "market_ts": observed_at, "volume_24h_usdt": 5_000_000, "spread_pct": 0.0005, "liquidity_score": 0.9, "volatility_pct": 1, "trend_strength": 0.8, "chop_score": 0.1},
     ], {**filters, "include_rejected": True})
     reasons = {r.symbol: r.reject_reasons for r in rows}
-    assert "WIDE_SPREAD" in reasons["WIDE"]
-    assert "FUNDING_ANOMALY" in reasons["FUND"]
-    assert "LOW_VOLUME" in reasons["THIN"]
+    assert "UNSAFE_SPREAD" in reasons["WIDEUSDT"]
+    assert "FUNDING_ANOMALY" in reasons["FUNDUSDT"]
+    assert "BELOW_MIN_VOLUME_24H" in reasons["THINUSDT"]
 
 
 def test_runtime_risk_uses_canonical_spread_slippage_funding_liquidity_and_stale(monkeypatch):
@@ -195,8 +197,9 @@ def test_registry_execution_safety_overrides_drive_production_runtime_gate(monke
 
 
 def test_max_symbols_is_runtime_config_selection_cap():
+    observed_at = time.time()
     async def scanner():
-        return [_market(symbol=s, volume_24h_usdt=20_000_000, spread_pct=0.0001, trend_strength=0.9, chop_score=0.1, volatility_pct=1) for s in ("A", "B", "C")]
+        return [_market(symbol=s, market_ts=observed_at, volume_24h_usdt=20_000_000, spread_pct=0.0001, trend_strength=0.9, chop_score=0.1, volatility_pct=1) for s in ("AUSDT", "BUSDT", "CUSDT")]
     rt = RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, max_symbols_per_scan=2), ai_brain=object(), market_scanner=scanner)
-    selected = [r for r in select_symbols([_market(symbol=s, volume_24h_usdt=20_000_000, trend_strength=0.9, chop_score=0.1, volatility_pct=1, spread_pct=0.0001) for s in ("A", "B", "C")], {**rt._canonical_filter_config(), "include_rejected": True}) if r.tradable][: rt.config.max_symbols_per_scan]
+    selected = [r for r in select_symbols([_market(symbol=s, market_ts=observed_at, volume_24h_usdt=20_000_000, trend_strength=0.9, chop_score=0.1, volatility_pct=1, spread_pct=0.0001) for s in ("AUSDT", "BUSDT", "CUSDT")], {**rt._canonical_filter_config(), "include_rejected": True}) if r.tradable][: rt.config.max_symbols_per_scan]
     assert len(selected) == 2

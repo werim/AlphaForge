@@ -17,7 +17,9 @@ def test_top_symbols_and_inactive_excluded(monkeypatch):
                 {"symbol": "AAAUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "filters": [1]},
                 {"symbol": "BBBUSDT", "status": "BREAK", "contractType": "PERPETUAL", "quoteAsset": "USDT", "filters": [1]},
             ]}
-        return [{"symbol": "AAAUSDT", "quoteVolume": "100"}, {"symbol": "BBBUSDT", "quoteVolume": "200"}]
+        if "bookTicker" in url:
+            return [{"symbol": "AAAUSDT", "bidPrice": "99", "askPrice": "100"}]
+        return [{"symbol": "AAAUSDT", "quoteVolume": "100", "priceChangePercent": "1"}, {"symbol": "BBBUSDT", "quoteVolume": "200", "priceChangePercent": "1"}]
     monkeypatch.setattr(bo, "fetch_json", fake_fetch)
     u = bo.select_symbol_universe(100)
     assert [x["symbol"] for x in u] == ["AAAUSDT"]

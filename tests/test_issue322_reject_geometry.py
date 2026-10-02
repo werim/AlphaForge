@@ -130,7 +130,7 @@ def test_production_binance_scanner_to_pending_reject_label(monkeypatch, tmp_pat
         def read(self): return json.dumps(self.payload).encode()
 
     payloads = iter([
-        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
         [{"symbol": "BTCUSDT", "lastPrice": "100", "lowPrice": "1", "highPrice": "999",
           "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
         [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],

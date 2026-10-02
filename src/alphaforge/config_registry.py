@@ -68,6 +68,7 @@ def _s(env, field, typ, default, category, applies, desc, min_value=None, max_va
         "Notifications": "alphaforge.telegram_alert_delivery.telegram_alert_provider_from_env",
         "Hyperliquid": "alphaforge.exchange_market_scanner._scan_hyperliquid",
         "Binance": "alphaforge.env_contract.resolve_binance_environment",
+        "Universe Selection": "alphaforge.symbol_selector.build_selected_universe",
     }
     tests = {
         "Trade Quality Filters": "tests/test_env_filters_canonical.py::test_env_score_threshold_changes_backtest_and_paper_decisions",
@@ -81,6 +82,7 @@ def _s(env, field, typ, default, category, applies, desc, min_value=None, max_va
         "Notifications": "tests/test_telegram_alert_delivery.py::test_telegram_send_confirmation_is_persisted_without_credentials",
         "Hyperliquid": "tests/test_env_wiring_contract.py::test_hyperliquid_enabled_controls_scanner_without_network",
         "Binance": "tests/test_env_contract.py::test_binance_explicit_override_and_testnet_backward_compatibility",
+        "Universe Selection": "tests/test_issue577_universe_selection.py::test_canonical_config_loads_constraints_and_rejects_cross_field_invalidity",
     }
     # Resolve by setting family before falling back to category.  This keeps
     # metadata tied to the function that actually reads the effective field,
@@ -176,7 +178,13 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_ENABLE_STATE_DIRECTION_SHADOW_EVALUATION", "enable_state_direction_shadow_evaluation", "bool", False, "Learning", ("PAPER",), "Enable non-authoritative state-direction shadow evaluation for PAPER diagnostics.", consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_env_wiring_contract.py::test_state_direction_shadow_flag_is_registered_paper_only_and_identity_neutral"),
     _s("ALPHAFORGE_REJECT_RESOLVER_INTERVAL_SEC", "reject_resolver_interval_sec", "float", 60.0, "Operations", ("PAPER",), "Seconds between reject-label resolver checks.", 1.0, consumed_by="alphaforge.runtime.RuntimeOrchestrator._reject_forward_outcome_loop", behavioral_test="tests/test_runtime.py::test_standalone_resolver_fetches_each_pending_timeframe"),
     _s("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "heartbeat_interval_sec", "float", 30.0, "Operations", ("PAPER", "LIVE"), "Seconds between runtime heartbeats.", 0.01),
-    _s("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", "max_symbols_per_scan", "int", 5, "Operations", ("PAPER", "LIVE"), "Maximum selected symbols per scan.", 1),
+    _s("ALPHAFORGE_UNIVERSE_MIN_MARKET_CAP_USD", "universe_min_market_cap_usd", "str", "", "Universe Selection", MODES, "Optional minimum timestamp-bound market capitalization; configured filters fail closed when evidence is unavailable."),
+    _s("ALPHAFORGE_UNIVERSE_MAX_MARKET_CAP_USD", "universe_max_market_cap_usd", "str", "", "Universe Selection", MODES, "Optional maximum timestamp-bound market capitalization; configured filters fail closed when evidence is unavailable."),
+    _s("ALPHAFORGE_UNIVERSE_MIN_VOLUME_24H_USD", "universe_min_volume_24h_usd", "float", 5_000_000.0, "Universe Selection", MODES, "Minimum canonical 24h quote volume for universe eligibility.", 0.0),
+    _s("ALPHAFORGE_UNIVERSE_CANDIDATE_POOL_TOP_N_VOLUME", "universe_candidate_pool_top_n_volume", "int", 50, "Universe Selection", MODES, "Maximum liquid candidates retained before opportunity ranking.", 1),
+    _s("ALPHAFORGE_UNIVERSE_MAX_ACTIVE_SYMBOLS", "max_symbols_per_scan", "int", 5, "Universe Selection", MODES, "Maximum symbols selected from the canonical ranked candidate pool.", 1, deprecated_aliases=("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN",)),
+    _s("ALPHAFORGE_UNIVERSE_EXCLUDED_SYMBOLS", "universe_excluded_symbols", "str", "", "Universe Selection", MODES, "Comma-separated explicit symbol exclusions."),
+    _s("ALPHAFORGE_UNIVERSE_MAX_EVIDENCE_AGE_SEC", "universe_max_evidence_age_sec", "float", 120.0, "Universe Selection", MODES, "Maximum age of timestamp-bound universe market evidence.", 0.001),
     _s("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", "max_reject_log_entries", "int", 1000, "Operations", ("PAPER", "LIVE"), "In-memory reject log cap.", 1),
     _s("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "max_concurrent_positions", "int", 3, "Runtime Risk Limits", ("PAPER", "LIVE"), "Concurrent-position hard cap.", 1, deprecated_aliases=("ALPHAFORGE_MAX_OPEN_POSITIONS",)),
     _s("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", "max_notional_exposure", "float", 100000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Portfolio notional hard cap.", 0.0),

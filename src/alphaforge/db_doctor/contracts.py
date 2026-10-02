@@ -13,7 +13,7 @@ REAL_COLUMNS = ("score", "rr", "effective_rr")
 INTEGER_COLUMNS = ("execution_ctx_missing", "lifecycle_seq", "order_intent_id")
 WRITER_COLUMNS = frozenset(TEXT_COLUMNS[:-1] + REAL_COLUMNS + INTEGER_COLUMNS[:-1])
 UNIQUE_IDENTITIES = (("event_id",), ("signal_id", "event_ts", "lifecycle_state"))
-CURRENT_REVISION = "0009_timestamp_bounded_expectancy_evidence"
+CURRENT_REVISION = "0010_canonical_universe_selection"
 
 
 from dataclasses import dataclass

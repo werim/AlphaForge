@@ -62,8 +62,9 @@ def test_select_symbols_sorted_by_score():
     candidates = [
         {
             "symbol": "MIDUSDT",
+            "market_ts": 1000.0,
             "volume_24h_usdt": 5_000_000,
-            "spread_pct": 0.06,
+            "spread_pct": 0.0006,
             "volatility_pct": 4.0,
             "trend_strength": 0.5,
             "liquidity_score": 0.7,
@@ -72,8 +73,9 @@ def test_select_symbols_sorted_by_score():
         },
         {
             "symbol": "TOPUSDT",
+            "market_ts": 1000.0,
             "volume_24h_usdt": 20_000_000,
-            "spread_pct": 0.03,
+            "spread_pct": 0.0003,
             "volatility_pct": 3.0,
             "trend_strength": 0.9,
             "liquidity_score": 0.95,
@@ -81,7 +83,7 @@ def test_select_symbols_sorted_by_score():
             "chop_score": 0.25,
         },
     ]
-    results = select_symbols(candidates)
+    results = select_symbols(candidates, {"selection_decision_timestamp": 1000.0})
     assert len(results) == 2
     assert results[0].symbol == "TOPUSDT"
     assert results[0].symbol_score >= results[1].symbol_score
