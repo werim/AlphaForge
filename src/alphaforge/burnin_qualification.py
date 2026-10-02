@@ -124,14 +124,11 @@ class BurnInQualificationEngine:
         if not self._has_schema():
             return self._snapshot(burnin_run_id,"UNKNOWN","BURN_IN_INSUFFICIENT",["BURNIN_SCHEMA_OR_EVIDENCE_MISSING"],[],th,{})
         blockers: list[str]=[]; warnings: list[str]=[]; metrics: dict[str, Any]={}
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             run=conn.execute(text("SELECT * FROM burnin_runs WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().first()
             if not run:
                 snap=self._snapshot(burnin_run_id,"UNKNOWN","BURN_IN_INSUFFICIENT",["BURNIN_SCHEMA_OR_EVIDENCE_MISSING","NO_BURNIN_RUN"],[],th,{})
-                conn.commit()
-                self.persist_snapshot(conn,snap)
-                conn.commit()
-                return snap
+                self.persist_snapshot(conn,snap); return snap
             release_id=str(run["release_id"]); phase=str(run.get("phase") or "PHASE7")
             mode=str(run["execution_mode"]).upper()
             if mode not in {"PAPER","LIVE_PRECHECK"}: blockers.append(f"INVALID_EXECUTION_MODE:{mode}")
@@ -242,11 +239,9 @@ class BurnInQualificationEngine:
             status="CANARY_QUALIFIED" if not blockers else ("BURN_IN_INSUFFICIENT" if any(any(m in b for m in missing_markers) for b in blockers) or sample_status=="INSUFFICIENT" else "BURN_IN_FAILED")
 
             # Qualification analysis is intentionally read-only until this point.
-            # End the read snapshot before acquiring SQLite's single writer slot,
-            # then persist counters and qualification evidence in one short write
-            # transaction.  This prevents expensive qualification computation from
-            # starving runtime heartbeat/lifecycle/reject/allocation writers.
-            conn.commit()
+            # SQLite begins the transaction deferred, so expensive analysis does not
+            # own the single writer slot. Only final counter/snapshot persistence
+            # upgrades the same evidence snapshot to a short write transaction.
             persist_burnin_run_counters(conn, derived)
             snap=self._snapshot(burnin_run_id,release_id,status,blockers,warnings,th,metrics,sample_status,expectancy_status,exec_status,regime_status,reject_status,cal_status,dd_status,conc_status,rec_status,evidence_status)
             self.persist_snapshot(conn,snap)
@@ -255,7 +250,6 @@ class BurnInQualificationEngine:
                 snap.status="CANARY_SUSPENDED"; snap.blockers.extend(suspension); self.persist_snapshot(conn,snap)
             if suspension:
                 self.persist_suspension(conn,snap,suspension)
-            conn.commit()
             return snap
     def _check_guided_geometry_viability(
         self,
