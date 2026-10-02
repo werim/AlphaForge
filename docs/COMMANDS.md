@@ -1242,6 +1242,10 @@ print("READONLY_RECON =", cfg.runtime.enable_binance_readonly_reconciliation)
 print("API_KEY_PRESENT =", bool(recon.api_key.strip()))
 print("API_SECRET_PRESENT =", bool(recon.api_secret.strip()))
 print("LIVE_EXECUTION =", getattr(cfg.runtime, "enable_live_execution", False))
+print("UNIVERSE_MIN_VOLUME_24H_USD =", cfg.runtime.universe_min_volume_24h_usd)
+print("UNIVERSE_CANDIDATE_POOL_TOP_N_VOLUME =", cfg.runtime.universe_candidate_pool_top_n_volume)
+print("UNIVERSE_MAX_ACTIVE_SYMBOLS =", cfg.runtime.max_symbols_per_scan)
+print("RECONCILIATION_MAX_FILL_SYMBOLS =", recon.max_fill_symbols)
 PY
 ```
 
@@ -1260,6 +1264,128 @@ M0 için beklenen davranış:
 - Binance production read-only market/reconciliation endpoints consistent
 - threshold/config identity current runtime ile aynı
 
+### M0.2a #581 sonrası campaign universe kontratı
+
+PR #581 ile PAPER runtime'daki canonical seçim authority'si `alphaforge.symbol_selector.build_selected_universe()` oldu. Varsayılan config önce 24h hacim filtresi ve `ALPHAFORGE_UNIVERSE_CANDIDATE_POOL_TOP_N_VOLUME=50` ile likit aday havuzunu sınırlar, ardından opportunity ranking ile en fazla `ALPHAFORGE_UNIVERSE_MAX_ACTIVE_SYMBOLS=5` sembol seçer.
+
+Attached burn-in campaign için ek bir sınır vardır: campaign `symbols_json` bir **hard allowlist** olarak runtime scanner sonucuna canonical selector'dan önce uygulanır. Bu nedenle `--symbols BTCUSDT,ETHUSDT` kullanmak #581'i kapatmaz; fakat selector'ı yalnız BTC/ETH içinde çalıştırır ve full-universe davranışını ölçmez.
+
+Ayrıca `burnin_ops preflight` aynı `--symbols` listesini authenticated read-only reconciliation `tracked_symbols` kapsamı olarak kullanır. Canonical default `ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS=10` olduğundan 50 veya tüm Binance universe'ünü doğrudan `--symbols` ile vermek doğru workaround değildir; reconciliation scope cap'i aşabilir ve preflight fail closed olur. Bu limiti sırf #581'in 50-candidate havuzunu zorlamak için yükseltme.
+
+Current attached M0 için güvenli geçici kontrat:
+
+- campaign allowlist'i canonical reconciliation cap içinde tut;
+- default config ile 10 likit USDT perpetual sembollük başlangıç allowlist'i kullan;
+- runtime bu bounded allowlist içinde #581 opportunity ranking ile en fazla 5 sembol seçsin;
+- bu camp'i **full-universe 50 → 5 parity kanıtı** olarak sınıflandırma. Gerçek full-universe attached qualification için burn-in campaign/reconciliation scope kontratının ayrıca düzeltilmesi gerekir.
+- #582 bu seçimi değiştirmez; seçilmiş eşzamanlı adayların portfolio allocation/risk dağıtım authority'sini canonical hale getirir.
+
+Campaign allowlist'ini launch anındaki Binance 24h quote volume snapshot'ından deterministik üret. Bu yalnız campaign scope oluşturur; runtime opportunity ranking'in yerine geçmez:
+
+```bash
+mkdir -p "artifacts/burnin/preflight_${RELEASE_ID}"
+
+CAMPAIGN_SYMBOLS="$(
+python - <<'PY'
+import json
+import math
+import os
+import urllib.request
+from datetime import UTC, datetime
+
+from alphaforge.config import load_config_from_env, load_reconciliation_settings
+
+cfg = load_config_from_env()
+recon = load_reconciliation_settings()
+
+active_limit = int(cfg.runtime.max_symbols_per_scan)
+recon_limit = int(recon.max_fill_symbols)
+campaign_limit = min(10, recon_limit)
+
+if campaign_limit <= active_limit:
+    raise SystemExit(
+        f"FAIL_CLOSED: campaign_limit={campaign_limit} must be greater than "
+        f"UNIVERSE_MAX_ACTIVE_SYMBOLS={active_limit} so ranking is observable"
+    )
+
+base = str(cfg.binance.market_data_base_url).rstrip("/")
+
+def get_json(path):
+    req = urllib.request.Request(
+        base + path,
+        headers={"User-Agent": "AlphaForge-M0-universe-snapshot/1"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+exchange = get_json("/fapi/v1/exchangeInfo")
+tickers = get_json("/fapi/v1/ticker/24hr")
+
+eligible = {
+    str(row.get("symbol") or "").upper()
+    for row in exchange.get("symbols", [])
+    if isinstance(row, dict)
+    and row.get("status") == "TRADING"
+    and row.get("contractType") == "PERPETUAL"
+    and row.get("quoteAsset") == "USDT"
+}
+
+ranked = []
+for row in tickers:
+    if not isinstance(row, dict):
+        continue
+    symbol = str(row.get("symbol") or "").upper()
+    if symbol not in eligible:
+        continue
+    try:
+        quote_volume = float(row.get("quoteVolume"))
+    except (TypeError, ValueError):
+        continue
+    if not math.isfinite(quote_volume) or quote_volume < 0:
+        continue
+    ranked.append((quote_volume, symbol))
+
+ranked.sort(key=lambda item: (-item[0], item[1]))
+symbols = [symbol for _, symbol in ranked[:campaign_limit]]
+
+if len(symbols) <= active_limit:
+    raise SystemExit(
+        f"FAIL_CLOSED: only {len(symbols)} valid campaign symbols; "
+        f"need more than active_limit={active_limit}"
+    )
+
+snapshot = {
+    "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    "source": "BINANCE_FUTURES_PUBLIC_24HR_PLUS_EXCHANGE_INFO",
+    "selection_basis": "campaign_allowlist_top_quote_volume_only",
+    "campaign_limit": campaign_limit,
+    "reconciliation_max_fill_symbols": recon_limit,
+    "runtime_max_active_symbols": active_limit,
+    "runtime_candidate_pool_top_n_volume": int(cfg.runtime.universe_candidate_pool_top_n_volume),
+    "symbols": symbols,
+}
+with open(
+    f"artifacts/burnin/preflight_{os.environ['RELEASE_ID']}/campaign_universe_snapshot.json",
+    "w",
+    encoding="utf-8",
+) as handle:
+    json.dump(snapshot, handle, indent=2, sort_keys=True)
+
+print(",".join(symbols))
+PY
+)"
+
+test -n "$CAMPAIGN_SYMBOLS" || {
+  echo "ERROR: campaign symbol allowlist boş"
+  exit 1
+}
+
+export CAMPAIGN_SYMBOLS
+echo "CAMPAIGN_SYMBOLS=$CAMPAIGN_SYMBOLS"
+```
+
+Bu snapshot campaign identity'deki `symbols_json/universe_hash` ile birlikte sabitlenir. Campaign başladıktan sonra allowlist'i sessizce değiştirme; source/config/universe identity değişiyorsa fresh preflight + fresh campaign kullan.
+
 ### M0.3 Preflight, schema ve SQLite integrity
 
 ```bash
@@ -1267,7 +1393,7 @@ python -m alphaforge.burnin_ops \
   --db "$DB" \
   preflight \
   --release-id "$RELEASE_ID" \
-  --symbols BTCUSDT,ETHUSDT \
+  --symbols "$CAMPAIGN_SYMBOLS" \
   --intervals 1h \
   --output-dir "artifacts/burnin/preflight_${RELEASE_ID}"
 ```
@@ -1335,7 +1461,7 @@ python -m alphaforge.burnin_ops \
   launch \
   --release-id "$RELEASE_ID" \
   --duration-days 7 \
-  --symbols BTCUSDT,ETHUSDT \
+  --symbols "$CAMPAIGN_SYMBOLS" \
   --intervals 1h \
   --detach \
   --attach-timeout-seconds 120
