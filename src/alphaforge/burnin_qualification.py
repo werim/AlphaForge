@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from alphaforge.burnin import CRITICAL_COST_FIELDS, LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, update_burnin_run_counters
+from alphaforge.burnin import CRITICAL_COST_FIELDS, LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, derive_burnin_run_counters, persist_burnin_run_counters, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
@@ -140,7 +140,7 @@ class BurnInQualificationEngine:
             cal=conn.execute(text("SELECT * FROM burnin_calibration_metrics WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
             execm=conn.execute(text("SELECT * FROM burnin_execution_metrics WHERE burnin_run_id=:id ORDER BY id DESC LIMIT 1"),{"id":burnin_run_id}).mappings().first()
             dds=conn.execute(text("SELECT * FROM burnin_drawdown_events WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
-            derived = update_burnin_run_counters(conn, burnin_run_id)
+            derived = derive_burnin_run_counters(conn, burnin_run_id)
             decision_predicate = canonical_decision_sql("o")
             obs_counts = conn.execute(text(f"SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations o WHERE burnin_run_id=:id AND {decision_predicate}"), {"id": burnin_run_id}).mappings().first() or {}
             canonical_reject_ids={str(r[0]) for r in conn.execute(text(f"SELECT json_extract(metrics_json,'$.reject_decision_id') FROM burnin_observations o WHERE burnin_run_id=:id AND UPPER(COALESCE(decision,''))='REJECTED' AND {decision_predicate}"), {"id":burnin_run_id}).all() if r[0]}
@@ -237,6 +237,12 @@ class BurnInQualificationEngine:
             evidence_status="PASS" if not any(b in {"BURNIN_SCHEMA_OR_EVIDENCE_MISSING"} or b.startswith("MISSING_PROVENANCE") or b.startswith("INCOMPLETE_COST") for b in blockers) else "FAIL"
             missing_markers=("MISSING","INSUFFICIENT","NO_","BURNIN_SCHEMA")
             status="CANARY_QUALIFIED" if not blockers else ("BURN_IN_INSUFFICIENT" if any(any(m in b for m in missing_markers) for b in blockers) or sample_status=="INSUFFICIENT" else "BURN_IN_FAILED")
+
+            # Qualification analysis is intentionally read-only until this point.
+            # SQLite begins the transaction deferred, so expensive analysis does not
+            # own the single writer slot. Only final counter/snapshot persistence
+            # upgrades the same evidence snapshot to a short write transaction.
+            persist_burnin_run_counters(conn, derived)
             snap=self._snapshot(burnin_run_id,release_id,status,blockers,warnings,th,metrics,sample_status,expectancy_status,exec_status,regime_status,reject_status,cal_status,dd_status,conc_status,rec_status,evidence_status)
             self.persist_snapshot(conn,snap)
             suspension=self.suspension_reasons(snap)
