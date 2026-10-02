@@ -408,11 +408,17 @@ def _event_details(row: sqlite3.Row | None) -> dict[str, Any]:
         return {}
 
 
-def _candidate_identity(release_id: str, symbols: Sequence[str], intervals: Sequence[str]) -> dict[str, Any]:
-    return build_phase8_campaign_identity(load_config_from_env().runtime, symbols, intervals, release_id=release_id)
+def _candidate_identity(release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False) -> dict[str, Any]:
+    return build_phase8_campaign_identity(
+        load_config_from_env().runtime,
+        symbols,
+        intervals,
+        release_id=release_id,
+        dynamic_universe=dynamic_universe,
+    )
 
 
-def _actual_runtime_identity(release_id: str, symbols: Sequence[str], intervals: Sequence[str]) -> dict[str, Any]:
+def _actual_runtime_identity(release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False) -> dict[str, Any]:
     old_release = os.environ.get("ALPHAFORGE_RELEASE_ID")
     old_exec = os.environ.get("ALPHAFORGE_EXECUTION_MODE")
     old_mode = os.environ.get("EXECUTION_MODE")
@@ -424,7 +430,11 @@ def _actual_runtime_identity(release_id: str, symbols: Sequence[str], intervals:
         runtime = _build_runtime_from_env()
         # Preserve the canonical builder's payloads for an auditable preflight
         # comparison; callers still enforce all critical hashes below.
-        return runtime._phase8_runtime_hashes(list(symbols), list(intervals))
+        return runtime._phase8_runtime_hashes(
+            list(symbols),
+            list(intervals),
+            dynamic_universe=dynamic_universe,
+        )
     finally:
         for key, value in (("ALPHAFORGE_RELEASE_ID", old_release), ("ALPHAFORGE_EXECUTION_MODE", old_exec), ("EXECUTION_MODE", old_mode)):
             if value is None:
@@ -477,7 +487,7 @@ def _readonly_reconciliation_provider(cfg: Any, symbols: Sequence[str] = ()) -> 
     )
 
 
-def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
+def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
     cfg = load_config_from_env()
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -506,7 +516,8 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     credentials_ok = all(bool(secret_rows.get(name, {}).get("present")) and not bool(secret_rows.get(name, {}).get("placeholder_detected")) for name in ("BINANCE_API_KEY", "BINANCE_API_SECRET"))
     add("reconciliation_credentials_non_placeholder", "PASS" if (not reconciliation_enabled or credentials_ok) else "FAIL", {"enabled": reconciliation_enabled, "credentials_present": credentials_ok})
     add("paper_reconciliation_enabled", "PASS" if reconciliation_enabled else "FAIL", {"enabled": reconciliation_enabled})
-    provider = reconciliation_provider or _readonly_reconciliation_provider(cfg, symbols)
+    reconciliation_tracked_symbols = () if dynamic_universe else symbols
+    provider = reconciliation_provider or _readonly_reconciliation_provider(cfg, reconciliation_tracked_symbols)
     if reconciliation_enabled and credentials_ok:
         try:
             signed_probe = build_readonly_reconciliation_probe(provider)()
@@ -548,7 +559,18 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     mode = str(cfg.runtime.execution_mode).upper()
     add("execution_mode_paper", "PASS" if mode == "PAPER" else "FAIL", mode)
     add("live_mutation_path_disabled", "PASS" if mode != "LIVE" and not bool(getattr(cfg.runtime, "enable_live_execution", False)) else "FAIL", "LIVE mutation path must be unavailable")
-    add("symbols_valid", "PASS" if bool(symbols) and all(s.endswith("USDT") and s.replace("USDT", "").isalnum() for s in symbols) else "FAIL", list(symbols))
+    fixed_symbols_valid = bool(symbols) and all(
+        s.endswith("USDT") and s.replace("USDT", "").isalnum() for s in symbols
+    )
+    dynamic_scope_valid = bool(dynamic_universe and not symbols)
+    add(
+        "symbols_valid",
+        "PASS" if (dynamic_scope_valid or (not dynamic_universe and fixed_symbols_valid)) else "FAIL",
+        {
+            "scope_mode": "CANONICAL_DYNAMIC_V1" if dynamic_universe else "FIXED_ALLOWLIST",
+            "symbols": list(symbols),
+        },
+    )
     add("intervals_valid", "PASS" if bool(intervals) and all(i in VALID_INTERVALS for i in intervals) else "FAIL", list(intervals))
 
     conn: sqlite3.Connection | None = None
@@ -568,11 +590,15 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("schema_current", "UNAVAILABLE", "database unavailable")
         add("release_id_database_identity_collision_free", "UNAVAILABLE", "database unavailable")
 
-    ident = _candidate_identity(release_id, symbols, intervals)
+    ident = _candidate_identity(
+        release_id, symbols, intervals, dynamic_universe=dynamic_universe
+    )
     cid = "camp_" + canonical_hash({"release_id": release_id, "config_hash": ident["config_hash"], "strategy_config_hash": ident["strategy_config_hash"], "universe_hash": ident["universe_hash"]})[:16]
     add("campaign_identity_deterministic", "PASS" if ident.get("config_hash") and ident.get("universe_hash") else "FAIL", ident)
     try:
-        runtime_ident = _actual_runtime_identity(release_id, symbols, intervals)
+        runtime_ident = _actual_runtime_identity(
+            release_id, symbols, intervals, dynamic_universe=dynamic_universe
+        )
         expected = {key: ident.get(key) for key in ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")}
         expected["execution_mode"] = "PAPER"
         mismatches = {key: {"expected": expected[key], "observed": runtime_ident.get(key)} for key in expected if runtime_ident.get(key) != expected[key]}
@@ -615,7 +641,15 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("no_stale_worker_occupying_campaign", "PASS" if int(stale) == 0 else "FAIL", stale)
         recovery_engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
-            recovery = evaluate_runtime_recovery(recovery_engine, mode="PAPER", campaign_id=cid, reconciliation_probe=build_readonly_reconciliation_probe(reconciliation_provider or _readonly_reconciliation_provider(cfg, symbols)))
+            recovery = evaluate_runtime_recovery(
+                recovery_engine,
+                mode="PAPER",
+                campaign_id=cid,
+                reconciliation_probe=build_readonly_reconciliation_probe(
+                    reconciliation_provider
+                    or _readonly_reconciliation_provider(cfg, reconciliation_tracked_symbols)
+                ),
+            )
             # A complete empty account snapshot is the required exchange evidence
             # for clearing an unrelated PAPER predecessor.  Preserve it append-only;
             # never edit the predecessor's unclean snapshot in place.
@@ -629,8 +663,25 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     add("disk_space_sufficient", "PASS" if usage.free > 100 * 1024 * 1024 else "FAIL", {"free_bytes": usage.free})
     if require_market_data:
         try:
-            BinanceReadOnlyCandleProvider(interval=intervals[0] if intervals else "1h", base_url=cfg.binance.market_data_base_url)(symbols[0], "2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z")
-            add("binance_readonly_klines_reachable", "PASS", symbols[0] if symbols else None)
+            connectivity_probe_symbol = symbols[0] if symbols else ("BTCUSDT" if dynamic_universe else None)
+            if not connectivity_probe_symbol:
+                raise ValueError("market data connectivity probe symbol unavailable")
+            BinanceReadOnlyCandleProvider(
+                interval=intervals[0] if intervals else "1h",
+                base_url=cfg.binance.market_data_base_url,
+            )(
+                connectivity_probe_symbol,
+                "2024-01-01T00:00:00Z",
+                "2024-01-01T02:00:00Z",
+            )
+            add(
+                "binance_readonly_klines_reachable",
+                "PASS",
+                {
+                    "symbol": connectivity_probe_symbol,
+                    "connectivity_probe_only": bool(dynamic_universe),
+                },
+            )
         except Exception as exc:
             add("binance_readonly_klines_reachable", "FAIL", f"{exc.__class__.__name__}:{exc}")
     skew = clock_skew_check()
@@ -829,15 +880,30 @@ def _startup_diagnostics(campaign_id: str, process: subprocess.Popen[Any] | None
         **extra,
     }
 
-def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], *, detach: bool = False, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
-    pf = preflight(db, release_id, symbols, intervals)
+def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, detach: bool = False, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
+    pf = preflight(
+        db,
+        release_id,
+        symbols,
+        intervals,
+        dynamic_universe=dynamic_universe,
+    )
     if pf["status"] != "PASS":
         return {"status": "FAILED_CLOSED", "preflight": pf}
     conn = _connect(db)
     campaign_id: str | None = None
     run_id: str | None = None
     try:
-        campaign = create_campaign(conn, release_id=release_id, duration_days=duration_days, symbols=symbols, intervals=intervals, runtime_config=load_config_from_env().runtime, source_provenance={"provider": "BINANCE_READ_ONLY_KLINES", "mode": "PAPER"})
+        campaign = create_campaign(
+            conn,
+            release_id=release_id,
+            duration_days=duration_days,
+            symbols=symbols,
+            intervals=intervals,
+            runtime_config=load_config_from_env().runtime,
+            source_provenance={"provider": "BINANCE_READ_ONLY_KLINES", "mode": "PAPER"},
+            dynamic_universe=dynamic_universe,
+        )
         campaign_id = campaign.campaign_id
         launch_started_at = utc_now()
         start = start_or_resume_campaign(conn, campaign.campaign_id)
@@ -2102,8 +2168,22 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--db")
     parser.add_argument("--json", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("preflight", epilog="PowerShell example: --symbols BTCUSDT,ETHUSDT --intervals 1h,4h"); p.add_argument("--release-id", required=True); p.add_argument("--symbols", required=True, nargs="+", help="Symbols as comma-separated values (BTCUSDT,ETHUSDT) or as separate values (BTCUSDT ETHUSDT)."); p.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h)."); p.add_argument("--output-dir")
-    l = sub.add_parser("launch", epilog="PowerShell example: python -m alphaforge.burnin_ops --db $DB launch --release-id $RELEASE_ID --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach"); l.add_argument("--release-id", required=True); l.add_argument("--duration-days", type=float, required=True); l.add_argument("--symbols", required=True, nargs="+", help="Symbols as comma-separated values (BTCUSDT,ETHUSDT) or as separate values (BTCUSDT ETHUSDT)."); l.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h)."); l.add_argument("--detach", action="store_true"); l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
+    p = sub.add_parser("preflight", epilog="Dynamic example: --dynamic-universe --intervals 1h")
+    p.add_argument("--release-id", required=True)
+    p_scope = p.add_mutually_exclusive_group(required=True)
+    p_scope.add_argument("--symbols", nargs="+", help="Fixed campaign allowlist as comma-separated or separate symbols.")
+    p_scope.add_argument("--dynamic-universe", action="store_true", help="Use canonical selector-owned dynamic universe; no fixed symbol allowlist.")
+    p.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h).")
+    p.add_argument("--output-dir")
+    l = sub.add_parser("launch", epilog="Dynamic example: python -m alphaforge.burnin_ops --db $DB launch --release-id $RELEASE_ID --duration-days 3 --dynamic-universe --intervals 1h --detach")
+    l.add_argument("--release-id", required=True)
+    l.add_argument("--duration-days", type=float, required=True)
+    l_scope = l.add_mutually_exclusive_group(required=True)
+    l_scope.add_argument("--symbols", nargs="+", help="Fixed campaign allowlist as comma-separated or separate symbols.")
+    l_scope.add_argument("--dynamic-universe", action="store_true", help="Use canonical selector-owned dynamic universe; no fixed symbol allowlist.")
+    l.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h).")
+    l.add_argument("--detach", action="store_true")
+    l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
     for name in ("health", "watch", "recovery-drill", "audit", "pause", "resume", "status"):
         s = sub.add_parser(name); s.add_argument("--campaign-id", required=True)
     rr = sub.add_parser("recover-runtime"); rr.add_argument("--campaign-id"); rr.add_argument("--terminalize-zero-exposure", action="store_true", help="explicitly terminalize a dead RECOVERY_REQUIRED PAPER continuation only after complete zero-exposure verification")
@@ -2139,10 +2219,28 @@ def _main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(out, indent=2, sort_keys=True, default=str))
             return {"PASS": 0, "INCOMPLETE": 3, "FAIL": 4}.get(out.get("status"), 2)
         if args.cmd == "preflight":
-            out = preflight(db, args.release_id, _symbols(args.symbols), _intervals(args.intervals), output_dir=args.output_dir)
+            symbols = [] if args.dynamic_universe else _symbols(args.symbols or [])
+            out = preflight(
+                db,
+                args.release_id,
+                symbols,
+                _intervals(args.intervals),
+                dynamic_universe=bool(args.dynamic_universe),
+                output_dir=args.output_dir,
+            )
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out["status"] == "PASS" else 3
         if args.cmd == "launch":
-            out = launch_campaign(db, args.release_id, args.duration_days, _symbols(args.symbols), _intervals(args.intervals), detach=args.detach, attach_timeout_seconds=args.attach_timeout_seconds)
+            symbols = [] if args.dynamic_universe else _symbols(args.symbols or [])
+            out = launch_campaign(
+                db,
+                args.release_id,
+                args.duration_days,
+                symbols,
+                _intervals(args.intervals),
+                dynamic_universe=bool(args.dynamic_universe),
+                detach=args.detach,
+                attach_timeout_seconds=args.attach_timeout_seconds,
+            )
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") in {"LAUNCHED", "FOREGROUND_STOPPED"} else 1
         if args.cmd in {"health", "status"}:
             readonly = _connect_readonly(db)
