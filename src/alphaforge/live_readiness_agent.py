@@ -13,7 +13,7 @@ from alphaforge.release_gates import (
 
 PASS, BLOCKED, NOT_OBSERVABLE, NEEDS_FIX = "PASS", "BLOCKED", "NOT_OBSERVABLE", "NEEDS_FIX"
 IDS = ("GIT_IDENTITY","WORKTREE_CLEAN","SCHEMA_VALID","PREFLIGHT_PASS","CAMPAIGN_HEALTH","CONFIG_DRIFT","STRATEGY_DRIFT","RECONCILIATION","DUPLICATE_EXECUTION","CONTAMINATION","RUNTIME_ERRORS","LIVE_MUTATION_DISABLED","ACCEPTED_LIFECYCLE_EVIDENCE","REJECT_FORWARD_OUTCOME_EVIDENCE","EXPECTANCY_TEMPORAL_EVIDENCE","EXECUTION_COST_EVIDENCE","RECOVERY_DRILL","SOAK_EVIDENCE","ROLLBACK_EVIDENCE","RUNBOOK_EVIDENCE")
-TABLES = {"burnin_campaigns","burnin_runs","burnin_campaign_runs","burnin_preflight_reports","runtime_state_snapshots","order_decisions","trade_lifecycle_events","burnin_observations","burnin_reject_outcomes","expectancy_evidence","burnin_qualification_snapshots","burnin_recovery_drills","live_rollback_validation_evidence","rollback_verification_events","runbook_evidence","runtime_control_state","runtime_control_audit_events","schema_migrations","universe_selection_cycles","universe_selection_candidates","burnin_universe_selection_links"}
+TABLES = {"burnin_campaigns","burnin_runs","burnin_campaign_runs","burnin_preflight_reports","runtime_state_snapshots","order_decisions","trade_lifecycle_events","burnin_observations","burnin_reject_outcomes","expectancy_evidence","burnin_qualification_snapshots","burnin_recovery_drills","live_rollback_validation_evidence","rollback_verification_events","runbook_evidence","runtime_control_state","runtime_control_audit_events","schema_migrations"}
 @dataclass(frozen=True)
 class Gate:
     gate_id:str; status:str; reason:str; evidence_source:str; observed_value:Any; expected_condition:str; timestamp:str; scope_identity:dict[str,Any]; blocker_severity:str="CRITICAL"
