@@ -590,14 +590,22 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("schema_current", "UNAVAILABLE", "database unavailable")
         add("release_id_database_identity_collision_free", "UNAVAILABLE", "database unavailable")
 
-    ident = _candidate_identity(
-        release_id, symbols, intervals, dynamic_universe=dynamic_universe
+    ident = (
+        _candidate_identity(release_id, symbols, intervals)
+        if not dynamic_universe
+        else _candidate_identity(
+            release_id, symbols, intervals, dynamic_universe=True
+        )
     )
     cid = "camp_" + canonical_hash({"release_id": release_id, "config_hash": ident["config_hash"], "strategy_config_hash": ident["strategy_config_hash"], "universe_hash": ident["universe_hash"]})[:16]
     add("campaign_identity_deterministic", "PASS" if ident.get("config_hash") and ident.get("universe_hash") else "FAIL", ident)
     try:
-        runtime_ident = _actual_runtime_identity(
-            release_id, symbols, intervals, dynamic_universe=dynamic_universe
+        runtime_ident = (
+            _actual_runtime_identity(release_id, symbols, intervals)
+            if not dynamic_universe
+            else _actual_runtime_identity(
+                release_id, symbols, intervals, dynamic_universe=True
+            )
         )
         expected = {key: ident.get(key) for key in ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")}
         expected["execution_mode"] = "PAPER"
