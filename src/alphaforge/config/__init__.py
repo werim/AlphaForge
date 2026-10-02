@@ -82,6 +82,12 @@ class RuntimeSettings:
     reject_forward_horizon_bars: int= field(default_factory=lambda: canonical_field_default("reject_forward_horizon_bars"))
     reject_resolver_interval_sec: float= field(default_factory=lambda: canonical_field_default("reject_resolver_interval_sec"))
     max_symbols_per_scan: int= field(default_factory=lambda: canonical_field_default("max_symbols_per_scan"))
+    universe_min_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_min_market_cap_usd"))
+    universe_max_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_max_market_cap_usd"))
+    universe_min_volume_24h_usd: float= field(default_factory=lambda: canonical_field_default("universe_min_volume_24h_usd"))
+    universe_candidate_pool_top_n_volume: int= field(default_factory=lambda: canonical_field_default("universe_candidate_pool_top_n_volume"))
+    universe_excluded_symbols: str= field(default_factory=lambda: canonical_field_default("universe_excluded_symbols"))
+    universe_max_evidence_age_sec: float= field(default_factory=lambda: canonical_field_default("universe_max_evidence_age_sec"))
     max_reject_log_entries: int= field(default_factory=lambda: canonical_field_default("max_reject_log_entries"))
     max_concurrent_positions: int= field(default_factory=lambda: canonical_field_default("max_concurrent_positions"))
     symbol_cooldown_sec: float= field(default_factory=lambda: canonical_field_default("symbol_cooldown_sec"))
@@ -416,6 +422,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     process_env = os.environ if env is None else env
     managed = effective_config_values(env=process_env, root=root, include_files=False)
     val = lambda name: managed[name]["value"]
+    optional_float = lambda name: None if val(name) in (None, "") else float(val(name))
     # Executable entry points bootstrap dotenv once. The library loader itself
     # remains deterministic and resolves process values plus typed defaults.
     env = process_env
@@ -442,7 +449,13 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         heartbeat_interval_sec=val("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC"),
         reject_forward_horizon_bars=val("ALPHAFORGE_REJECT_FORWARD_HORIZON_BARS"),
         reject_resolver_interval_sec=val("ALPHAFORGE_REJECT_RESOLVER_INTERVAL_SEC"),
-        max_symbols_per_scan=val("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN"),
+        max_symbols_per_scan=val("ALPHAFORGE_UNIVERSE_MAX_ACTIVE_SYMBOLS"),
+        universe_min_market_cap_usd=optional_float("ALPHAFORGE_UNIVERSE_MIN_MARKET_CAP_USD"),
+        universe_max_market_cap_usd=optional_float("ALPHAFORGE_UNIVERSE_MAX_MARKET_CAP_USD"),
+        universe_min_volume_24h_usd=val("ALPHAFORGE_UNIVERSE_MIN_VOLUME_24H_USD"),
+        universe_candidate_pool_top_n_volume=val("ALPHAFORGE_UNIVERSE_CANDIDATE_POOL_TOP_N_VOLUME"),
+        universe_excluded_symbols=str(val("ALPHAFORGE_UNIVERSE_EXCLUDED_SYMBOLS")),
+        universe_max_evidence_age_sec=val("ALPHAFORGE_UNIVERSE_MAX_EVIDENCE_AGE_SEC"),
         max_reject_log_entries=val("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES"),
         max_concurrent_positions=val("ALPHAFORGE_MAX_CONCURRENT_POSITIONS"),
         symbol_cooldown_sec=val("ALPHAFORGE_SYMBOL_COOLDOWN_SEC"),
@@ -523,6 +536,22 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
         reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
         reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
+    )
+    # Cross-field universe constraints are validated once at canonical config
+    # resolution so no execution mode can invent a different repair/default.
+    from alphaforge.symbol_selector import UniverseConstraints
+    UniverseConstraints(
+        min_market_cap_usd=runtime.universe_min_market_cap_usd,
+        max_market_cap_usd=runtime.universe_max_market_cap_usd,
+        min_volume_24h_usd=runtime.universe_min_volume_24h_usd,
+        candidate_pool_top_n_volume=runtime.universe_candidate_pool_top_n_volume,
+        max_active_symbols=runtime.max_symbols_per_scan,
+        excluded_symbols=tuple(part for part in runtime.universe_excluded_symbols.replace(",", " ").split() if part),
+        max_evidence_age_sec=runtime.universe_max_evidence_age_sec,
+        max_spread_pct=runtime.max_spread_pct,
+        max_expected_slippage_pct=runtime.max_expected_slippage_pct,
+        max_abs_funding_rate_pct=runtime.max_abs_funding_rate_pct,
+        min_liquidity_score=runtime.min_liquidity_score,
     )
     binance = BinanceSettings(
         base_url=resolved_binance.rest_base_url,

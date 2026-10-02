@@ -52,7 +52,7 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
         "urllib.request.urlopen",
         _urlopen_multi(
             [
-                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
                 [{"symbol": "BTCUSDT", "lastPrice": "100.05", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
                 [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
@@ -74,7 +74,7 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
         "urllib.request.urlopen",
         _urlopen_multi(
             [
-                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
                 [{"symbol": "BTCUSDT", "lastPrice": "100.10", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
                 [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.2"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0003"}],
@@ -101,7 +101,7 @@ def test_binance_missing_funding_rate_remains_unavailable(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         "urllib.request.urlopen",
         _urlopen_multi([
-            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
             [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
             [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
             [{"symbol": "BTCUSDT"}],
@@ -121,7 +121,7 @@ def test_binance_explicit_zero_funding_is_verified_measured_zero(monkeypatch: py
     monkeypatch.setattr(
         "urllib.request.urlopen",
         _urlopen_multi([
-            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
             [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
             [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
             [{"symbol": "BTCUSDT", "lastFundingRate": "0.00000000"}],
@@ -168,7 +168,7 @@ def test_binance_unavailable_monotonic_clock_does_not_fabricate_latency(monkeypa
     monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
     monkeypatch.setattr("time.perf_counter", lambda: (_ for _ in ()).throw(RuntimeError("clock unavailable")))
     monkeypatch.setattr("urllib.request.urlopen", _urlopen_multi([
-        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
         [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
         [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
         [],
@@ -193,7 +193,7 @@ def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: 
     monkeypatch.setattr(
         "urllib.request.urlopen",
         _urlopen_multi([
-            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
             [{"symbol": "BTCUSDT", "lastPrice": "999", "lowPrice": "1", "highPrice": "2000",
               "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
             [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
@@ -251,7 +251,7 @@ def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatc
     monkeypatch.setattr(
         "urllib.request.urlopen",
         _urlopen_multi([
-            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
             [{"symbol": "BTCUSDT", "lastPrice": "100", "lowPrice": "100", "highPrice": "108",
               "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
             [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
@@ -330,7 +330,7 @@ def test_scan_exchange_markets_returns_empty_on_malformed_binance_payload(monkey
         "urllib.request.urlopen",
         _urlopen_multi(
             [
-                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
                 {"symbol": "BTCUSDT"},
                 [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
@@ -396,7 +396,7 @@ def test_binance_premium_index_timeout_is_not_reported_as_valid_empty(
 ) -> None:
     monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
     payloads = iter([
-        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
         [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000",
           "priceChangePercent": "1"}],
         [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],

@@ -27,7 +27,8 @@ from alphaforge.config_registry import (decision_filter_config, effective_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_decision_evidence, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
-from alphaforge.symbol_selector import select_symbol
+from alphaforge.symbol_selector import UniverseConstraints, build_selected_universe, select_symbol
+from alphaforge.universe_evidence import persist_universe_selection
 from alphaforge.signal_geometry import build_breakout_geometry
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
@@ -900,13 +901,26 @@ def parse_ts(value: str) -> int:
 def fetch_json(url: str) -> Any:
     with urlopen(url) as resp:  # nosec - public market data
         return json.loads(resp.read().decode("utf-8"))
-def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    if symbols:
-        return [{"symbol": sym.strip().upper(), "quoteVolume": 0.0} for sym in symbols if sym.strip()]
+def build_backtest_universe_selection(
+    top_n: int,
+    quote: str = "USDT",
+    *,
+    constraints: UniverseConstraints | None = None,
+    decision_timestamp: float | None = None,
+):
+    observed_at = float(decision_timestamp if decision_timestamp is not None else datetime.now(timezone.utc).timestamp())
+    resolved = constraints or UniverseConstraints(
+        min_volume_24h_usd=0.0,
+        candidate_pool_top_n_volume=max(1, int(top_n)),
+        max_active_symbols=max(1, int(top_n)),
+        max_evidence_age_sec=120.0,
+    )
     info = fetch_json("https://fapi.binance.com/fapi/v1/exchangeInfo")
     tickers = fetch_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
+    books = fetch_json("https://fapi.binance.com/fapi/v1/bookTicker")
     ticker_map = {t["symbol"]: t for t in tickers}
-    selected = []
+    book_map = {row.get("symbol"): row for row in books if isinstance(row, dict) and row.get("symbol")}
+    candidates = []
     for s in info.get("symbols", []):
         sym = s.get("symbol", "")
         if s.get("status") != "TRADING" or s.get("contractType") != "PERPETUAL":
@@ -914,22 +928,56 @@ def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[Li
         if s.get("quoteAsset") != quote or not sym.endswith(quote):
             continue
         t = ticker_map.get(sym)
-        if not t:
+        book = book_map.get(sym)
+        if not t or not book:
             continue
-        qv = float(t.get("quoteVolume", 0.0) or 0.0)
-        if qv <= 0:
+        try:
+            qv = float(t.get("quoteVolume"))
+            bid = float(book.get("bidPrice"))
+            ask = float(book.get("askPrice"))
+            change = abs(float(t.get("priceChangePercent"))) / 100.0
+        except (TypeError, ValueError):
             continue
-        if not s.get("filters"):
+        if qv < 0 or bid <= 0 or ask < bid or not s.get("filters"):
             continue
-        selected.append({"symbol": sym, "quoteVolume": qv})
-    selected.sort(key=lambda x: x["quoteVolume"], reverse=True)
-    return selected[:top_n]
+        mid = (bid + ask) / 2.0
+        candidates.append({
+            "symbol": sym,
+            "quoteVolume": qv,
+            "volume_24h_usdt": qv,
+            "spread_pct": (ask - bid) / mid,
+            "volatility_pct": change,
+            "market_ts": observed_at,
+            "market_observed_at": observed_at,
+            "source_exchange": "binance",
+            "market_data_source": "BINANCE_PUBLIC_SNAPSHOT",
+            "instrument_status": s.get("status"),
+            "contract_type": s.get("contractType"),
+            "market_cap_status": "UNAVAILABLE",
+            "market_cap_source": "UNAVAILABLE",
+        })
+    selection = build_selected_universe(
+        candidates,
+        resolved,
+        decision_timestamp=observed_at,
+        execution_mode="BACKTEST",
+        git_sha=os.getenv("GITHUB_SHA") or os.getenv("ALPHAFORGE_GIT_SHA") or "UNKNOWN_GIT_COMMIT",
+    )
+    selected_by_symbol = {candidate["symbol"]: candidate for candidate in candidates}
+    return [selected_by_symbol[symbol] for symbol in selection.selected_symbols], selection
+
+
+def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    if symbols:
+        return [{"symbol": sym.strip().upper(), "quoteVolume": 0.0} for sym in symbols if sym.strip()]
+    selected, _selection = build_backtest_universe_selection(top_n, quote)
+    return selected
 def save_symbol_universe(path: str, universe: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["symbol", "quoteVolume"])
         w.writeheader()
-        w.writerows(universe)
+        w.writerows({"symbol": row.get("symbol"), "quoteVolume": row.get("quoteVolume", row.get("volume_24h_usdt"))} for row in universe)
 def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List[Candle]:
     rows = fetch_binance_klines_paginated(symbol=symbol, interval=interval, start_ms=start_ms, end_ms=end_ms)
     return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in rows]
@@ -5052,7 +5100,7 @@ def main():
     p.add_argument("--start")
     p.add_argument("--end")
     p.add_argument("--last-n-days", type=int, default=7)
-    p.add_argument("--top-n", "--max-symbols", dest="top_n", type=int, default=cfg.backtest.top_n)
+    p.add_argument("--top-n", "--max-symbols", dest="top_n", type=int, default=cfg.runtime.max_symbols_per_scan)
     p.add_argument("--quote", default="USDT")
     p.add_argument("--interval", default=cfg.backtest.timeframe)
     p.add_argument("--output-dir", default=cfg.backtest.output_dir)
@@ -5126,12 +5174,31 @@ def main():
         short_breakdown_rescue_enabled=rescue_config.enabled and str(args.mode).upper() == "BACKTEST",
     )
     write_backtest_filter_state_artifacts(args.output_dir, filter_state)
+    universe_selection = None
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
         mtf_source_by_symbol = dict(candles_by_symbol)
     else:
         fixed_symbols = fixed_symbols_for_state
-        universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
+        if fixed_symbols:
+            universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
+        else:
+            universe_constraints = UniverseConstraints(
+                min_market_cap_usd=cfg.runtime.universe_min_market_cap_usd,
+                max_market_cap_usd=cfg.runtime.universe_max_market_cap_usd,
+                min_volume_24h_usd=cfg.runtime.universe_min_volume_24h_usd,
+                candidate_pool_top_n_volume=cfg.runtime.universe_candidate_pool_top_n_volume,
+                max_active_symbols=args.top_n,
+                excluded_symbols=tuple(part.strip() for part in cfg.runtime.universe_excluded_symbols.replace(",", " ").split() if part.strip()),
+                max_evidence_age_sec=cfg.runtime.universe_max_evidence_age_sec,
+                max_spread_pct=cfg.runtime.max_spread_pct,
+                max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct,
+            )
+            universe, universe_selection = build_backtest_universe_selection(
+                args.top_n,
+                args.quote,
+                constraints=universe_constraints,
+            )
         required_intervals = {args.interval, "1m"}
         _prune_stale_candle_artifacts(args.output_dir, [row["symbol"] for row in universe], required_intervals)
         candles_by_symbol = {}
@@ -5182,7 +5249,11 @@ def main():
     backtest_database_url = resolve_backtest_database_url(args.output_dir, root=ROOT_DIR)
     backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
     backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
-    expectancy_session = Session(init_db(backtest_database_url))
+    backtest_engine = init_db(backtest_database_url)
+    if universe_selection is not None:
+        with backtest_engine.begin() as conn:
+            persist_universe_selection(conn, universe_selection)
+    expectancy_session = Session(backtest_engine)
     expectancy_scope = {
         "run_id": os.getenv("ALPHAFORGE_EXPECTANCY_RUN_ID"),
         "campaign_id": os.getenv("ALPHAFORGE_EXPECTANCY_CAMPAIGN_ID"),

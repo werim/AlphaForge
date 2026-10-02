@@ -68,7 +68,14 @@ from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exch
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
-from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
+from alphaforge.symbol_selector import (
+    SymbolSelectionResult,
+    UniverseConstraints,
+    build_selected_universe,
+    selection_results,
+    select_symbols,  # compatibility surface for external test/runtime adapters
+)
+from alphaforge.universe_evidence import persist_universe_selection
 from alphaforge.persistence import (
     fetch_expectancy_stat_detail,
     init_db,
@@ -136,6 +143,12 @@ class RuntimeConfig:
     scan_interval_sec: float= field(default_factory=lambda: canonical_field_default("scan_interval_sec"))
     heartbeat_interval_sec: float= field(default_factory=lambda: canonical_field_default("heartbeat_interval_sec"))
     max_symbols_per_scan: int= field(default_factory=lambda: canonical_field_default("max_symbols_per_scan"))
+    universe_min_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_min_market_cap_usd"))
+    universe_max_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_max_market_cap_usd"))
+    universe_min_volume_24h_usd: float= field(default_factory=lambda: canonical_field_default("universe_min_volume_24h_usd"))
+    universe_candidate_pool_top_n_volume: int= field(default_factory=lambda: canonical_field_default("universe_candidate_pool_top_n_volume"))
+    universe_excluded_symbols: str= field(default_factory=lambda: canonical_field_default("universe_excluded_symbols"))
+    universe_max_evidence_age_sec: float= field(default_factory=lambda: canonical_field_default("universe_max_evidence_age_sec"))
     max_reject_log_entries: int= field(default_factory=lambda: canonical_field_default("max_reject_log_entries"))
     max_concurrent_positions: int= field(default_factory=lambda: canonical_field_default("max_concurrent_positions"))
     symbol_cooldown_sec: float= field(default_factory=lambda: canonical_field_default("symbol_cooldown_sec"))
@@ -363,6 +376,7 @@ class RuntimeOrchestrator:
     _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
     _shadow_worker_task: asyncio.Task[Any] | None = field(default=None, init=False)
     _agent_trace_repository: AgentTraceRepository | None = field(default=None, init=False)
+    _universe_evidence_engine: Engine | None = field(default=None, init=False)
     _agent_persistence_stats: AgentPersistenceStats = field(default_factory=AgentPersistenceStats, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     _persisted_reject_decision_ids: set[str] = field(default_factory=set, init=False)
@@ -2808,8 +2822,51 @@ class RuntimeOrchestrator:
                 "TOO_CHOPPY",
                 "WEAK_TREND_AND_NO_RANGE_EDGE",
             )
-        pre_selection = select_symbols(candidates, selector_config)
-        selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
+        selection_timestamp = time.time()
+        universe_constraints = UniverseConstraints.from_mapping({
+            **selector_config,
+            "universe_min_market_cap_usd": self.config.universe_min_market_cap_usd,
+            "universe_max_market_cap_usd": self.config.universe_max_market_cap_usd,
+            "universe_min_volume_24h_usd": self.config.universe_min_volume_24h_usd,
+            "universe_candidate_pool_top_n_volume": self.config.universe_candidate_pool_top_n_volume,
+            "max_active_symbols": self.config.max_symbols_per_scan,
+            "universe_excluded_symbols": self.config.universe_excluded_symbols,
+            "universe_max_evidence_age_sec": self.config.universe_max_evidence_age_sec,
+        })
+        strategy_config_hash = burnin_config_hash({
+            "min_signal_score": self.config.min_signal_score,
+            "min_effective_rr": self.config.min_effective_rr,
+            "min_rr": self.config.min_rr,
+            "regime_direction_threshold": self.config.regime_direction_threshold,
+            "setup_direction_threshold": self.config.setup_direction_threshold,
+            "execution_direction_threshold": self.config.execution_direction_threshold,
+        })
+        universe_selection = build_selected_universe(
+            candidates,
+            universe_constraints,
+            decision_timestamp=selection_timestamp,
+            execution_mode=self.config.execution_mode.value,
+            git_sha=self._git_commit(),
+            strategy_config_hash=strategy_config_hash,
+        )
+        try:
+            engine = self._resolve_persistence_engine()
+            if engine is None:
+                # Directly-constructed unit/research orchestrators have no
+                # canonical runtime database. Keep their selection evidence
+                # process-local instead of bypassing the evidence contract.
+                if self._universe_evidence_engine is None:
+                    self._universe_evidence_engine = init_db("sqlite+pysqlite:///:memory:")
+                engine = self._universe_evidence_engine
+            with engine.begin() as conn:
+                persist_universe_selection(conn, universe_selection)
+        except Exception as exc:  # noqa: BLE001 - selection cannot proceed without canonical evidence
+            logger.exception("universe_selection_persistence_failed cycle_id=%s", universe_selection.cycle_id)
+            self._last_scan_gate_blockers = ["UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"]
+            self._fail_closed_reason = "UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"
+            return
+        pre_selection = selection_results(universe_selection, selector_config)
+        selected = [row for row in pre_selection if bool(row.diagnostics.get("selected"))]
         reject_reasons: dict[str, int] = {}
         advisory_reasons: dict[str, int] = {}
         for row in pre_selection:
@@ -6751,6 +6808,12 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars,
         reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec,
         max_symbols_per_scan=cfg.runtime.max_symbols_per_scan,
+        universe_min_market_cap_usd=cfg.runtime.universe_min_market_cap_usd,
+        universe_max_market_cap_usd=cfg.runtime.universe_max_market_cap_usd,
+        universe_min_volume_24h_usd=cfg.runtime.universe_min_volume_24h_usd,
+        universe_candidate_pool_top_n_volume=cfg.runtime.universe_candidate_pool_top_n_volume,
+        universe_excluded_symbols=cfg.runtime.universe_excluded_symbols,
+        universe_max_evidence_age_sec=cfg.runtime.universe_max_evidence_age_sec,
         max_reject_log_entries=cfg.runtime.max_reject_log_entries,
         max_concurrent_positions=cfg.runtime.max_concurrent_positions,
         symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec,

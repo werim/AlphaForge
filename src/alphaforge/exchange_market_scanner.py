@@ -270,18 +270,25 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> MarketScanRows:
             endpoint=malformed_endpoint,
             error_class="PayloadShapeError",
         ))
-    trading_symbols = {
-        row.get("symbol") for row in exchange_info["symbols"]
-        if isinstance(row, dict) and isinstance(row.get("symbol"), str) and row.get("status") == "TRADING"
+    trading_instruments = {
+        str(row["symbol"]): row for row in exchange_info["symbols"]
+        if isinstance(row, dict)
+        and isinstance(row.get("symbol"), str)
+        and row.get("status") == "TRADING"
+        and row.get("contractType") == "PERPETUAL"
+        and row.get("quoteAsset") == quote_asset
     }
 
     book_map: dict[str, tuple[float, float]] = {}
     for item in book_tickers:
         if not isinstance(item, dict) or not item.get("symbol"):
             continue
-        bid = float(item.get("bidPrice", 0.0) or 0.0)
-        ask = float(item.get("askPrice", 0.0) or 0.0)
-        if bid <= 0.0 or ask <= 0.0 or ask < bid:
+        try:
+            bid = float(item.get("bidPrice"))
+            ask = float(item.get("askPrice"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0.0 or ask <= 0.0 or ask < bid:
             continue
         book_map[str(item.get("symbol"))] = (bid, ask)
 
@@ -305,11 +312,15 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> MarketScanRows:
         if not isinstance(item, dict):
             continue
         symbol = str(item.get("symbol") or "")
-        if symbol not in trading_symbols or not symbol.endswith(quote_asset):
+        instrument = trading_instruments.get(symbol)
+        if instrument is None or not symbol.endswith(quote_asset):
             continue
 
-        last_price = float(item.get("lastPrice", 0.0) or 0.0)
-        if last_price <= 0.0:
+        try:
+            last_price = float(item.get("lastPrice"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(last_price) or last_price <= 0.0:
             continue
 
         book = book_map.get(symbol)
@@ -323,18 +334,32 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> MarketScanRows:
             continue
         spread_pct = (ask - bid) / max(entry, 1e-12)
 
-        change_pct = abs(float(item.get("priceChangePercent", 0.0) or 0.0)) / 100.0
-        volume_quote = float(item.get("quoteVolume", 0.0) or 0.0)
-        trend_strength = min(1.0, change_pct / 0.02)
+        try:
+            raw_change = float(item.get("priceChangePercent"))
+            change_pct = abs(raw_change) / 100.0 if math.isfinite(raw_change) else None
+        except (TypeError, ValueError):
+            change_pct = None
+        try:
+            raw_volume = float(item.get("quoteVolume"))
+            volume_quote = raw_volume if math.isfinite(raw_volume) and raw_volume >= 0 else None
+        except (TypeError, ValueError):
+            volume_quote = None
+        trend_strength = None if change_pct is None else min(1.0, change_pct / 0.02)
 
         candidates.append(
             {
                 "symbol": symbol,
                 "source_exchange": "binance",
+                "instrument_status": instrument["status"],
+                "contract_type": instrument["contractType"],
+                "quote_asset": instrument["quoteAsset"],
                 "entry": entry,
                 "market_ts": now_ts,
+                "market_observed_at": now_ts,
+                "market_data_source": "BINANCE_PUBLIC_SNAPSHOT",
                 "timeframe": decision_timeframe,
                 "volume_24h_usdt": volume_quote,
+                "volume_24h_source": "BINANCE_TICKER_24HR" if volume_quote is not None else "UNAVAILABLE",
                 "spread_pct": spread_pct,
                 "spread_bps": spread_pct * 10_000.0,
                 "spread_status": "MEASURED",
@@ -349,14 +374,21 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> MarketScanRows:
                 "market_data_latency_ms": market_data_latency_ms,
                 "market_data_latency_status": "UNAVAILABLE" if market_data_latency_ms is None else "MEASURED",
                 "market_data_latency_source": "UNAVAILABLE" if market_data_latency_ms is None else "BINANCE_PUBLIC_HTTP_RTT",
-                "volatility_pct": max(0.0001, change_pct),
+                "volatility_pct": None if change_pct is None else max(0.0001, change_pct),
+                "universe_volatility_source": "BINANCE_TICKER_24HR_PRICE_CHANGE" if change_pct is not None else "UNAVAILABLE",
                 "trend_strength": trend_strength,
-                "liquidity_score": 1.0 if volume_quote >= 50_000_000 else 0.7,
-                "chop_score": max(0.0, 1.0 - trend_strength),
+                "liquidity_score": None if volume_quote is None else (1.0 if volume_quote >= 50_000_000 else 0.7),
+                "liquidity_status": "ESTIMATED" if volume_quote is not None else "UNAVAILABLE",
+                "liquidity_source": "BINANCE_TICKER_24HR_QUOTE_VOLUME" if volume_quote is not None else "UNAVAILABLE",
+                "chop_score": None if trend_strength is None else max(0.0, 1.0 - trend_strength),
+                "market_cap_usd": None,
+                "market_cap_status": "UNAVAILABLE",
+                "market_cap_source": "UNAVAILABLE",
+                "market_cap_observed_at": None,
             }
         )
-    candidates.sort(key=lambda row: float(row.get("volume_24h_usdt", 0.0)), reverse=True)
-    selected = candidates[:30]
+    candidates.sort(key=lambda row: (-(row.get("volume_24h_usdt") or -1.0), str(row.get("symbol") or "")))
+    selected = candidates
     return MarketScanRows(selected, diagnostics=_market_scan_diagnostics(
         status="AVAILABLE" if selected else "VALID_EMPTY",
         provider="binance",
@@ -409,9 +441,14 @@ def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> MarketScanRows:
             {
                 "symbol": normalized,
                 "source_exchange": "hyperliquid",
+                "instrument_status": "ACTIVE",
+                "contract_type": "SWAP",
+                "quote_asset": "USDT",
                 "entry": price,
                 "side": "LONG",
                 "market_ts": now_ts,
+                "market_observed_at": now_ts,
+                "market_data_source": "HYPERLIQUID_ALL_MIDS",
                 "timeframe": "1m",
                 "volume_24h_usdt": 0.0,
                 "spread_pct": None,
@@ -427,9 +464,13 @@ def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> MarketScanRows:
                 "trend_strength": 0.0,
                 "liquidity_score": 0.5,
                 "chop_score": 1.0,
+                "market_cap_usd": None,
+                "market_cap_status": "UNAVAILABLE",
+                "market_cap_source": "UNAVAILABLE",
+                "market_cap_observed_at": None,
             }
         )
-    selected = rows[:20]
+    selected = sorted(rows, key=lambda row: str(row.get("symbol") or ""))
     return MarketScanRows(selected, diagnostics=_market_scan_diagnostics(
         status="AVAILABLE" if selected else "VALID_EMPTY",
         provider="hyperliquid",

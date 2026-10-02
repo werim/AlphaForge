@@ -17,6 +17,7 @@ from alphaforge.burnin import DDL as PHASE7_BURNIN_DDL
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.execution import execution_context_is_unavailable
 from alphaforge.expectancy_evidence import EXPECTANCY_EVIDENCE_DDL, EXPECTANCY_EVIDENCE_INDEX_DDL
+from alphaforge.universe_evidence import UNIVERSE_SELECTION_DDL
 
 
 
@@ -406,6 +407,7 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS canary_run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, event_type TEXT NOT NULL, event_ts TEXT NOT NULL, shadow_mode INTEGER NOT NULL, canary_mode INTEGER NOT NULL, mutation_attempted INTEGER NOT NULL, mutation_blocked INTEGER NOT NULL, evidence_json TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS rollback_verification_events (id INTEGER PRIMARY KEY AUTOINCREMENT, verification_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, verified_at TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS runbook_evidence (id INTEGER PRIMARY KEY AUTOINCREMENT, evidence_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, recorded_at TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL)",
+        *UNIVERSE_SELECTION_DDL,
         *PHASE7_BURNIN_DDL,
     ]
     with engine.begin() as conn:
