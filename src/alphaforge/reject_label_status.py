@@ -56,6 +56,9 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         run_ids = []
     declared_symbols: set[str] = set()
     declared_providers: set[str] = set()
+    dynamic_universe = False
+    dynamic_selection_link_count = 0
+    dynamic_universe_evidence_available = True
     if not identity.startswith("standalone:") and "burnin_campaigns" in tables:
         campaign_row = conn.execute(
             "SELECT symbols_json, source_provenance_json FROM burnin_campaigns WHERE campaign_id=?",
@@ -70,9 +73,39 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                 provider_identity = " ".join(str(provenance.get(key) or "") for key in ("provider", "exchange"))
                 declared_providers = {provider for provider in ("binance", "hyperliquid")
                                       if provider.upper() in provider_identity.upper()}
+                dynamic_universe = (
+                    str(provenance.get("universe_scope_mode") or "").upper()
+                    == "CANONICAL_DYNAMIC_V1"
+                )
             except (AttributeError, TypeError, ValueError):
                 declared_providers = set()
+                dynamic_universe = False
     run_ph = ",".join("?" for _ in run_ids) or "NULL"
+    if dynamic_universe:
+        dynamic_tables = {"burnin_universe_selection_links", "universe_selection_candidates"}
+        if dynamic_tables.issubset(tables):
+            dynamic_selection_link_count = int(conn.execute(
+                f"""SELECT COUNT(*) FROM burnin_universe_selection_links
+                    WHERE campaign_id=? AND burnin_run_id IN ({run_ph})""",
+                [identity, *run_ids],
+            ).fetchone()[0])
+            declared_symbols = {
+                str(row[0]).upper()
+                for row in conn.execute(
+                    f"""SELECT DISTINCT usc.symbol
+                        FROM burnin_universe_selection_links l
+                        JOIN universe_selection_candidates usc ON usc.cycle_id=l.cycle_id
+                        WHERE l.campaign_id=?
+                          AND l.burnin_run_id IN ({run_ph})
+                          AND usc.selected=1""",
+                    [identity, *run_ids],
+                )
+                if row[0]
+            }
+            dynamic_universe_evidence_available = dynamic_selection_link_count > 0
+        else:
+            declared_symbols = set()
+            dynamic_universe_evidence_available = False
     all_pending = [dict(r) for r in conn.execute(
         f"SELECT * FROM burnin_pending_reject_labels WHERE burnin_run_id IN ({run_ph}) AND campaign_id=?",
         [*run_ids, identity])]
@@ -155,6 +188,9 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         if provider:
             observed_providers.add(provider)
     out_of_universe_symbols = sorted(observed_symbols - declared_symbols) if declared_symbols else []
+    dynamic_universe_evidence_missing = bool(
+        dynamic_universe and observed_symbols and not dynamic_universe_evidence_available
+    )
     out_of_scope_providers = sorted(observed_providers - declared_providers) if declared_providers else []
     infrastructure_reasons = {
         "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE",
@@ -368,6 +404,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     if ambiguous_count: reasons.add("AMBIGUOUS_LABELS_PRESENT")
     if execution_invalidated_count: reasons.add("EXECUTION_INVALIDATED_LABELS_PRESENT")
     if out_of_universe_symbols: reasons.add("CAMPAIGN_UNIVERSE_MISMATCH")
+    if dynamic_universe_evidence_missing: reasons.add("DYNAMIC_UNIVERSE_EVIDENCE_MISSING")
     if out_of_scope_providers or (not identity.startswith("standalone:") and not declared_providers):
         reasons.add("CAMPAIGN_PROVIDER_MISMATCH")
     if not canonical: reasons.add("NO_FORWARD_OUTCOMES_YET")
@@ -375,7 +412,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     if not eligible: reasons.add("INSUFFICIENT_MATURE_EVIDENCE")
     if coverage["mature_coverage_ratio"] is not None and coverage["mature_coverage_ratio"] < 1.0:
         reasons.add("INCOMPLETE_MATURE_COVERAGE")
-    failures = {"DUPLICATE_REJECT_IDENTITY", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "LABELS_WITHOUT_CANONICAL_REJECT", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP", "PENDING_OUTCOME_STATE_INCONSISTENCY", "CAMPAIGN_UNIVERSE_MISMATCH", "CAMPAIGN_PROVIDER_MISMATCH"}
+    failures = {"DUPLICATE_REJECT_IDENTITY", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "LABELS_WITHOUT_CANONICAL_REJECT", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP", "PENDING_OUTCOME_STATE_INCONSISTENCY", "CAMPAIGN_UNIVERSE_MISMATCH", "DYNAMIC_UNIVERSE_EVIDENCE_MISSING", "CAMPAIGN_PROVIDER_MISMATCH"}
     status = "FAIL" if reasons & failures else "INCOMPLETE" if reasons else "PASS"
 
     quality = []
@@ -399,7 +436,10 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             "avoided_losing_trades": sum((o.get("avoided_loss") or 0) > 0 for o in os if o["evidence_complete"] == 1 and o["execution_invalidated"] != 1 and o["ambiguous"] != 1)})
 
     return {**base, "status": status, "reason_codes": sorted(reasons), "schema_limitations": [],
-        "campaign_scope": {"declared_symbols": sorted(declared_symbols),
+        "campaign_scope": {"universe_scope_mode": "CANONICAL_DYNAMIC_V1" if dynamic_universe else "FIXED_ALLOWLIST",
+            "dynamic_selection_link_count": dynamic_selection_link_count,
+            "dynamic_universe_evidence_available": dynamic_universe_evidence_available,
+            "declared_symbols": sorted(declared_symbols),
             "observed_decision_symbols": sorted(observed_symbols),
             "out_of_universe_symbols": out_of_universe_symbols,
             "out_of_universe_decision_count": out_of_universe_decision_count,
