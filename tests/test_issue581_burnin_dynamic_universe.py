@@ -103,6 +103,8 @@ def test_dynamic_campaign_persists_selector_owned_scope_without_fixed_allowlist(
 
 def test_attached_dynamic_campaign_runs_full_candidate_set_before_top5(monkeypatch, tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'dynamic.db'}")
+    with engine.begin() as conn:
+        bootstrap_campaign_schema(conn)
     now = time.time()
     rows = [_candidate(f"S{index:02d}USDT", 100_000_000 - index * 1000, now) for index in range(50)]
     processed: list[str] = []
@@ -149,6 +151,8 @@ def test_attached_dynamic_campaign_runs_full_candidate_set_before_top5(monkeypat
 
 def test_fixed_campaign_allowlist_behavior_is_preserved(monkeypatch, tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'fixed.db'}")
+    with engine.begin() as conn:
+        bootstrap_campaign_schema(conn)
     now = time.time()
     rows = [
         _candidate("BTCUSDT", 100_000_000, now),
