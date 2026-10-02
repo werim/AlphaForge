@@ -22,6 +22,7 @@ CANONICAL_CAMPAIGN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}$")
 CANONICAL_BURNIN_RUN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}_run_[0-9]{4,}$")
 CANONICAL_CAMPAIGN_AGGREGATE_ID_RE = re.compile(r"^camp_[0-9a-f]{16}__aggregate$")
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
+DYNAMIC_UNIVERSE_SCOPE_MODE = "CANONICAL_DYNAMIC_V1"
 CAMPAIGN_STATUSES = {"CREATED","STARTING","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
 ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode", "git_commit")
 RUNTIME_ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode")
@@ -135,7 +136,57 @@ def canonical_paper_source_exchanges(source_provenance: Mapping[str, Any]) -> tu
                  if exchange.upper() in identity.upper())
 
 
-def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",)) -> dict[str, Any]:
+def dynamic_universe_identity_payload(
+    runtime_config: Any,
+    intervals: Sequence[str],
+    paper_source_exchanges: Sequence[str],
+) -> dict[str, Any]:
+    """Canonical campaign identity for selector-owned dynamic universe scope."""
+    raw_excluded = getattr(runtime_config, "universe_excluded_symbols", "")
+    if isinstance(raw_excluded, str):
+        excluded = sorted({
+            item.strip().upper()
+            for item in raw_excluded.replace(",", " ").split()
+            if item.strip()
+        })
+    else:
+        excluded = sorted({str(item).strip().upper() for item in (raw_excluded or ()) if str(item).strip()})
+    constraints = {
+        "min_market_cap_usd": getattr(runtime_config, "universe_min_market_cap_usd", None),
+        "max_market_cap_usd": getattr(runtime_config, "universe_max_market_cap_usd", None),
+        "min_volume_24h_usd": getattr(runtime_config, "universe_min_volume_24h_usd", 5_000_000.0),
+        "candidate_pool_top_n_volume": getattr(runtime_config, "universe_candidate_pool_top_n_volume", 50),
+        "max_active_symbols": getattr(runtime_config, "max_symbols_per_scan", 5),
+        "excluded_symbols": excluded,
+        "max_evidence_age_sec": getattr(runtime_config, "universe_max_evidence_age_sec", 120.0),
+        "max_spread_pct": getattr(runtime_config, "max_spread_pct", 0.05),
+        "max_expected_slippage_pct": getattr(runtime_config, "max_expected_slippage_pct", 0.05),
+        "max_abs_funding_rate_pct": getattr(runtime_config, "max_abs_funding_rate_pct", 0.001),
+        "min_liquidity_score": getattr(runtime_config, "min_liquidity_score", 0.30),
+        "quote_asset": "USDT",
+    }
+    return {
+        "scope_mode": DYNAMIC_UNIVERSE_SCOPE_MODE,
+        "selector_authority": "alphaforge.symbol_selector.build_selected_universe",
+        "constraints": constraints,
+        "paper_source_exchanges": sorted({
+            str(value).strip().lower() for value in paper_source_exchanges if str(value).strip()
+        }),
+        "intervals": sorted(map(str, intervals)),
+    }
+
+
+def campaign_uses_dynamic_universe(campaign: Mapping[str, Any]) -> bool:
+    provenance = campaign.get("source_provenance")
+    if not isinstance(provenance, Mapping):
+        try:
+            provenance = json.loads(str(campaign.get("source_provenance_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            provenance = {}
+    return str((provenance or {}).get("universe_scope_mode") or "").upper() == DYNAMIC_UNIVERSE_SCOPE_MODE
+
+
+def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",), dynamic_universe: bool = False) -> dict[str, Any]:
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
@@ -177,6 +228,15 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
                                                         for value in paper_source_exchanges if str(value).strip()})
     if not config_payload["paper_source_exchanges"]:
         raise ValueError("paper_source_exchanges must identify at least one supported provider")
+    dynamic_universe_payload = None
+    if dynamic_universe:
+        if symbols:
+            raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_EMPTY_FIXED_SYMBOLS")
+        dynamic_universe_payload = dynamic_universe_identity_payload(
+            runtime_config, intervals, config_payload["paper_source_exchanges"]
+        )
+        config_payload["campaign_universe_scope_mode"] = DYNAMIC_UNIVERSE_SCOPE_MODE
+        config_payload["dynamic_universe_constraints"] = dynamic_universe_payload["constraints"]
     strategy_payload = {
         "min_signal_score": getattr(runtime_config, "min_signal_score", None),
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
@@ -211,7 +271,11 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "release_id": rid,
         "config_hash": make_config_hash(config_payload),
         "strategy_config_hash": make_config_hash(strategy_payload),
-        "universe_hash": make_universe_hash(symbols, intervals),
+        "universe_hash": (
+            make_config_hash(dynamic_universe_payload)
+            if dynamic_universe_payload is not None
+            else make_universe_hash(symbols, intervals)
+        ),
         "execution_cost_config_hash": make_config_hash(execution_cost_payload),
         "config_payload": config_payload,
         "strategy_payload": strategy_payload,
@@ -267,12 +331,19 @@ def require_valid_release_id(release_id: str, conn: Any | None = None) -> None:
                   "DATABASE_IDENTITY_COLLISION" if validation["database_identity_collisions"] else "EMPTY")
         raise ValueError(f"INVALID_RELEASE_ID:{reason}")
 
-def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
+def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] | None = None, dynamic_universe: bool = False, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
     require_valid_release_id(release_id)
     bootstrap_campaign_schema(conn)
     require_valid_release_id(release_id, conn)
+    if dynamic_universe and symbols:
+        raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_EMPTY_FIXED_SYMBOLS")
+    if dynamic_universe and runtime_config is None:
+        raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_RUNTIME_CONFIG")
     prov=dict(source_provenance or {"provider":"BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE",
                                     "order_submission": "DISABLED", "source":"operator"})
+    if dynamic_universe:
+        prov["universe_scope_mode"] = DYNAMIC_UNIVERSE_SCOPE_MODE
+        prov["universe_scope_authority"] = "alphaforge.symbol_selector.build_selected_universe"
     if not prov: raise ValueError("missing provenance")
     provenance_scope = canonical_paper_source_exchanges(prov)
     identity_scope = tuple(sorted({str(value).strip().lower() for value in
@@ -280,9 +351,11 @@ def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols
     if not provenance_scope or identity_scope != provenance_scope:
         raise ValueError("PHASE8_CAMPAIGN_PROVIDER_IDENTITY_MISMATCH")
     if runtime_config is not None:
-        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps, paper_source_exchanges=identity_scope)
+        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps, paper_source_exchanges=identity_scope, dynamic_universe=dynamic_universe)
         ch=ident["config_hash"]; sh=ident["strategy_config_hash"]; uh=ident["universe_hash"]; ech=ident["execution_cost_config_hash"]
     else:
+        if dynamic_universe:
+            raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_RUNTIME_CONFIG")
         config_payload = dict(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})
         config_payload["paper_source_exchanges"] = list(identity_scope)
         ch=make_config_hash(config_payload)
@@ -293,7 +366,7 @@ def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols
     c=BurnInCampaign(cid, release_id, expected_duration_seconds=float(duration_days)*86400, target_decisions=target_decisions, target_closed_trades=target_closed_trades, target_reject_forward_outcomes=target_reject_forward_outcomes, config_hash=ch, strategy_config_hash=sh, universe_hash=uh, git_commit=git_commit(), execution_cost_config_hash=ech, source_provenance=prov, symbols=list(symbols), intervals=list(intervals))
     c.validate()
     _exec(conn,"""INSERT INTO burnin_campaigns(campaign_id,release_id,campaign_status,created_at,started_at,completed_at,expected_duration_seconds,observed_duration_seconds,target_decisions,target_closed_trades,target_reject_forward_outcomes,active_run_id,config_hash,strategy_config_hash,universe_hash,git_commit,execution_cost_config_hash,source_provenance_json,symbols_json,intervals_json,restart_count,last_heartbeat_at,last_error,qualification_status,latest_qualification_id,evidence_completeness_status,schema_version) VALUES (:campaign_id,:release_id,:campaign_status,:created_at,:started_at,:completed_at,:expected_duration_seconds,:observed_duration_seconds,:target_decisions,:target_closed_trades,:target_reject_forward_outcomes,:active_run_id,:config_hash,:strategy_config_hash,:universe_hash,:git_commit,:execution_cost_config_hash,:source_provenance_json,:symbols_json,:intervals_json,:restart_count,:last_heartbeat_at,:last_error,:qualification_status,:latest_qualification_id,:evidence_completeness_status,:schema_version) ON CONFLICT(campaign_id) DO NOTHING""", {**asdict(c),"source_provenance_json":json.dumps(c.source_provenance,sort_keys=True),"symbols_json":json.dumps(c.symbols,sort_keys=True),"intervals_json":json.dumps(c.intervals,sort_keys=True)})
-    event(conn,c.campaign_id,"CAMPAIGN_CREATED",details={"release_id":release_id})
+    event(conn,c.campaign_id,"CAMPAIGN_CREATED",details={"release_id":release_id,"universe_scope_mode":prov.get("universe_scope_mode","FIXED_ALLOWLIST")})
     return c
 
 def get_campaign(conn: Any, campaign_id: str) -> dict[str,Any]|None:
@@ -1230,12 +1303,14 @@ class BurnInCampaignRunner:
                 # An idle resolver still needs a real read after an outage;
                 # an empty batch alone cannot prove the candle provider recovered.
                 with self.engine.connect() as conn:
-                    symbols = (get_campaign(conn, self.campaign_id) or {}).get("symbols") or []
-                if not symbols:
+                    campaign = get_campaign(conn, self.campaign_id) or {}
+                    symbols = campaign.get("symbols") or []
+                probe_symbol = symbols[0] if symbols else ("BTCUSDT" if campaign_uses_dynamic_universe(campaign) else None)
+                if not probe_symbol:
                     raise ProviderFailure("PROVIDER_FAILURE:NO_PROBE_SYMBOL")
                 probe_start = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
-                try: self.candle_provider(symbols[0], probe_start, resolution_time, "1m")
-                except TypeError: self.candle_provider(symbols[0], probe_start, resolution_time)
+                try: self.candle_provider(probe_symbol, probe_start, resolution_time, "1m")
+                except TypeError: self.candle_provider(probe_symbol, probe_start, resolution_time)
             management_actions: dict[str, list[dict[str, Any]]] = {}
             if self.position_management_provider is not None:
                 for raw in positions:
