@@ -570,9 +570,94 @@ def _rejected_cycle_result(reject_reason: str, candidate: OrderCandidate | None,
     return result
 
 
+def _project_precomputed_portfolio_allocation(
+    market_ctx: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Apply a canonical batch allocation before any sizing/execution consumer."""
+    projected = dict(market_ctx)
+    allocation = projected.get("portfolio_allocation")
+    if not isinstance(allocation, Mapping):
+        return projected, ""
+    action = str(allocation.get("action") or "REJECT").upper()
+    reasons = list(allocation.get("reason_codes") or [])
+    if action not in {"APPROVE", "REDUCE_SIZE"}:
+        return projected, str(reasons[0] if reasons else "NO_PORTFOLIO_CAPACITY")
+    try:
+        allocated = float(allocation.get("allocated_notional"))
+    except (TypeError, ValueError):
+        return projected, "PORTFOLIO_ALLOCATION_INVALID"
+    if allocated <= 0:
+        return projected, "PORTFOLIO_ALLOCATION_INVALID"
+    original = next(
+        (
+            projected.get(key)
+            for key in ("notional", "notional_usdt", "order_notional", "effective_notional")
+            if projected.get(key) is not None
+        ),
+        None,
+    )
+    if original is None:
+        try:
+            original = abs(
+                float(projected.get("entry"))
+                * float(projected.get("quantity", projected.get("qty")))
+            )
+        except (TypeError, ValueError):
+            return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+    try:
+        original_value = float(original)
+    except (TypeError, ValueError):
+        return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+    if original_value <= 0:
+        return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+    downstream = min(original_value, allocated)
+    scale = downstream / original_value
+    allocated_risk = allocation.get("allocated_risk")
+    if allocated_risk is not None:
+        try:
+            allocated_risk = float(allocated_risk) * (downstream / allocated)
+        except (TypeError, ValueError):
+            return projected, "PORTFOLIO_ALLOCATION_INVALID"
+    projected.update(
+        allocation_action=action,
+        allocation_scale=scale,
+        allocation_requested_notional=allocation.get("requested_notional"),
+        allocated_notional=downstream,
+        allocated_risk=allocated_risk,
+        notional=downstream,
+        effective_notional=downstream,
+    )
+    for key in ("notional_usdt", "order_notional"):
+        if key in projected:
+            projected[key] = downstream
+    quantity = projected.get("quantity", projected.get("qty"))
+    if quantity is not None:
+        try:
+            allocated_quantity = float(quantity) * scale
+        except (TypeError, ValueError):
+            return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+        projected["quantity"] = allocated_quantity
+        projected["qty"] = allocated_quantity
+        if "effective_quantity" in projected:
+            projected["effective_quantity"] = allocated_quantity
+    return projected, ""
+
+
 def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     recent_stats = recent_stats or {}
+    ctx.market_ctx, allocation_reject = _project_precomputed_portfolio_allocation(
+        ctx.market_ctx
+    )
+    if allocation_reject:
+        _audit(
+            ctx,
+            None,
+            LifecycleState.SIGNAL_CREATED,
+            LifecycleState.SIGNAL_REJECTED,
+            allocation_reject,
+        )
+        return _rejected_cycle_result(allocation_reject, candidate=None)
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
@@ -617,6 +702,7 @@ def evaluate_signal_decision(
     """
     mode_enum = mode if isinstance(mode, TradingMode) else TradingMode(str(mode).upper())
     market_ctx = dict(market_snapshot or {})
+    market_ctx, allocation_reject = _project_precomputed_portfolio_allocation(market_ctx)
     if execution_context is not None:
         market_ctx["execution_ctx"] = dict(execution_context)
         market_ctx.update(
@@ -634,7 +720,15 @@ def evaluate_signal_decision(
     if not isinstance(recent_stats, Mapping):
         recent_stats = {}
 
-    candidate_or_rejection = build_order_candidate(symbol, market_ctx, config)
+    candidate_or_rejection = (
+        OrderRejection(
+            symbol=symbol,
+            reject_reason=allocation_reject,
+            diagnostics={"portfolio_allocation": market_ctx.get("portfolio_allocation")},
+        )
+        if allocation_reject
+        else build_order_candidate(symbol, market_ctx, config)
+    )
     if isinstance(candidate_or_rejection, OrderRejection):
         execution_ctx = market_ctx.get("execution_ctx") if isinstance(market_ctx.get("execution_ctx"), Mapping) else build_execution_context(market_ctx)
         return DecisionResult(
@@ -748,6 +842,18 @@ def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[
     """
     config = config or {}
     recent_stats = recent_stats or {}
+    ctx.market_ctx, allocation_reject = _project_precomputed_portfolio_allocation(
+        ctx.market_ctx
+    )
+    if allocation_reject:
+        _audit(
+            ctx,
+            None,
+            LifecycleState.SIGNAL_CREATED,
+            LifecycleState.SIGNAL_REJECTED,
+            allocation_reject,
+        )
+        return _rejected_cycle_result(allocation_reject, candidate=None)
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
