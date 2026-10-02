@@ -239,8 +239,8 @@ def next_burnin_continuation_sequence(conn: Any, *, release_id: str, execution_m
     value = row._mapping["next_sequence"] if hasattr(row, "_mapping") else row[0]
     return int(value or 0)
 
-def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | None = None, end_time: str | None = None) -> dict[str, Any]:
-    """Derive run counters from canonical SQL evidence to avoid drift."""
+def derive_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | None = None, end_time: str | None = None) -> dict[str, Any]:
+    """Derive run counters from canonical SQL evidence without acquiring a writer."""
     row = conn.execute(_sa_text("SELECT release_id, phase, start_time, observed_duration_seconds FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchone()
     if row is None:
         return {"status": "MISSING_RUN"}
@@ -270,9 +270,21 @@ def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | N
         parsed = [t for t in parsed if t is not None]
         if len(parsed) >= 2:
             observed_duration = max(0.0, (max(parsed) - min(parsed)).total_seconds())
+    return {"bid": burnin_run_id, "sample_count": sample_count, "accepted_count": accepted_count, "rejected_count": rejected_count, "closed_trade_count": closed_trade_count, "open_trade_count": open_trade_count, "observed_duration_seconds": observed_duration, "data_status": data_status, "evidence_status": evidence_status, "end_time": end_time, "status": status, "generated_at": utc_now()}
+
+
+def persist_burnin_run_counters(conn: Any, counters: Mapping[str, Any]) -> None:
+    """Persist one counter snapshot previously derived from the same evidence view."""
+    if counters.get("status") == "MISSING_RUN" and "bid" not in counters:
+        return
     sql = """UPDATE burnin_runs SET sample_count=:sample_count, accepted_count=:accepted_count, rejected_count=:rejected_count, closed_trade_count=:closed_trade_count, open_trade_count=:open_trade_count, observed_duration_seconds=COALESCE(:observed_duration_seconds, observed_duration_seconds), data_completeness_status=:data_status, evidence_completeness_status=:evidence_status, end_time=COALESCE(:end_time,end_time), status=COALESCE(:status,status), generated_at=:generated_at WHERE burnin_run_id=:bid"""
-    params = {"bid": burnin_run_id, "sample_count": sample_count, "accepted_count": accepted_count, "rejected_count": rejected_count, "closed_trade_count": closed_trade_count, "open_trade_count": open_trade_count, "observed_duration_seconds": observed_duration, "data_status": data_status, "evidence_status": evidence_status, "end_time": end_time, "status": status, "generated_at": utc_now()}
-    conn.execute(sql if isinstance(conn, sqlite3.Connection) else _sa_text(sql), params)
+    conn.execute(sql if isinstance(conn, sqlite3.Connection) else _sa_text(sql), dict(counters))
+
+
+def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | None = None, end_time: str | None = None) -> dict[str, Any]:
+    """Derive and persist run counters from canonical SQL evidence to avoid drift."""
+    params = derive_burnin_run_counters(conn, burnin_run_id, status=status, end_time=end_time)
+    persist_burnin_run_counters(conn, params)
     return params
 
 def _parse_iso(value: Any) -> datetime | None:
