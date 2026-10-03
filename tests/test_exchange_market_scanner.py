@@ -219,10 +219,10 @@ def test_execution_geometry_reuses_same_closed_candle_and_refetches_next(monkeyp
 
     monkeypatch.setattr(scanner_module, "_fetch_json", fetch)
 
-    first = _binance_kline_geometry(
+    first = scanner_module._cached_binance_kline_geometry(
         "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
     )
-    second = _binance_kline_geometry(
+    second = scanner_module._cached_binance_kline_geometry(
         "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
     )
     assert first == second
@@ -230,7 +230,7 @@ def test_execution_geometry_reuses_same_closed_candle_and_refetches_next(monkeyp
     assert calls["count"] == 1
 
     clock["wall"] += 61.0
-    third = _binance_kline_geometry(
+    third = scanner_module._cached_binance_kline_geometry(
         "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
     )
     assert third["geometry_status"] == "COMPLETE"
