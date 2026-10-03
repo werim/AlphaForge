@@ -478,3 +478,55 @@ def test_binance_pending_unicode_is_not_a_new_trade_candidate(monkeypatch: pytes
     ]))
     rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
     assert not any(row["symbol"] == symbol for row in rows)
+
+def test_binance_scanner_supports_15m_execution_timeframe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_TIMEFRAME", "15m")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
+        ]),
+    )
+
+    rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
+
+    assert rows.diagnostics["status"] == "AVAILABLE"
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "BTCUSDT"
+    assert rows[0]["timeframe"] == "15m"
+
+
+def test_binance_geometry_uses_configured_closed_15m_candles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[str] = []
+
+    def fake_fetch(url: str, *, timeout_sec: float):
+        captured.append(url)
+        return [
+            [0, "98", "100", "97", "99", "10"],
+            [900_000, "99", "101", "98", "100", "12"],
+            [1_800_000, "100", "500", "1", "400", "1"],
+        ]
+
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", fake_fetch)
+
+    geometry = _binance_kline_geometry(
+        "https://fapi.binance.com",
+        "BTCUSDT",
+        timeframe="15m",
+        timeout_sec=1.0,
+    )
+
+    assert captured
+    assert "interval=15m" in captured[0]
+    assert geometry["geometry_status"] == "COMPLETE"
+    assert geometry["geometry_source"] == "BINANCE_CLOSED_15M_KLINES"
+    assert geometry["recent_klines_source"] == "BINANCE_CLOSED_15M_KLINES"
+    assert geometry["execution_candle_open_ts"] == 900_000
