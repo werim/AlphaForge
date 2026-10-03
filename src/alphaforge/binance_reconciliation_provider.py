@@ -128,6 +128,8 @@ class BinanceReadonlyReconciliationProvider:
         self._request_evidence: list[dict[str, Any]] = []
         self._request_attempts: list[dict[str, Any]] = []
         self._http_request_count = 0
+        self._rate_limit_cooldown_until_monotonic = 0.0
+        self._rate_limit_cooldown_reason: str | None = None
 
     def close(self) -> None:
         self._transport.close()
@@ -148,6 +150,25 @@ class BinanceReadonlyReconciliationProvider:
         position_warnings: list[dict[str, Any]] = []
         endpoint_statuses = {"positionRisk": "NOT_ATTEMPTED", "exchangeInfo": "NOT_ATTEMPTED",
                              "openOrders": "NOT_ATTEMPTED", "userTrades": "NOT_ATTEMPTED"}
+        cooldown_remaining = self._rate_limit_cooldown_remaining_sec()
+        if cooldown_remaining > 0:
+            derivatives_contract = evaluate_notional_only_derivatives_contract(
+                positions=[],
+                required_symbols=[],
+                provider_evidence_status="INCOMPLETE",
+            )
+            return self._snapshot_base(
+                retrieved_at, positions, orders, fills, coverage, selected, sources,
+                position_warnings, endpoint_statuses,
+            ) | {
+                "orphan_orders": None, "orphan_positions": None, "duplicate_fills": None,
+                "evidence_status": "INCOMPLETE", "errors": ["rate_limit_cooldown_active"],
+                "failure_class": "TRANSIENT_TRANSPORT", "failed_endpoint": None,
+                "failed_symbol": None, "unknown_unreconciled_symbols": [],
+                "rate_limit_cooldown_remaining_sec": cooldown_remaining,
+                "rate_limit_cooldown_reason": self._rate_limit_cooldown_reason,
+                "derivatives_contract": derivatives_contract,
+            }
         try:
             failed_endpoint = "positionRisk"
             raw_positions = self._signed_get("/fapi/v3/positionRisk", {}, "positionRisk")
@@ -212,6 +233,7 @@ class BinanceReadonlyReconciliationProvider:
                 required_symbols=selected,
                 provider_evidence_status="COMPLETE",
             )
+            self._clear_rate_limit_cooldown()
             return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings, endpoint_statuses) | {
                 "orphan_orders": len(orders), "orphan_positions": active, "duplicate_fills": 0,
                 "evidence_status": "COMPLETE", "errors": [], "failed_endpoint": None,
@@ -352,7 +374,18 @@ class BinanceReadonlyReconciliationProvider:
                                         "time_refresh_performed": True})
                     self.close(); self._refresh_server_time(); time_refreshed = True; timestamp_retry = 1
                     continue
-                transient = http_status == 429 or 500 <= http_status < 600
+                rate_limited = http_status == 429 or (http_status == 418 and binance_code == -1003)
+                if rate_limited:
+                    # Binance 429/418 are shared-IP rate-limit states.  Do not immediately
+                    # retry: the provider-level cooldown keeps the runtime fail-closed
+                    # without extending the ban by continuing to poll.
+                    self._record(endpoint, symbol, binance_code, time_refreshed,
+                                 transient_retries + timestamp_retry, "FAIL",
+                                 http_status, binance_message)
+                    raise ReconciliationPayloadError(
+                        f"binance_http_error:status={http_status}:code={binance_code}"
+                    ) from exc
+                transient = 500 <= http_status < 600
                 if http_status in {401, 403}:
                     self._record(endpoint, symbol, binance_code, time_refreshed, transient_retries + timestamp_retry, "FAIL", http_status, binance_message)
                     raise ReconciliationAuthError(f"binance_auth_failed_status_{http_status}") from exc
@@ -402,12 +435,69 @@ class BinanceReadonlyReconciliationProvider:
                 setattr(exc, "_alphaforge_binance_message", self._safe_binance_message(body.get("msg")) if isinstance(body, Mapping) else None)
             except Exception:
                 pass
+            binance_message = getattr(exc, "_alphaforge_binance_message", None)
+            if exc.code == 429 or (exc.code == 418 and attempt.get("binance_code") == -1003):
+                cooldown = self._register_rate_limit_cooldown(exc, binance_message)
+                attempt.update({
+                    "retry_reason": "RATE_LIMIT_COOLDOWN",
+                    "retry_after_sec": cooldown["retry_after_sec"],
+                    "rate_limit_cooldown_sec": cooldown["cooldown_sec"],
+                })
             setattr(exc, "_alphaforge_attempt", attempt)
             raise
         except Exception as exc:
             attempt["transport_category"] = self._transport_category(exc)
             setattr(exc, "_alphaforge_attempt", attempt)
             raise
+
+    def _rate_limit_cooldown_remaining_sec(self) -> float:
+        return max(0.0, self._rate_limit_cooldown_until_monotonic - time.monotonic())
+
+    def _clear_rate_limit_cooldown(self) -> None:
+        self._rate_limit_cooldown_until_monotonic = 0.0
+        self._rate_limit_cooldown_reason = None
+
+    @staticmethod
+    def _retry_after_seconds(exc: error.HTTPError) -> float | None:
+        headers = getattr(exc, "headers", None)
+        raw = headers.get("Retry-After") if headers is not None else None
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _ban_until_seconds(self, message: str | None) -> float | None:
+        match = re.search(r"banned until\s+(\d{10,13})", str(message or ""), flags=re.IGNORECASE)
+        if match is None:
+            return None
+        raw = int(match.group(1))
+        ban_until_ms = raw if raw >= 10_000_000_000 else raw * 1000
+        return max(0.0, (ban_until_ms - self._now_ms()) / 1000.0)
+
+    def _register_rate_limit_cooldown(self, exc: error.HTTPError, message: str | None) -> dict[str, float | None]:
+        retry_after = self._retry_after_seconds(exc)
+        ban_until = self._ban_until_seconds(message)
+        # Retry-After is Binance's authoritative wait.  Ban-until is the fallback
+        # carried in the -1003 payload, and the minute window is used only when an
+        # intermediary stripped both explicit cooldown signals.
+        if retry_after is not None:
+            cooldown = retry_after
+        elif ban_until is not None:
+            cooldown = ban_until
+        elif exc.code == 429 and "per minute" in str(message or "").lower():
+            cooldown = 60.0
+        else:
+            cooldown = 0.0
+        if cooldown > 0:
+            self._rate_limit_cooldown_until_monotonic = max(
+                self._rate_limit_cooldown_until_monotonic,
+                time.monotonic() + cooldown,
+            )
+        self._rate_limit_cooldown_reason = f"HTTP_{exc.code}_BINANCE_{getattr(exc, '_alphaforge_binance_code', None)}"
+        return {"retry_after_sec": retry_after, "cooldown_sec": cooldown}
 
     @staticmethod
     def _transport_category(exc: Exception) -> str:

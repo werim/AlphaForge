@@ -25,8 +25,10 @@ def classify_provider_exception(exc: BaseException) -> str:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, error.HTTPError):
-            return (TRANSIENT_TRANSPORT if current.code == 429 or 500 <= current.code < 600
-                    else PERMANENT_AUTH_OR_PROTOCOL)
+            binance_code = getattr(current, "_alphaforge_binance_code", None)
+            if current.code == 429 or (current.code == 418 and binance_code == -1003):
+                return TRANSIENT_TRANSPORT
+            return TRANSIENT_TRANSPORT if 500 <= current.code < 600 else PERMANENT_AUTH_OR_PROTOCOL
         if isinstance(current, ssl.SSLError):
             return PERMANENT_AUTH_OR_PROTOCOL
         if current.__class__.__name__ in {"MarketDataImmature", "HistoricalDataImmatureError"}:

@@ -443,7 +443,7 @@ def test_http_count_tracked_one_and_two_symbols():
     assert [a["symbol"] for a in snap["request_attempts"] if a["endpoint_class"] == "userTrades"] == ["BTCUSDT", "ETHUSDT"]
 
 
-@pytest.mark.parametrize("failure", [TimeoutError("timeout"), error.HTTPError("safe", 429, "rate", {}, io.BytesIO(b'{"code":-1003}')), error.HTTPError("safe", 503, "server", {}, io.BytesIO(b'{"code":-1000}'))])
+@pytest.mark.parametrize("failure", [TimeoutError("timeout"), error.HTTPError("safe", 503, "server", {}, io.BytesIO(b'{"code":-1000}'))])
 def test_http_count_transient_retry_then_success(failure):
     calls = 0
     def http(url, headers, timeout):
@@ -456,6 +456,104 @@ def test_http_count_transient_retry_then_success(failure):
     snap = provider.snapshot()
     assert snap["evidence_status"] == "COMPLETE" and snap["http_request_count"] == 3
     assert [a["outcome"] for a in snap["request_attempts"]] == ["RETRY", "PASS", "PASS"]
+
+
+def test_rate_limit_429_enters_cooldown_without_immediate_retry(monkeypatch):
+    clock = {"mono": 100.0}
+    monkeypatch.setattr(provider_module.time, "monotonic", lambda: clock["mono"])
+    calls = 0
+
+    def http(url, headers, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise error.HTTPError(
+                url, 429, "rate",
+                {"Retry-After": "2"},
+                io.BytesIO(json.dumps({
+                    "code": -1003,
+                    "msg": "Too many requests; current limit is 2400 requests per minute.",
+                }).encode()),
+            )
+        return []
+
+    provider = BinanceReadonlyReconciliationProvider(
+        config=BinanceReadonlyReconciliationConfig(
+            base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s",
+            transport_retries=1,
+        ),
+        http_get_json=http,
+    )
+
+    first = provider.snapshot()
+    assert first["evidence_status"] == "INCOMPLETE"
+    assert first["failure_class"] == "TRANSIENT_TRANSPORT"
+    assert first["http_request_count"] == 1
+    assert calls == 1
+    assert first["request_attempts"][0]["retry_reason"] == "RATE_LIMIT_COOLDOWN"
+    assert first["request_attempts"][0]["retry_after_sec"] == 2.0
+    assert first["request_attempts"][0]["rate_limit_cooldown_sec"] == 2.0
+
+    second = provider.snapshot()
+    assert second["evidence_status"] == "INCOMPLETE"
+    assert second["failure_class"] == "TRANSIENT_TRANSPORT"
+    assert second["errors"] == ["rate_limit_cooldown_active"]
+    assert second["http_request_count"] == 0
+    assert calls == 1
+
+    clock["mono"] += 2.1
+    recovered = provider.snapshot()
+    assert recovered["evidence_status"] == "COMPLETE"
+    assert recovered["http_request_count"] == 2
+    assert calls == 3
+
+
+def test_rate_limit_418_minus1003_uses_ban_until_and_recovers(monkeypatch):
+    clock = {"mono": 200.0, "ms": 1_700_000_000_000}
+    monkeypatch.setattr(provider_module.time, "monotonic", lambda: clock["mono"])
+    calls = 0
+
+    def http(url, headers, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            banned_until = clock["ms"] + 5_000
+            raise error.HTTPError(
+                url, 418, "ban", {},
+                io.BytesIO(json.dumps({
+                    "code": -1003,
+                    "msg": f"Way too many requests; IP banned until {banned_until}.",
+                }).encode()),
+            )
+        return []
+
+    provider = BinanceReadonlyReconciliationProvider(
+        config=BinanceReadonlyReconciliationConfig(
+            base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s",
+            transport_retries=1,
+        ),
+        now_ms=lambda: clock["ms"],
+        http_get_json=http,
+    )
+
+    first = provider.snapshot()
+    assert first["evidence_status"] == "INCOMPLETE"
+    assert first["failure_class"] == "TRANSIENT_TRANSPORT"
+    assert first["request_attempts"][0]["http_status"] == 418
+    assert first["request_attempts"][0]["binance_code"] == -1003
+    assert first["request_attempts"][0]["rate_limit_cooldown_sec"] == 5.0
+    assert calls == 1
+
+    suppressed = provider.snapshot()
+    assert suppressed["http_request_count"] == 0
+    assert suppressed["rate_limit_cooldown_remaining_sec"] == pytest.approx(5.0)
+    assert calls == 1
+
+    clock["mono"] += 5.1
+    clock["ms"] += 5_100
+    recovered = provider.snapshot()
+    assert recovered["evidence_status"] == "COMPLETE"
+    assert calls == 3
 
 
 def test_http_count_auth_and_user_trade_failure_are_exact():
