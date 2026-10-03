@@ -54,7 +54,8 @@ def _binance_snapshot_ttl_sec(config: Any) -> float:
 
 
 def _snapshot_cache_key(config: Any, base_url: str) -> tuple[int, int, str]:
-    return (id(config), id(request.urlopen), base_url.rstrip("/"))
+    del config  # freshness policy is evaluated on every lookup, not frozen into the key.
+    return (id(_fetch_json), id(request.urlopen), base_url.rstrip("/"))
 
 
 def _load_cached_binance_snapshot(config: Any, base_url: str) -> dict[str, Any] | None:
