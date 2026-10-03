@@ -40,7 +40,14 @@ def _latest_closed_candle_bucket(timeframe: str, *, now_ts: float | None = None)
     return int(observed // seconds) * seconds - seconds
 
 
+def _paper_scanner_cache_enabled(config: Any) -> bool:
+    runtime = getattr(config, "runtime", object())
+    return str(getattr(runtime, "execution_mode", "")).strip().upper() == "PAPER"
+
+
 def _binance_snapshot_ttl_sec(config: Any) -> float:
+    if not _paper_scanner_cache_enabled(config):
+        return 0.0
     try:
         stale = float(getattr(getattr(config, "runtime", object()), "stale_market_data_sec", 15.0))
     except (TypeError, ValueError):
@@ -173,6 +180,7 @@ def _binance_kline_geometry(
     *,
     timeframe: str = "1m",
     timeout_sec: float,
+    cache_enabled: bool = False,
 ) -> dict[str, Any]:
     """Return canonical geometry from the last two closed execution candles."""
     timeframe = str(timeframe or "").lower()
@@ -183,19 +191,21 @@ def _binance_kline_geometry(
             "geometry_reason": "UNSUPPORTED_TIMEFRAME",
             "geometry_source": geometry_source,
         }
-    boundary = _latest_closed_candle_bucket(timeframe)
-    cache_key = (
-        id(_fetch_json),
-        id(request.urlopen),
-        base_url.rstrip("/"),
-        symbol.upper(),
-        timeframe,
-        -1 if boundary is None else boundary,
-    )
-    with _BINANCE_GEOMETRY_CACHE_LOCK:
-        cached_geometry = _BINANCE_GEOMETRY_CACHE.get(cache_key)
-        if cached_geometry is not None:
-            return dict(cached_geometry)
+    cache_key: tuple[int, int, str, str, str, int] | None = None
+    if cache_enabled:
+        boundary = _latest_closed_candle_bucket(timeframe)
+        cache_key = (
+            id(_fetch_json),
+            id(request.urlopen),
+            base_url.rstrip("/"),
+            symbol.upper(),
+            timeframe,
+            -1 if boundary is None else boundary,
+        )
+        with _BINANCE_GEOMETRY_CACHE_LOCK:
+            cached_geometry = _BINANCE_GEOMETRY_CACHE.get(cache_key)
+            if cached_geometry is not None:
+                return dict(cached_geometry)
 
     query = parse.urlencode({"symbol": symbol, "interval": timeframe, "limit": 21})
     try:
@@ -236,13 +246,14 @@ def _binance_kline_geometry(
                             "recent_klines_source": geometry_source}
                            if len(recent_klines) >= 2 else {})
     result = {**geometry, **identity, **volatility_evidence, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": geometry_source}
-    with _BINANCE_GEOMETRY_CACHE_LOCK:
-        # Keep only the current closed-candle identity for this market/provider.
-        prefix = cache_key[:-1]
-        for old_key in tuple(_BINANCE_GEOMETRY_CACHE):
-            if old_key[:-1] == prefix and old_key != cache_key:
-                _BINANCE_GEOMETRY_CACHE.pop(old_key, None)
-        _BINANCE_GEOMETRY_CACHE[cache_key] = dict(result)
+    if cache_key is not None:
+        with _BINANCE_GEOMETRY_CACHE_LOCK:
+            # Keep only the current closed-candle identity for this market/provider.
+            prefix = cache_key[:-1]
+            for old_key in tuple(_BINANCE_GEOMETRY_CACHE):
+                if old_key[:-1] == prefix and old_key != cache_key:
+                    _BINANCE_GEOMETRY_CACHE.pop(old_key, None)
+            _BINANCE_GEOMETRY_CACHE[cache_key] = dict(result)
     return result
 
 
@@ -271,6 +282,7 @@ async def enrich_selected_market_geometry(
     binance = getattr(getattr(config, "exchange", object()), "binance", object())
     base_url = str(getattr(binance, "market_data_base_url", getattr(binance, "base_url", "https://fapi.binance.com")))
     timeout = float(getattr(getattr(config, "exchange", object()), "timeout_sec", 2.0) or 2.0)
+    geometry_cache_enabled = _paper_scanner_cache_enabled(config)
     keys: list[tuple[str, str] | None] = []
     tasks: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
     for candidate in candidates:
@@ -292,6 +304,7 @@ async def enrich_selected_market_geometry(
                     base_url,
                     symbol,
                     timeout_sec=timeout,
+                    cache_enabled=geometry_cache_enabled,
                 )
             else:
                 geometry_call = asyncio.to_thread(
@@ -300,6 +313,7 @@ async def enrich_selected_market_geometry(
                     symbol,
                     timeframe=timeframe,
                     timeout_sec=timeout,
+                    cache_enabled=geometry_cache_enabled,
                 )
             tasks[key] = asyncio.create_task(geometry_call)
     results = dict(zip(tasks, await asyncio.gather(*tasks.values()))) if tasks else {}
