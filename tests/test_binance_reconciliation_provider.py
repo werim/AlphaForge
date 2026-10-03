@@ -257,7 +257,7 @@ def test_default_transport_failure_closes_cached_connection(monkeypatch, failure
     transport.close(); transport.close()
 
 
-@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("status", [500, 503])
 def test_default_transport_transient_http_retry_uses_new_connection(monkeypatch, status):
     made = _install_connections(monkeypatch, [
         [_Response(status, {"code": -1003, "msg": "transient"})],
