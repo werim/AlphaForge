@@ -90,6 +90,18 @@ def _execute(conn: Any, statement: str, params: dict[str, Any] | None = None) ->
     )
 
 
+def _execute_many(
+    conn: Any,
+    statement: str,
+    params: list[dict[str, Any]],
+) -> Any:
+    if not params:
+        return None
+    if isinstance(conn, sqlite3.Connection):
+        return conn.executemany(statement, params)
+    return conn.execute(text(statement), params)
+
+
 def persist_portfolio_allocation(
     conn: Any,
     allocation: PortfolioAllocationDecision,
@@ -138,9 +150,10 @@ def persist_portfolio_allocation(
             f"PORTFOLIO_ALLOCATION_IDEMPOTENCY_CONFLICT:{allocation.allocation_cycle_id}"
         )
 
+    candidate_params: list[dict[str, Any]] = []
     for index, candidate in enumerate(allocation.candidates):
         candidate_payload = candidate.to_dict()
-        candidate_params = {
+        candidate_params.append({
             "allocation_cycle_id": allocation.allocation_cycle_id,
             "candidate_index": index,
             "candidate_id": candidate.candidate_id,
@@ -177,37 +190,45 @@ def persist_portfolio_allocation(
                 separators=(",", ":"),
                 allow_nan=False,
             ),
-        }
-        _execute(conn, """
-            INSERT INTO portfolio_allocation_candidates (
-                allocation_cycle_id, candidate_index, candidate_id, symbol, side,
-                action, reason_codes_json, requested_notional, allocated_notional,
-                requested_risk, allocated_risk, requested_quantity,
-                allocated_quantity, correlation_group, correlation_contribution,
-                concentration_contribution, hard_gate_accepted, hard_gate_reason,
-                candidate_inputs_json, preference_components_json, payload_json
-            ) VALUES (
-                :allocation_cycle_id, :candidate_index, :candidate_id, :symbol, :side,
-                :action, :reason_codes_json, :requested_notional, :allocated_notional,
-                :requested_risk, :allocated_risk, :requested_quantity,
-                :allocated_quantity, :correlation_group, :correlation_contribution,
-                :concentration_contribution, :hard_gate_accepted, :hard_gate_reason,
-                :candidate_inputs_json, :preference_components_json, :payload_json
-            ) ON CONFLICT(allocation_cycle_id, candidate_index) DO NOTHING
-        """, candidate_params)
-        existing = _execute(conn, """
-            SELECT candidate_id, payload_json
-            FROM portfolio_allocation_candidates
-            WHERE allocation_cycle_id=:allocation_cycle_id
-              AND candidate_index=:candidate_index
-        """, candidate_params).fetchone()
+        })
+
+    _execute_many(conn, """
+        INSERT INTO portfolio_allocation_candidates (
+            allocation_cycle_id, candidate_index, candidate_id, symbol, side,
+            action, reason_codes_json, requested_notional, allocated_notional,
+            requested_risk, allocated_risk, requested_quantity,
+            allocated_quantity, correlation_group, correlation_contribution,
+            concentration_contribution, hard_gate_accepted, hard_gate_reason,
+            candidate_inputs_json, preference_components_json, payload_json
+        ) VALUES (
+            :allocation_cycle_id, :candidate_index, :candidate_id, :symbol, :side,
+            :action, :reason_codes_json, :requested_notional, :allocated_notional,
+            :requested_risk, :allocated_risk, :requested_quantity,
+            :allocated_quantity, :correlation_group, :correlation_contribution,
+            :concentration_contribution, :hard_gate_accepted, :hard_gate_reason,
+            :candidate_inputs_json, :preference_components_json, :payload_json
+        ) ON CONFLICT(allocation_cycle_id, candidate_index) DO NOTHING
+    """, candidate_params)
+
+    stored_rows = _execute(conn, """
+        SELECT candidate_index, candidate_id, payload_json
+        FROM portfolio_allocation_candidates
+        WHERE allocation_cycle_id=:allocation_cycle_id
+        ORDER BY candidate_index
+    """, {"allocation_cycle_id": allocation.allocation_cycle_id}).fetchall()
+    if len(stored_rows) != len(candidate_params):
+        raise RuntimeError(
+            "PORTFOLIO_ALLOCATION_CANDIDATE_COUNT_CONFLICT:"
+            f"{allocation.allocation_cycle_id}:{len(stored_rows)}!={len(candidate_params)}"
+        )
+    for stored, params in zip(stored_rows, candidate_params):
         if (
-            existing is None
-            or str(existing[0]) != candidate.candidate_id
-            or str(existing[1]) != candidate_params["payload_json"]
+            int(stored[0]) != int(params["candidate_index"])
+            or str(stored[1]) != str(params["candidate_id"])
+            or str(stored[2]) != str(params["payload_json"])
         ):
             raise RuntimeError(
                 "PORTFOLIO_ALLOCATION_CANDIDATE_IDEMPOTENCY_CONFLICT:"
-                f"{allocation.allocation_cycle_id}:{index}"
+                f"{allocation.allocation_cycle_id}:{params['candidate_index']}"
             )
     return True
