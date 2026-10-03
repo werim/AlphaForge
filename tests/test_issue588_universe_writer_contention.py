@@ -7,6 +7,7 @@ import time
 import pytest
 from sqlalchemy import event, text
 
+from alphaforge.burnin_campaign import bootstrap_campaign_schema
 from alphaforge.persistence import init_db
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.symbol_selector import (
@@ -125,6 +126,8 @@ def test_universe_busy_is_controlled_recovery_required_and_replay_exact_once(
 ) -> None:
     path = tmp_path / "runtime-universe-busy.db"
     engine = init_db(f"sqlite+pysqlite:///{path}")
+    with engine.begin() as conn:
+        bootstrap_campaign_schema(conn)
     now = time.time()
     rows = [_candidate("BTCUSDT", now)]
 
