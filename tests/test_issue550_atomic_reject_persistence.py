@@ -140,8 +140,17 @@ def test_reject_restart_replay_keeps_all_stable_identities_exactly_once(tmp_path
     )
     restarted._campaign_id = campaign_id
     restarted._burnin_run_id = runtime._burnin_run_id
-    asyncio.run(restarted._persist_reject(_payload()))
+    replay = _payload()
+    replay["decision_timestamp"] = "2026-09-29T00:00:01Z"
+    asyncio.run(restarted._persist_reject(replay))
     assert _reject_counts(engine) == (1, 1, 1, 1, 1, 1)
+    with engine.connect() as conn:
+        lifecycle = conn.execute(text(
+            "SELECT event_id, event_ts FROM trade_lifecycle_events "
+            "WHERE signal_id='issue550:reject' AND lifecycle_state='SIGNAL_REJECTED'"
+        )).one()
+        assert lifecycle.event_id == "issue550:reject:SIGNAL_REJECTED"
+        assert lifecycle.event_ts == "2026-09-29T00:00:01Z"
 
 
 def test_concurrent_resolver_reconciliation_and_reject_remain_consistent(tmp_path, monkeypatch):

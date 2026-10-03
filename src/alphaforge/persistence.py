@@ -1278,10 +1278,29 @@ def save_trade_lifecycle_event(session: Any, *, _commit: bool = True,
             lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason,
             incident_payload=excluded.incident_payload
     """)
+    # event_id is the stable identity for an explicit lifecycle replay.  Check
+    # it before using the secondary (signal_id,event_ts,lifecycle_state) key so
+    # a retry with timestamp drift converges on the existing authoritative row
+    # instead of attempting a fresh insert that violates event_id uniqueness.
+    #
+    # When event_id is new, keep the lifecycle-key UPSERT as the primary path;
+    # this preserves convergence for callers that retry the same lifecycle key
+    # with a newly generated event_id.
+    primary_statement = statement_by_lifecycle_key
+    event_id_authority_hit = False
     try:
-        session.execute(statement_by_lifecycle_key, payload)
+        if event.get("event_id") or event.get("id"):
+            lookup_sql = "SELECT 1 FROM trade_lifecycle_events WHERE event_id=:event_id LIMIT 1"
+            existing_event = session.execute(
+                lookup_sql if isinstance(session, sqlite3.Connection) else text(lookup_sql),
+                {"event_id": event_id},
+            ).fetchone()
+            if existing_event is not None:
+                primary_statement = statement_by_event_id
+                event_id_authority_hit = True
+        session.execute(primary_statement, payload)
     except Exception as first_error:
-        if _raise_on_error:
+        if _raise_on_error or event_id_authority_hit:
             raise
         # A failed SQLAlchemy statement poisons the transaction.  Roll it back
         # before the compatibility conflict-target retry, and never hide the
