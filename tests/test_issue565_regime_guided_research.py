@@ -537,3 +537,30 @@ def test_wider_stack_is_not_promotion_admissible_without_normalized_or_justified
         "TIMEFRAME_SEMANTICS_UNREVIEWED" in blocker
         for blocker in report["blockers"]
     )
+
+def test_wider_stack_provenance_uses_actual_configured_timeframes() -> None:
+    regime = _candles(25, step=0.5, tf_ms=14_400_000)
+    setup = _candles(20, step=0.2, tf_ms=3_600_000)
+    execution = _candles(10, step=0.05, tf_ms=900_000)
+    decision = max(regime[-1]["close_ts"], setup[-1]["close_ts"], execution[-1]["close_ts"])
+    result = build_mtf_candidate_context(
+        {"regime": regime, "setup": setup, "execution": execution},
+        execution_ctx={
+            "spread_pct": 0.0001,
+            "expected_slippage_pct": 0.0001,
+            "market_data_latency_ms": 10.0,
+            "latency_ms": 50.0,
+            "liquidity_score": 1.0,
+        },
+        decision_ts_ms=decision,
+        regime_timeframe="4h",
+        setup_timeframe="1h",
+        execution_timeframe="15m",
+        guided_signal_generation_enabled=True,
+    )
+
+    generation = result["generation"]
+    assert generation["trade_side_source"] == "4h_regime"
+    assert generation["setup_phase_source"] == "1h_regime_guided"
+    assert generation["timing_source"] == "15m_execution_confirmation"
+    assert generation["geometry_source"] == "1h_setup_structure"
