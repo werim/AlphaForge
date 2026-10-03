@@ -71,6 +71,7 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
 
 
 def test_binance_public_snapshot_reuse_bounds_repeated_scan_weight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
     monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
     monkeypatch.setenv("ALPHAFORGE_STALE_MARKET_DATA_SEC", "15")
     clock = {"mono": 100.0, "wall": 1_800_000_000.0}
@@ -117,6 +118,7 @@ def test_binance_public_snapshot_reuse_bounds_repeated_scan_weight(monkeypatch: 
 
 
 def test_expired_public_snapshot_does_not_mask_provider_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
     monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
     monkeypatch.setenv("ALPHAFORGE_STALE_MARKET_DATA_SEC", "15")
     clock = {"mono": 300.0, "wall": 1_800_000_300.0}
@@ -177,16 +179,32 @@ def test_execution_geometry_reuses_same_closed_candle_and_refetches_next(monkeyp
 
     monkeypatch.setattr(scanner_module, "_fetch_json", fetch)
 
-    first = _binance_kline_geometry("https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1)
-    second = _binance_kline_geometry("https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1)
+    first = _binance_kline_geometry(
+        "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
+    )
+    second = _binance_kline_geometry(
+        "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
+    )
     assert first == second
     assert first["geometry_status"] == "COMPLETE"
     assert calls["count"] == 1
 
     clock["wall"] += 61.0
-    third = _binance_kline_geometry("https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1)
+    third = _binance_kline_geometry(
+        "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
+    )
     assert third["geometry_status"] == "COMPLETE"
     assert calls["count"] == 2
+
+
+def test_scanner_cache_is_disabled_outside_paper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    cfg = load_config_from_env()
+    assert scanner_module._binance_snapshot_ttl_sec(cfg) > 0.0
+    cfg.runtime.execution_mode = "LIVE_PRECHECK"
+    assert scanner_module._binance_snapshot_ttl_sec(cfg) == 0.0
+    cfg.runtime.execution_mode = "LIVE"
+    assert scanner_module._binance_snapshot_ttl_sec(cfg) == 0.0
 
 
 def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
