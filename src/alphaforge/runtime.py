@@ -346,6 +346,8 @@ class RuntimeMetrics:
     execution_ownership_persistence_failures: int = 0
     geometry_diagnostic_persistence_failures: int = 0
     live_precheck_persistence_failures: int = 0
+    universe_selection_persistence_failures: int = 0
+    portfolio_allocation_persistence_failures: int = 0
     persistence_enabled: bool = False
 
 
@@ -2887,29 +2889,51 @@ class RuntimeOrchestrator:
             git_sha=self._git_commit(),
             strategy_config_hash=strategy_config_hash,
         )
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            # Directly-constructed unit/research orchestrators have no
+            # canonical runtime database. Keep their selection evidence
+            # process-local instead of bypassing the evidence contract.
+            if self._universe_evidence_engine is None:
+                self._universe_evidence_engine = init_db("sqlite+pysqlite:///:memory:")
+            engine = self._universe_evidence_engine
+
+        def _persist_selection_authority(conn: Any) -> None:
+            persist_universe_selection(conn, universe_selection)
+            if self._campaign_id and self._burnin_run_id:
+                persist_burnin_universe_selection_link(
+                    conn,
+                    universe_selection,
+                    campaign_id=self._campaign_id,
+                    burnin_run_id=self._burnin_run_id,
+                )
+
         try:
-            engine = self._resolve_persistence_engine()
-            if engine is None:
-                # Directly-constructed unit/research orchestrators have no
-                # canonical runtime database. Keep their selection evidence
-                # process-local instead of bypassing the evidence contract.
-                if self._universe_evidence_engine is None:
-                    self._universe_evidence_engine = init_db("sqlite+pysqlite:///:memory:")
-                engine = self._universe_evidence_engine
-            with engine.begin() as conn:
-                persist_universe_selection(conn, universe_selection)
-                if self._campaign_id and self._burnin_run_id:
-                    persist_burnin_universe_selection_link(
-                        conn,
-                        universe_selection,
-                        campaign_id=self._campaign_id,
-                        burnin_run_id=self._burnin_run_id,
-                    )
-        except Exception as exc:  # noqa: BLE001 - selection cannot proceed without canonical evidence
-            logger.exception("universe_selection_persistence_failed cycle_id=%s", universe_selection.cycle_id)
-            self._last_scan_gate_blockers = ["UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"]
-            self._fail_closed_reason = "UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"
+            run_sqlite_write_with_retry(
+                engine,
+                _persist_selection_authority,
+                operation_name="universe_selection_cycle",
+            )
+        except SQLiteBusyExhausted as exc:
+            logger.exception(
+                "universe_selection_persistence_failed cycle_id=%s",
+                universe_selection.cycle_id,
+            )
+            self._last_scan_gate_blockers = [
+                "UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"
+            ]
+            self._mark_sqlite_persistence_recovery_required(
+                reason="UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED",
+                detail=str(exc),
+                metric_field="universe_selection_persistence_failures",
+            )
             return
+        except Exception:
+            logger.exception(
+                "universe_selection_persistence_fatal cycle_id=%s",
+                universe_selection.cycle_id,
+            )
+            raise
         pre_selection = selection_results(universe_selection, selector_config)
         selected = [row for row in pre_selection if bool(row.diagnostics.get("selected"))]
         reject_reasons: dict[str, int] = {}
@@ -3126,7 +3150,7 @@ class RuntimeOrchestrator:
                 lambda conn: persist_portfolio_allocation(conn, allocation),
                 operation_name="portfolio_allocation_cycle",
             )
-        except Exception as exc:  # noqa: BLE001 - missing authority fails closed
+        except SQLiteBusyExhausted as exc:
             logger.exception(
                 "portfolio_allocation_persistence_failed cycle_id=%s",
                 allocation.allocation_cycle_id,
@@ -3134,11 +3158,18 @@ class RuntimeOrchestrator:
             self._last_scan_gate_blockers = [
                 "PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED"
             ]
-            self._fail_closed_reason = (
-                "PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED"
+            self._mark_sqlite_persistence_recovery_required(
+                reason="PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED",
+                detail=str(exc),
+                metric_field="portfolio_allocation_persistence_failures",
             )
-            self._last_error = str(exc)
             return False
+        except Exception:
+            logger.exception(
+                "portfolio_allocation_persistence_fatal cycle_id=%s",
+                allocation.allocation_cycle_id,
+            )
+            raise
 
         by_id = {candidate.candidate_id: candidate for candidate in allocation.candidates}
         for row in selected:
