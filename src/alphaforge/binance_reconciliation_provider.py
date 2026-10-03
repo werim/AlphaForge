@@ -480,14 +480,17 @@ class BinanceReadonlyReconciliationProvider:
     def _register_rate_limit_cooldown(self, exc: error.HTTPError, message: str | None) -> dict[str, float | None]:
         retry_after = self._retry_after_seconds(exc)
         ban_until = self._ban_until_seconds(message)
-        candidates = [value for value in (retry_after, ban_until) if value is not None and value > 0]
-        # Binance documents Retry-After for 429/418.  If an intermediary strips it,
-        # the observed -1003 "per minute" message still gives a bounded, attributable
-        # one-minute cooldown without inventing a favorable default.
-        message_window = 60.0 if exc.code == 429 and "per minute" in str(message or "").lower() else None
-        if message_window is not None:
-            candidates.append(message_window)
-        cooldown = max(candidates) if candidates else 0.0
+        # Retry-After is Binance's authoritative wait.  Ban-until is the fallback
+        # carried in the -1003 payload, and the minute window is used only when an
+        # intermediary stripped both explicit cooldown signals.
+        if retry_after is not None:
+            cooldown = retry_after
+        elif ban_until is not None:
+            cooldown = ban_until
+        elif exc.code == 429 and "per minute" in str(message or "").lower():
+            cooldown = 60.0
+        else:
+            cooldown = 0.0
         if cooldown > 0:
             self._rate_limit_cooldown_until_monotonic = max(
                 self._rate_limit_cooldown_until_monotonic,
