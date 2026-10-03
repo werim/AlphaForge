@@ -1,3 +1,17 @@
+# #586/#588 PAPER A/B blocker verification — 2026-10-03
+
+## Root cause and correction
+
+The Binance scanner rejected every PAPER decision timeframe except 1m before provider acquisition, while selected-candidate geometry enrichment also admitted only 1m. The corrected path validates the supported canonical timeframe set, fetches Binance klines at the configured execution timeframe, derives geometry exclusively from closed candles, and binds actual regime/setup/execution timeframes into provenance.
+
+Dynamic-universe evidence persistence performed one candidate INSERT and one verification SELECT per candidate while holding a single SQLite transaction. Large exchange universes therefore extended writer occupancy and contended with portfolio, lifecycle, reject, resolver, and recovery writers. Candidate evidence is now serialized once, inserted with `executemany`, and verified with one ordered set query. Exact idempotency conflicts remain fatal; exhausted SQLite busy handling marks recovery required without weakening WAL, `busy_timeout=30000`, `synchronous=NORMAL`, foreign keys, or fail-closed behavior.
+
+## Validation and remaining gate
+
+Focused MTF coverage passed 124 tests. Focused/adjacent SQLite coverage passed 74 tests; the protected SQLite gate passed 54 tests, invariant/universe coverage passed 87 tests, and all 32 safety mutations were killed with no survivors or errors. The first full regression run exposed an existing scheduler race in its own concurrent audit reader: it could observe `writer_done` immediately after ingesting a pre-final-commit snapshot. The test now performs one explicit post-completion ingest, preserving the production ingester's snapshot contract while making the final-count assertion deterministic.
+
+No PAPER campaign, FAST/SOAK qualification, LIVE path, active database, or historical artifact was started or mutated. Fresh campaigns remain blocked until the follow-up exact-SHA CI result is green.
+
 # #354 Telegram Control Center — read-only diagnostics — 2026-10-01
 
 ## Why / root cause

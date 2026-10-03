@@ -1,3 +1,14 @@
+# AlphaForge 0.1.0 — #586/#588 PAPER A/B blocker verification — 2026-10-03
+
+- Current phase: fresh PAPER A/B preparation. The canonical Binance scanner supports configured closed-candle PAPER execution timeframes including 15m, and dynamic-universe evidence persistence batches candidate inserts and verification.
+- Runtime maturity/alignment: scanner candidates, geometry fetches, MTF provenance, and execution-candle identity retain the configured timeframe; the open Binance candle is excluded. Strategy thresholds, costs, sizing, confirmation policy, and LIVE authorization are unchanged.
+- Lifecycle/persistence: a 520-candidate universe is written with one batch insert and one ordered verification query inside the canonical short transaction. WAL, 30-second busy timeout, synchronous NORMAL, foreign keys, exact replay, and fail-closed recovery semantics remain protected.
+- Validation: focused MTF and SQLite suites, protected persistence gates, and 32/32 safety mutations pass. The bounded concurrent-audit test now performs an explicit post-writer source snapshot so it cannot exit before the final committed batch is visible. Fresh PAPER campaigns remain intentionally unstarted.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
 # AlphaForge 0.1.0 — #354 Telegram Control Center read-only diagnostics — 2026-10-01
 
 - Current phase: first Telegram-only control-center slice. Existing allowlist/replay/offset/delivery safety is extended with real `/report`, `/rejects`, `/labels`, and `/errors` handlers.

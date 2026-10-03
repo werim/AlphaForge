@@ -1,3 +1,23 @@
+# #586/#588 PAPER A/B blocker verification — 2026-10-03
+
+### Added
+- Regression coverage proving configured 15m Binance geometry uses `interval=15m`, preserves 15m provenance, and excludes the open candle.
+- A 520-candidate SQLite regression proving one batch insert, one ordered verification query, idempotent replay, and controlled busy recovery.
+### Changed
+- Binance PAPER scanner geometry follows the canonical configured execution timeframe instead of silently assuming 1m.
+- Dynamic-universe candidate persistence uses batch execution and set verification within a short transaction.
+- Concurrent audit load coverage takes one post-writer snapshot before asserting final committed row counts.
+### Fixed
+- `VALID_EMPTY / UNSUPPORTED_TIMEFRAME` for supported wider PAPER MTF stacks.
+- Per-candidate insert/verification pressure that held the SQLite writer slot across large universe cycles.
+- Scheduler-dependent bounded-load failures where the reader exited after a pre-final-commit snapshot.
+### Removed
+- No strategy, evidence, campaign, or historical data removed.
+### Breaking Changes
+- None. Thresholds, execution costs, risk, sizing, confirmation mode, and LIVE behavior are unchanged.
+### Known Issues
+- Fresh PAPER A/B campaigns and FAST/SOAK qualification have not been started; exact final-SHA campaign validation remains pending.
+
 # #354 Telegram Control Center read-only diagnostics — 2026-10-01
 
 ### Added
