@@ -10,7 +10,14 @@ from urllib import error, parse, request
 
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
-GEOMETRY_SOURCE = "BINANCE_CLOSED_1M_KLINES"
+SUPPORTED_BINANCE_DECISION_TIMEFRAMES = frozenset({"1m", "15m", "1h", "4h", "1d"})
+
+
+def _geometry_source(timeframe: str) -> str:
+    return f"BINANCE_CLOSED_{str(timeframe).upper()}_KLINES"
+
+
+GEOMETRY_SOURCE = _geometry_source("1m")
 
 
 class MarketScanRows(list[dict[str, Any]]):
@@ -73,24 +80,38 @@ async def scan_exchange_markets(config: Any) -> MarketScanRows:
     return await asyncio.to_thread(_scan_exchange_markets_sync, config)
 
 
-def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -> dict[str, Any]:
-    """Return canonical geometry from the last two closed 1m setup candles."""
-    query = parse.urlencode({"symbol": symbol, "interval": "1m", "limit": 21})
+def _binance_kline_geometry(
+    base_url: str,
+    symbol: str,
+    *,
+    timeframe: str = "1m",
+    timeout_sec: float,
+) -> dict[str, Any]:
+    """Return canonical geometry from the last two closed execution candles."""
+    timeframe = str(timeframe or "").lower()
+    geometry_source = _geometry_source(timeframe)
+    if timeframe not in SUPPORTED_BINANCE_DECISION_TIMEFRAMES:
+        return {
+            "geometry_status": "UNAVAILABLE",
+            "geometry_reason": "UNSUPPORTED_TIMEFRAME",
+            "geometry_source": geometry_source,
+        }
+    query = parse.urlencode({"symbol": symbol, "interval": timeframe, "limit": 21})
     try:
         rows = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/klines?{query}", timeout_sec=timeout_sec)
     except (TimeoutError, asyncio.TimeoutError):
-        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_TIMEOUT", "geometry_source": GEOMETRY_SOURCE}
+        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_TIMEOUT", "geometry_source": geometry_source}
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_FETCH_FAILED", "geometry_source": GEOMETRY_SOURCE}
+        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_FETCH_FAILED", "geometry_source": geometry_source}
     if not isinstance(rows, list):
-        return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": GEOMETRY_SOURCE}
+        return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": geometry_source}
     if len(rows) < 3:
-        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_INSUFFICIENT_ROWS", "geometry_source": GEOMETRY_SOURCE}
+        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_INSUFFICIENT_ROWS", "geometry_source": geometry_source}
     candles = []
     execution_candle_open_ts = None
     for row in rows[-3:-1]:
         if not isinstance(row, list) or len(row) < 5:
-            return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": GEOMETRY_SOURCE}
+            return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": geometry_source}
         candles.append({"open": row[1], "high": row[2], "low": row[3], "close": row[4]})
         execution_candle_open_ts = row[0]
     recent_klines: list[dict[str, float]] = []
@@ -108,12 +129,12 @@ def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -
     identity = {"execution_candle_open_ts": execution_candle_open_ts}
     geometry, reason = build_breakout_geometry_with_diagnostics(candles[1], candles[0])
     if reason:
-        return {**identity, "geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": GEOMETRY_SOURCE}
+        return {**identity, "geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": geometry_source}
     volatility_evidence = ({"recent_klines": recent_klines,
                             "recent_klines_status": "MEASURED",
-                            "recent_klines_source": GEOMETRY_SOURCE}
+                            "recent_klines_source": geometry_source}
                            if len(recent_klines) >= 2 else {})
-    return {**geometry, **identity, **volatility_evidence, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": GEOMETRY_SOURCE}
+    return {**geometry, **identity, **volatility_evidence, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": geometry_source}
 
 
 def _fetch_json_with_latency(url: str, *, timeout_sec: float) -> tuple[Any, float | None]:
@@ -147,12 +168,31 @@ async def enrich_selected_market_geometry(
         source = str(candidate.get("source_exchange") or "").lower()
         symbol = str(candidate.get("symbol") or "")
         timeframe = str(candidate.get("timeframe") or "").lower()
-        key = (symbol, timeframe) if source == "binance" and symbol and timeframe == "1m" else None
+        key = (
+            (symbol, timeframe)
+            if source == "binance"
+            and symbol
+            and timeframe in SUPPORTED_BINANCE_DECISION_TIMEFRAMES
+            else None
+        )
         keys.append(key)
         if key is not None and key not in tasks:
-            tasks[key] = asyncio.create_task(
-                asyncio.to_thread(_binance_kline_geometry, base_url, symbol, timeout_sec=timeout)
-            )
+            if timeframe == "1m":
+                geometry_call = asyncio.to_thread(
+                    _binance_kline_geometry,
+                    base_url,
+                    symbol,
+                    timeout_sec=timeout,
+                )
+            else:
+                geometry_call = asyncio.to_thread(
+                    _binance_kline_geometry,
+                    base_url,
+                    symbol,
+                    timeframe=timeframe,
+                    timeout_sec=timeout,
+                )
+            tasks[key] = asyncio.create_task(geometry_call)
     results = dict(zip(tasks, await asyncio.gather(*tasks.values()))) if tasks else {}
     enriched: list[dict[str, Any]] = []
     for candidate, key in zip(candidates, keys):
@@ -215,11 +255,13 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> MarketScanRows:
         ))
     base_url = str(getattr(binance, "market_data_base_url", getattr(binance, "base_url", "https://fapi.binance.com")))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
-    decision_timeframe = str(getattr(getattr(config, "runtime", object()), "paper_decision_timeframe", "1m"))
-    if decision_timeframe != "1m":
+    decision_timeframe = str(
+        getattr(getattr(config, "runtime", object()), "paper_decision_timeframe", "1m")
+    ).lower()
+    if decision_timeframe not in SUPPORTED_BINANCE_DECISION_TIMEFRAMES:
         return MarketScanRows([], diagnostics=_market_scan_diagnostics(
             status="VALID_EMPTY", provider="binance", cause="UNSUPPORTED_TIMEFRAME",
-        ))  # the canonical geometry provider currently supports closed 1m setup candles only
+        ))
 
     endpoint_specs = (
         ("exchangeInfo", f"{base_url.rstrip('/')}/fapi/v1/exchangeInfo", False),
