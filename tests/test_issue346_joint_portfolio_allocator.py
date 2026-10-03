@@ -5,6 +5,7 @@ import itertools
 import sqlite3
 
 import pytest
+from sqlalchemy import create_engine, event
 
 from alphaforge.portfolio_allocation_evidence import (
     PORTFOLIO_ALLOCATION_DDL,
@@ -260,6 +261,79 @@ def _db() -> sqlite3.Connection:
     for statement in PORTFOLIO_ALLOCATION_DDL:
         conn.execute(statement)
     return conn
+
+
+def test_candidate_evidence_persistence_batches_insert_and_verification(tmp_path):
+    candidates = [
+        _candidate(f"ALT{index:03d}USDT", float(100 - index), notional=1.0)
+        for index in range(64)
+    ]
+    allocation = allocate_portfolio_candidates(
+        candidates,
+        _snapshot(
+            max_open_positions=100,
+            max_concurrent_positions=100,
+            max_notional_exposure=10_000.0,
+            max_symbol_notional=10_000.0,
+            max_correlation_group_exposure=10_000.0,
+            max_correlated_positions=100,
+        ),
+        _config(
+            max_open_positions=100,
+            max_concurrent_positions=100,
+            max_notional_exposure=10_000.0,
+            max_symbol_notional=10_000.0,
+            max_same_side_exposure=10_000.0,
+            max_net_exposure=10_000.0,
+            max_correlation_group_exposure=10_000.0,
+            max_correlated_positions=100,
+        ),
+        mode="PAPER",
+    )
+    assert len(allocation.candidates) == 64
+
+    path = tmp_path / "portfolio-allocation-batch.db"
+    engine = create_engine(f"sqlite+pysqlite:///{path}")
+    with engine.begin() as conn:
+        for statement in PORTFOLIO_ALLOCATION_DDL:
+            conn.exec_driver_sql(statement)
+
+    statements: list[tuple[str, bool]] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, executemany):
+        normalized = " ".join(str(statement).split())
+        if "portfolio_allocation_candidates" in normalized:
+            statements.append((normalized, bool(executemany)))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.begin() as conn:
+            assert persist_portfolio_allocation(conn, allocation)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    inserts = [
+        item for item in statements
+        if item[0].startswith("INSERT INTO portfolio_allocation_candidates")
+    ]
+    verifications = [
+        item for item in statements
+        if item[0].startswith("SELECT candidate_index")
+    ]
+    assert len(inserts) == 1
+    assert inserts[0][1] is True
+    assert len(verifications) == 1
+
+    with engine.begin() as conn:
+        assert persist_portfolio_allocation(conn, allocation)
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM portfolio_allocation_candidates"
+        ).scalar_one() == 64
+        assert conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM portfolio_allocation_cycles"
+        ).scalar_one() == 1
+    engine.dispose()
 
 
 def test_restart_persistence_is_idempotent_and_conflicts_fail_closed():
