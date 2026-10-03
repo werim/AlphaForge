@@ -7,6 +7,7 @@ from urllib import error, request
 
 import pytest
 
+import alphaforge.exchange_market_scanner as scanner_module
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from alphaforge.exchange_market_scanner import (_binance_kline_geometry, _fetch_json_with_latency,
     _scan_binance, enrich_selected_market_geometry, scan_exchange_markets)
@@ -67,6 +68,183 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
     assert any(row.get("source_exchange") == "hyperliquid" for row in rows)
     assert all("symbol" in row and "entry" in row for row in rows)
     assert rows.diagnostics["status"] == "AVAILABLE"
+
+
+def test_binance_public_snapshot_reuse_bounds_repeated_scan_weight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setenv("ALPHAFORGE_STALE_MARKET_DATA_SEC", "15")
+    clock = {"mono": 100.0, "wall": 1_800_000_000.0}
+    monkeypatch.setattr(scanner_module.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(scanner_module.time, "time", lambda: clock["wall"])
+    calls: list[str] = []
+
+    def fetch(url, *, timeout_sec):
+        raw = str(url)
+        calls.append(raw)
+        if raw.endswith("/fapi/v1/exchangeInfo"):
+            return {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING",
+                                  "contractType": "PERPETUAL", "quoteAsset": "USDT"}]}
+        if raw.endswith("/fapi/v1/ticker/24hr"):
+            return [{"symbol": "BTCUSDT", "lastPrice": "100",
+                     "quoteVolume": "90000000", "priceChangePercent": "1"}]
+        if raw.endswith("/fapi/v1/ticker/bookTicker"):
+            return [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}]
+        if raw.endswith("/fapi/v1/premiumIndex"):
+            return [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}]
+        raise AssertionError(raw)
+
+    monkeypatch.setattr(scanner_module, "_fetch_json", fetch)
+    cfg = load_config_from_env()
+
+    first = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+    observed_at = first[0]["market_observed_at"]
+    for _ in range(6):
+        clock["mono"] += 1.0
+        clock["wall"] += 1.0
+        repeated = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+        assert repeated.diagnostics["snapshot_cache_status"] == "HIT"
+        assert repeated[0]["market_observed_at"] == observed_at
+
+    assert len(calls) == 4
+    assert first.diagnostics["snapshot_cache_status"] == "MISS"
+
+    clock["mono"] += 2.0
+    clock["wall"] += 2.0
+    refreshed = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+    assert refreshed.diagnostics["snapshot_cache_status"] == "MISS"
+    assert refreshed[0]["market_observed_at"] == clock["wall"]
+    assert len(calls) == 8
+
+
+def test_public_snapshot_cache_is_bound_to_provider_callable_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setenv("ALPHAFORGE_STALE_MARKET_DATA_SEC", "15")
+    monkeypatch.setattr(scanner_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(scanner_module.time, "time", lambda: 1_800_000_000.0)
+    cfg = load_config_from_env()
+
+    def make_fetch(last_price: str, calls: list[str]):
+        def fetch(url, *, timeout_sec):
+            raw = str(url)
+            calls.append(raw)
+            if raw.endswith("/fapi/v1/exchangeInfo"):
+                return {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING",
+                                      "contractType": "PERPETUAL", "quoteAsset": "USDT"}]}
+            if raw.endswith("/fapi/v1/ticker/24hr"):
+                return [{"symbol": "BTCUSDT", "lastPrice": last_price,
+                         "quoteVolume": "90000000", "priceChangePercent": "1"}]
+            if raw.endswith("/fapi/v1/ticker/bookTicker"):
+                return [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}]
+            if raw.endswith("/fapi/v1/premiumIndex"):
+                return [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}]
+            raise AssertionError(raw)
+        return fetch
+
+    first_calls: list[str] = []
+    first_fetch = make_fetch("100", first_calls)
+    monkeypatch.setattr(scanner_module, "_fetch_json", first_fetch)
+    first = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+    assert first.diagnostics["snapshot_cache_status"] == "MISS"
+    assert len(first_calls) == 4
+
+    second_calls: list[str] = []
+    second_fetch = make_fetch("101", second_calls)
+    monkeypatch.setattr(scanner_module, "_fetch_json", second_fetch)
+    second = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+    assert second.diagnostics["snapshot_cache_status"] == "MISS"
+    assert len(second_calls) == 4
+
+
+def test_expired_public_snapshot_does_not_mask_provider_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setenv("ALPHAFORGE_STALE_MARKET_DATA_SEC", "15")
+    clock = {"mono": 300.0, "wall": 1_800_000_300.0}
+    monkeypatch.setattr(scanner_module.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(scanner_module.time, "time", lambda: clock["wall"])
+    state = {"fail": False, "calls": 0}
+
+    def fetch(url, *, timeout_sec):
+        raw = str(url)
+        state["calls"] += 1
+        if state["fail"] and raw.endswith("/fapi/v1/exchangeInfo"):
+            raise error.HTTPError(raw, 429, "rate limited", {}, None)
+        if raw.endswith("/fapi/v1/exchangeInfo"):
+            return {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING",
+                                  "contractType": "PERPETUAL", "quoteAsset": "USDT"}]}
+        if raw.endswith("/fapi/v1/ticker/24hr"):
+            return [{"symbol": "BTCUSDT", "lastPrice": "100",
+                     "quoteVolume": "90000000", "priceChangePercent": "1"}]
+        if raw.endswith("/fapi/v1/ticker/bookTicker"):
+            return [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}]
+        if raw.endswith("/fapi/v1/premiumIndex"):
+            return [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}]
+        raise AssertionError(raw)
+
+    monkeypatch.setattr(scanner_module, "_fetch_json", fetch)
+    cfg = load_config_from_env()
+    assert scanner_module._scan_binance(cfg, timeout_sec=0.1).diagnostics["status"] == "AVAILABLE"
+    assert state["calls"] == 4
+
+    clock["mono"] += 8.0
+    clock["wall"] += 8.0
+    state["fail"] = True
+    failed = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+    assert failed == []
+    assert failed.diagnostics["status"] == "UNAVAILABLE"
+    assert failed.diagnostics["cause"] == "HTTP_429"
+    assert state["calls"] == 5
+
+    state["fail"] = False
+    recovered = scanner_module._scan_binance(cfg, timeout_sec=0.1)
+    assert recovered.diagnostics["status"] == "AVAILABLE"
+    assert recovered.diagnostics["snapshot_cache_status"] == "MISS"
+    assert state["calls"] == 9
+
+
+def test_execution_geometry_reuses_same_closed_candle_and_refetches_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"wall": 1_800_000_120.0}
+    monkeypatch.setattr(scanner_module.time, "time", lambda: clock["wall"])
+    calls = {"count": 0}
+
+    def fetch(_url, *, timeout_sec):
+        calls["count"] += 1
+        return [
+            [0, "98", "100", "97", "99", "10"],
+            [60_000, "99", "101", "98", "100", "12"],
+            [120_000, "100", "102", "99", "101", "15"],
+        ]
+
+    monkeypatch.setattr(scanner_module, "_fetch_json", fetch)
+
+    first = scanner_module._cached_binance_kline_geometry(
+        "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
+    )
+    second = scanner_module._cached_binance_kline_geometry(
+        "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
+    )
+    assert first == second
+    assert first["geometry_status"] == "COMPLETE"
+    assert calls["count"] == 1
+
+    clock["wall"] += 61.0
+    third = scanner_module._cached_binance_kline_geometry(
+        "https://example.invalid", "BTCUSDT", timeframe="1m", timeout_sec=1, cache_enabled=True
+    )
+    assert third["geometry_status"] == "COMPLETE"
+    assert calls["count"] == 2
+
+
+def test_scanner_cache_is_disabled_outside_paper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    cfg = load_config_from_env()
+    assert scanner_module._binance_snapshot_ttl_sec(cfg) > 0.0
+    cfg.runtime.execution_mode = "LIVE_PRECHECK"
+    assert scanner_module._binance_snapshot_ttl_sec(cfg) == 0.0
+    cfg.runtime.execution_mode = "LIVE"
+    assert scanner_module._binance_snapshot_ttl_sec(cfg) == 0.0
 
 
 def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
