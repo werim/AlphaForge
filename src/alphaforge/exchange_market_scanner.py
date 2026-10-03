@@ -229,11 +229,7 @@ def _binance_kline_geometry(
     identity = {"execution_candle_open_ts": execution_candle_open_ts}
     geometry, reason = build_breakout_geometry_with_diagnostics(candles[1], candles[0])
     if reason:
-        result = {**identity, "geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": geometry_source}
-        if reason != "KLINE_MALFORMED_PAYLOAD":
-            with _BINANCE_GEOMETRY_CACHE_LOCK:
-                _BINANCE_GEOMETRY_CACHE[cache_key] = dict(result)
-        return result
+        return {**identity, "geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": geometry_source}
     volatility_evidence = ({"recent_klines": recent_klines,
                             "recent_klines_status": "MEASURED",
                             "recent_klines_source": geometry_source}
