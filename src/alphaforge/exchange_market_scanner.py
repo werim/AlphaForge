@@ -13,9 +13,9 @@ from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
 SUPPORTED_BINANCE_DECISION_TIMEFRAMES = frozenset({"1m", "15m", "1h", "4h", "1d"})
 
-_BINANCE_SNAPSHOT_CACHE: dict[tuple[int, int, str], dict[str, Any]] = {}
+_BINANCE_SNAPSHOT_CACHE: dict[tuple[object, object, str], dict[str, Any]] = {}
 _BINANCE_SNAPSHOT_CACHE_LOCK = threading.Lock()
-_BINANCE_GEOMETRY_CACHE: dict[tuple[int, int, str, str, str, int], dict[str, Any]] = {}
+_BINANCE_GEOMETRY_CACHE: dict[tuple[object, object, str, str, str, int], dict[str, Any]] = {}
 _BINANCE_GEOMETRY_CACHE_LOCK = threading.Lock()
 
 
@@ -60,9 +60,12 @@ def _binance_snapshot_ttl_sec(config: Any) -> float:
     return min(10.0, stale / 2.0)
 
 
-def _snapshot_cache_key(config: Any, base_url: str) -> tuple[int, int, str]:
+def _snapshot_cache_key(config: Any, base_url: str) -> tuple[object, object, str]:
     del config  # freshness policy is evaluated on every lookup, not frozen into the key.
-    return (id(_fetch_json), id(request.urlopen), base_url.rstrip("/"))
+    # Keep the actual provider callables in the key. Using id(...) here is unsafe:
+    # CPython may recycle an object's id after a monkeypatched/test callable is
+    # released, which can make unrelated provider authorities collide.
+    return (_fetch_json, request.urlopen, base_url.rstrip("/"))
 
 
 def _load_cached_binance_snapshot(config: Any, base_url: str) -> dict[str, Any] | None:
@@ -191,12 +194,12 @@ def _binance_kline_geometry(
             "geometry_reason": "UNSUPPORTED_TIMEFRAME",
             "geometry_source": geometry_source,
         }
-    cache_key: tuple[int, int, str, str, str, int] | None = None
+    cache_key: tuple[object, object, str, str, str, int] | None = None
     if cache_enabled:
         boundary = _latest_closed_candle_bucket(timeframe)
         cache_key = (
-            id(_fetch_json),
-            id(request.urlopen),
+            _fetch_json,
+            request.urlopen,
             base_url.rstrip("/"),
             symbol.upper(),
             timeframe,
