@@ -671,10 +671,10 @@ def build_mtf_candidate_context(
             "evidence_status": "COMPLETE" if candidate else "INCOMPLETE",
             "candidate": candidate or None,
             "reason": geometry_reason,
-            "trade_side_source": "1h_regime",
-            "setup_phase_source": "15m_regime_guided",
-            "timing_source": "1m_execution_confirmation",
-            "geometry_source": "15m_setup_structure",
+            "trade_side_source": f"{regime_timeframe}_regime",
+            "setup_phase_source": f"{setup_timeframe}_regime_guided",
+            "timing_source": f"{execution_timeframe}_execution_confirmation",
+            "geometry_source": f"{setup_timeframe}_setup_structure",
             "geometry_evidence": geometry_evidence,
         }
         if alignment.get("aligned") and not candidate:
