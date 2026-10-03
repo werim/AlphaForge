@@ -244,6 +244,12 @@ def _cached_binance_kline_geometry(
     cache_enabled: bool,
 ) -> dict[str, Any]:
     if not cache_enabled:
+        if timeframe == "1m":
+            return _binance_kline_geometry(
+                base_url,
+                symbol,
+                timeout_sec=timeout_sec,
+            )
         return _binance_kline_geometry(
             base_url,
             symbol,
@@ -265,12 +271,19 @@ def _cached_binance_kline_geometry(
         if cached_geometry is not None:
             return dict(cached_geometry)
 
-    result = _binance_kline_geometry(
-        base_url,
-        symbol,
-        timeframe=timeframe,
-        timeout_sec=timeout_sec,
-    )
+    if timeframe == "1m":
+        result = _binance_kline_geometry(
+            base_url,
+            symbol,
+            timeout_sec=timeout_sec,
+        )
+    else:
+        result = _binance_kline_geometry(
+            base_url,
+            symbol,
+            timeframe=timeframe,
+            timeout_sec=timeout_sec,
+        )
     if result.get("geometry_status") != "COMPLETE":
         return result
 
