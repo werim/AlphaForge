@@ -99,6 +99,18 @@ def _execute(conn: Any, statement: str, params: dict[str, Any] | None = None) ->
     return conn.execute(statement if isinstance(conn, sqlite3.Connection) else text(statement), params or {})
 
 
+def _execute_many(
+    conn: Any,
+    statement: str,
+    params: list[dict[str, Any]],
+) -> Any:
+    if not params:
+        return None
+    if isinstance(conn, sqlite3.Connection):
+        return conn.executemany(statement, params)
+    return conn.execute(text(statement), params)
+
+
 def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
     """Insert immutable selection evidence, accepting exact replay idempotently."""
     payload_json = json.dumps(selection.as_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -139,46 +151,82 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
     if existing is None or str(existing[0]) != selection.evidence_hash or str(existing[1]) != payload_json:
         raise RuntimeError(f"UNIVERSE_SELECTION_IDEMPOTENCY_CONFLICT:{selection.cycle_id}")
 
+    candidate_params: list[dict[str, Any]] = []
     for index, candidate in enumerate(selection.candidates):
-        params = {
+        candidate_params.append({
             "cycle_id": selection.cycle_id,
             "candidate_index": index,
             "symbol": candidate.symbol,
             "eligibility_state": candidate.state.value,
             "exclusion_reasons_json": json.dumps(list(candidate.reasons), sort_keys=True),
-            "observed_inputs_json": json.dumps(candidate.observed_inputs, sort_keys=True, separators=(",", ":"), allow_nan=False),
-            "ranking_components_json": json.dumps(candidate.ranking_components, sort_keys=True, separators=(",", ":"), allow_nan=False),
+            "observed_inputs_json": json.dumps(
+                candidate.observed_inputs,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+            "ranking_components_json": json.dumps(
+                candidate.ranking_components,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
             "ranking_score": candidate.score,
             "ranking_order": candidate.rank,
             "selected": int(candidate.selected),
-            "evidence_availability_json": json.dumps(candidate.evidence_availability, sort_keys=True),
-        }
-        _execute(conn, """
-            INSERT INTO universe_selection_candidates (
-                cycle_id, candidate_index, symbol, eligibility_state,
-                exclusion_reasons_json, observed_inputs_json, ranking_components_json,
-                ranking_score, ranking_order, selected, evidence_availability_json
-            ) VALUES (
-                :cycle_id, :candidate_index, :symbol, :eligibility_state,
-                :exclusion_reasons_json, :observed_inputs_json, :ranking_components_json,
-                :ranking_score, :ranking_order, :selected, :evidence_availability_json
-            ) ON CONFLICT(cycle_id, candidate_index) DO NOTHING
-        """, params)
-        stored = _execute(conn, """
-            SELECT symbol, eligibility_state, exclusion_reasons_json, observed_inputs_json,
-                   ranking_components_json, ranking_score, ranking_order, selected,
-                   evidence_availability_json
-            FROM universe_selection_candidates
-            WHERE cycle_id=:cycle_id AND candidate_index=:candidate_index
-        """, params).fetchone()
+            "evidence_availability_json": json.dumps(
+                candidate.evidence_availability, sort_keys=True
+            ),
+        })
+
+    _execute_many(conn, """
+        INSERT INTO universe_selection_candidates (
+            cycle_id, candidate_index, symbol, eligibility_state,
+            exclusion_reasons_json, observed_inputs_json, ranking_components_json,
+            ranking_score, ranking_order, selected, evidence_availability_json
+        ) VALUES (
+            :cycle_id, :candidate_index, :symbol, :eligibility_state,
+            :exclusion_reasons_json, :observed_inputs_json, :ranking_components_json,
+            :ranking_score, :ranking_order, :selected, :evidence_availability_json
+        ) ON CONFLICT(cycle_id, candidate_index) DO NOTHING
+    """, candidate_params)
+
+    stored_rows = _execute(
+        conn,
+        """
+        SELECT candidate_index, symbol, eligibility_state, exclusion_reasons_json,
+               observed_inputs_json, ranking_components_json, ranking_score,
+               ranking_order, selected, evidence_availability_json
+        FROM universe_selection_candidates
+        WHERE cycle_id=:cycle_id
+        ORDER BY candidate_index
+        """,
+        {"cycle_id": selection.cycle_id},
+    ).fetchall()
+    if len(stored_rows) != len(candidate_params):
+        raise RuntimeError(
+            f"UNIVERSE_SELECTION_CANDIDATE_COUNT_CONFLICT:{selection.cycle_id}:"
+            f"{len(stored_rows)}!={len(candidate_params)}"
+        )
+
+    for stored, params in zip(stored_rows, candidate_params):
         expected = (
-            params["symbol"], params["eligibility_state"], params["exclusion_reasons_json"],
-            params["observed_inputs_json"], params["ranking_components_json"],
-            params["ranking_score"], params["ranking_order"], params["selected"],
+            params["candidate_index"],
+            params["symbol"],
+            params["eligibility_state"],
+            params["exclusion_reasons_json"],
+            params["observed_inputs_json"],
+            params["ranking_components_json"],
+            params["ranking_score"],
+            params["ranking_order"],
+            params["selected"],
             params["evidence_availability_json"],
         )
-        if stored is None or tuple(stored) != expected:
-            raise RuntimeError(f"UNIVERSE_SELECTION_CANDIDATE_IDEMPOTENCY_CONFLICT:{selection.cycle_id}:{index}")
+        if tuple(stored) != expected:
+            raise RuntimeError(
+                "UNIVERSE_SELECTION_CANDIDATE_IDEMPOTENCY_CONFLICT:"
+                f"{selection.cycle_id}:{params['candidate_index']}"
+            )
     return True
 
 
