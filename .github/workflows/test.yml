@@ -13,13 +13,46 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  dispatch-dedupe:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+
+    steps:
+      - name: Reuse successful exact-SHA qualification
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          match="$(
+            gh api --method GET \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/test.yml/runs" \
+              -f branch="${GITHUB_REF_NAME}" \
+              -f status=success \
+              -F per_page=50 \
+              --jq ".workflow_runs[] | select(.head_sha == \"${GITHUB_SHA}\" and (.event == \"push\" or .event == \"workflow_dispatch\")) | .id" \
+              | head -n 1
+          )"
+          if [ -n "$match" ]; then
+            echo "Found successful full qualification for ${GITHUB_SHA}: run ${match}"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No successful full qualification found for ${GITHUB_SHA}"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: dispatch-dedupe
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.dispatch-dedupe.outputs.should_run == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -64,151 +97,53 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py tests/test_ci_branch_contract.py
 
-      - name: Shared trade-quality authority gate
+      - name: Routed PR verification
         if: github.event_name == 'pull_request'
         run: |
-          pytest -q tests/test_issue497_trade_quality_authority.py
-          pytest -q tests/test_trade_quality.py tests/test_backtest_filter_switches.py tests/test_backtest_paper_pre_submit_parity.py tests/test_agent_phase_b.py
-          pytest -q tests/test_runtime.py tests/test_multi_timeframe.py tests/test_state_direction_shadow.py tests/test_issue421_full_chain_replay.py
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
 
-      - name: Runtime authority regression gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue421_full_chain_replay.py tests/test_multi_timeframe.py tests/test_runtime.py tests/test_state_direction_shadow.py
-          pytest -q tests/test_issue581_burnin_dynamic_universe.py tests/test_reject_label_status.py
-
-      - name: RR-stage evidence semantics gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue495_rr_stage_evidence.py tests/test_issue391_decision_evidence_writer.py
-          pytest -q tests/test_live_readiness.py -k "phase3"
-
-      - name: Protected three-mode parity gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue490_protected_mode_parity.py tests/test_issue421_decision_invariant.py
-          pytest -q tests/test_live_readiness.py -k "mode_parity"
-
-      - name: PAPER candidate-notional SSOT gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_issue491_paper_candidate_notional_ssot.py
-
-      - name: Correlation-risk config SSOT gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_issue500_correlation_risk_config_ssot.py
-
-      - name: Runtime default-authority SSOT gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue501_runtime_default_authority.py
-          pytest -q tests/test_issue421_execution_safety.py::test_multi_gate_execution_reject_persists_all_failed_threshold_evidence
-          pytest -q tests/test_m0_scoring_context.py::test_context_rules_are_identical_for_paper_and_live_and_thresholds_unchanged
-
-      - name: Execution ownership fencing gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_issue507_execution_ownership.py tests/test_runtime_live_authorization.py tests/test_trading_modes.py tests/test_env_safety_and_filters.py
-
-      - name: System audit fabric gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
-
-      - name: SQLite contention regression gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue550_atomic_reject_persistence.py
-          pytest -q tests/test_issue569_lifecycle_sqlite_contention.py
-          pytest -q tests/test_issue571_sqlite_writer_survivability.py
-          pytest -q tests/test_issue588_universe_writer_contention.py
-          pytest -q tests/test_issue603_sqlite_writer_arbitration.py
-          pytest -q tests/test_runtime_heartbeat.py
-          pytest -q tests/test_reconciliation_sqlite_contention.py
-          pytest -q tests/test_issue450_sqlite_concurrency.py
-          pytest -q tests/test_phase8_burnin_campaign.py -k "lock"
-
-      - name: Terminal cause regression gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue419_terminal_cause.py
-          pytest -q tests/test_phase9_burnin_ops.py -k "terminal_cause or backlog_growth or sustained_overdue or running_without_worker or manual_terminalization_event_failure"
-
-      - name: Public market-data safety gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_exchange_market_scanner.py tests/test_issue438_market_data_supervision.py
-
-      - name: Frozen OOS policy research gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue506_walk_forward.py tests/test_issue549_pullback_policy_research.py
-
-      - name: Derivatives execution contract gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue503_derivatives_contract.py
-          pytest -q tests/test_runtime_live_authorization.py tests/test_live_readiness.py -k "runtime_live_authorization or mode_parity or final_gate"
-
-      - name: Microstructure authority gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue502_microstructure_authority.py
-          pytest -q tests/test_live_readiness.py -k "mode_parity"
-          pytest -q tests/test_execution_layer.py tests/test_issue421_execution_safety.py
-
-      - name: SOAK decision evidence gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441 or fast_qualification_is_isolated_complete_and_machine_readable"
-          pytest -q tests/test_phase7_qualification.py -k "guided_geometry"
-
-      - name: Burn-in execution evidence gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue547_qualification_evidence.py
-          pytest -q tests/test_phase7_qualification.py -k "execution_metrics"
-          pytest -q tests/test_phase8_burnin_campaign.py -k "execution_measurements"
-          pytest -q tests/test_runtime.py -k "execution_reject_metric_uses_db_canonical_count or guided_null_candidate_separates_canonical_and_shadow_geometry or guided_null_low_effective_rr_is_not_authoritative or pre_ai_duplicate_position_keeps_score_unknown"
-
-      - name: Burn-in drawdown evidence gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_phase7_qualification.py -k "drawdown or recovery_status or all_required_phase7_and_phase6_evidence_canary_qualified"
-          pytest -q tests/test_phase8_burnin_campaign.py -k "drawdown"
-          pytest -q tests/test_issue421_portfolio_risk_state.py -k "restart_and_continuation_history or excludes_other_campaign_history"
-          pytest -q tests/test_runtime.py -k "periodic_metrics_persist_measured_drawdown or periodic_metrics_do_not_fabricate_drawdown"
+          plan = json.loads(
+              Path("artifacts/system-verification-plan.json").read_text()
+          )
+          always_covered = {
+              "tests/test_ci_branch_contract.py",
+              "tests/test_issue421_decision_invariant.py",
+              "tests/test_issue498_cross_component_mutations.py",
+          }
+          selected = [
+              path
+              for path in plan.get("selected_tests", [])
+              if path not in always_covered
+          ]
+          print(
+              "verification route:",
+              plan["risk_level"],
+              ",".join(plan["required_tiers"]),
+          )
+          print(
+              "routed tests:",
+              " ".join(selected) if selected else "<always-on guards only>",
+          )
+          if selected:
+              subprocess.run(
+                  [sys.executable, "-m", "pytest", "-q", *selected],
+                  check=True,
+              )
+          PY
 
       - name: Full regression suite
-        if: github.event_name != 'pull_request' || github.event.pull_request.number == 536
+        if: github.event_name != 'pull_request'
         run: pytest -q
-
-      - name: Executable stop-risk gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue492_executable_stop_risk.py
-          pytest -q tests/test_trade_quality.py
-          pytest -q tests/test_paper_rr_geometry.py
-          pytest -q tests/test_issue374_reject_execution_parity.py tests/test_issue322_reject_geometry.py
-          pytest -q tests/test_env_safety_and_filters.py tests/test_trading_modes.py
-          pytest -q tests/test_multi_timeframe.py -k "issue481_guided_sub_min_stop or issue481_min_stop_boundary"
-          pytest -q tests/test_phase123_foundations.py -k "major_reject_reason_classes"
-          pytest -q tests/test_phase7_burnin.py -k "entry_fill_does_not_create_closed_burnin_outcome"
-          pytest -q tests/test_runtime_live_authorization.py -k "runtime_non_live_execution"
-
-      - name: Risk-scale sizing gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue489_risk_scale_sizing.py
-          pytest -q tests/test_issue492_executable_stop_risk.py
-          pytest -q tests/test_issue421_portfolio_risk_state.py -k "portfolio or risk"
-
-      - name: Portfolio-risk authority gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue496_portfolio_risk_authority.py
-          pytest -q tests/test_portfolio_risk_engine.py
-          pytest -q tests/test_live_readiness.py -k "phase3_execution_gate_blocks_when_each_required_check_fails or final_gate_missing_each_individual_gate_blocks_real_orders"
 
       - name: Protected safety mutation gate
         run: |
-          pytest -q tests/test_issue498_cross_component_mutations.py
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            pytest -q tests/test_issue498_cross_component_mutations.py
+          fi
           python scripts/run_safety_mutations.py
 
       - name: Run offline backtest
@@ -228,3 +163,4 @@ jobs:
             artifacts/backtest/backtest_orders.csv
             artifacts/backtest/order_backtest_summary.csv
           if-no-files-found: warn
+          retention-days: 14
