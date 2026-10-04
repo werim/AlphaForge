@@ -153,7 +153,7 @@ def ensure_runtime_state_schema(engine: Engine) -> None:
             for name, sql_type in canonical_columns.items():
                 if name not in columns:
                     conn.execute(text(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {name} {sql_type}"))
-    
+
 def save_runtime_state_snapshot(engine: Engine, snapshot: RuntimeStateSnapshot) -> int:
     with sqlite_writer_guard(engine):
         ensure_runtime_state_schema(engine)
