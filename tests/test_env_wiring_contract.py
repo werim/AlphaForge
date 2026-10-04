@@ -77,16 +77,16 @@ def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypat
         calls.append(args[0])
         return None
 
-    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "5m")
+    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "7m")
     unsupported = load_config_from_env()
     monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", fetch)
     assert _scan_binance(unsupported, timeout_sec=0.01) == []
-    assert calls == []  # unsupported geometry cannot silently fall back to 1m
+    assert calls == []  # unsupported geometry cannot silently fall back to a supported timeframe
     unsupported_identity = build_phase8_campaign_identity(
         unsupported.runtime, ["BTCUSDT"], ["1h"]
     )
-    assert unsupported_identity["config_payload"]["decision_setup_timeframe"] == "5m"
-    assert unsupported_identity["config_payload"]["reject_evaluation_timeframe"] == "5m"
+    assert unsupported_identity["config_payload"]["decision_setup_timeframe"] == "7m"
+    assert unsupported_identity["config_payload"]["reject_evaluation_timeframe"] == "7m"
 
     responses = iter([
             {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
@@ -94,7 +94,7 @@ def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypat
         [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
         [],
     ])
-    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "1m")
+    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "5m")
     supported = load_config_from_env()
     monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", lambda *a, **k: next(responses))
     monkeypatch.setattr(
@@ -102,9 +102,9 @@ def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypat
         lambda *a, **k: (next(responses), 1.0),
     )
     candidates = _scan_binance(supported, timeout_sec=0.01)
-    assert candidates[0]["timeframe"] == "1m"
+    assert candidates[0]["timeframe"] == "5m"
     supported_identity = build_phase8_campaign_identity(supported.runtime, ["BTCUSDT"], ["1h"])
-    assert supported_identity["config_payload"]["reject_evaluation_timeframe"] == "1m"
+    assert supported_identity["config_payload"]["reject_evaluation_timeframe"] == "5m"
     assert unsupported_identity["config_hash"] != supported_identity["config_hash"]
 
 
