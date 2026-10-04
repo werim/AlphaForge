@@ -103,6 +103,7 @@ jobs:
           pytest -q tests/test_issue501_runtime_default_authority.py
           pytest -q tests/test_issue421_execution_safety.py::test_multi_gate_execution_reject_persists_all_failed_threshold_evidence
           pytest -q tests/test_m0_scoring_context.py::test_context_rules_are_identical_for_paper_and_live_and_thresholds_unchanged
+          pytest -q tests/test_env_wiring_contract.py::test_paper_decision_timeframe_controls_scanner_and_reject_evidence
 
       - name: Execution ownership fencing gate
         if: github.event_name == 'pull_request'
