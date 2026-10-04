@@ -12,6 +12,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.sqlite_safety import sqlite_writer_guard
 
 DEFAULT_MAX_AGE_SEC = 120.0
 DEFAULT_FUTURE_TOLERANCE_SEC = 5.0
@@ -66,33 +67,34 @@ def _with_sqlite_busy_retry(
 ) -> _T:
     """Run one write transaction with bounded fresh-connection SQLite busy retries."""
     total_attempts = max(1, int(attempts))
-    for attempt in range(total_attempts):
-        conn = engine.connect()
-        transaction = conn.begin()
-        try:
-            result = operation(conn)
-            transaction.commit()
-            return result
-        except OperationalError as exc:
-            transaction.rollback()
-            # A failed locked transaction must never be recycled into the retry.
-            conn.invalidate()
-            if (
-                engine.dialect.name != "sqlite"
-                or not is_sqlite_busy_error(exc)
-                or attempt + 1 >= total_attempts
-            ):
+    with sqlite_writer_guard(engine):
+        for attempt in range(total_attempts):
+            conn = engine.connect()
+            transaction = conn.begin()
+            try:
+                result = operation(conn)
+                transaction.commit()
+                return result
+            except OperationalError as exc:
+                transaction.rollback()
+                # A failed locked transaction must never be recycled into the retry.
+                conn.invalidate()
+                if (
+                    engine.dialect.name != "sqlite"
+                    or not is_sqlite_busy_error(exc)
+                    or attempt + 1 >= total_attempts
+                ):
+                    raise
+                base = min(
+                    SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt),
+                    SQLITE_BUSY_RETRY_MAX_SECONDS,
+                )
+                time.sleep(base * random.uniform(0.80, 1.20))
+            except BaseException:
+                transaction.rollback()
                 raise
-            base = min(
-                SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt),
-                SQLITE_BUSY_RETRY_MAX_SECONDS,
-            )
-            time.sleep(base * random.uniform(0.80, 1.20))
-        except BaseException:
-            transaction.rollback()
-            raise
-        finally:
-            conn.close()
+            finally:
+                conn.close()
     raise AssertionError("unreachable")
 
 
