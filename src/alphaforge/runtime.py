@@ -48,7 +48,7 @@ from alphaforge.execution import (
     evaluate_stop_risk_policy,
 )
 from alphaforge.execution_ownership import acquire_execution_ownership, release_execution_ownership, validate_execution_ownership
-from alphaforge.sqlite_safety import SQLiteBusyExhausted, run_sqlite_write_with_retry
+from alphaforge.sqlite_safety import SQLiteBusyExhausted, run_sqlite_write_with_retry, sqlite_writer_guard
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.decision_invariant import (
     assert_pre_submit_invariant_parity,
@@ -5574,49 +5574,50 @@ class RuntimeOrchestrator:
                         raise RuntimeError("rejected_decision_artifact_persistence_failed")
                 return self._canonical_persisted_reject_count(conn) if self._burnin_run_id else None
 
-            for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
-                conn = engine.connect()
-                transaction = None
-                old_timeout = None
-                try:
-                    if engine.dialect.name == "sqlite":
-                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
-                        conn.exec_driver_sql("PRAGMA busy_timeout=50")
-                        conn.commit()
-                    transaction = conn.begin()
-                    if engine.dialect.name == "sqlite":
-                        conn.exec_driver_sql("BEGIN IMMEDIATE")
-                    canonical_persisted_count = persist_atomic(conn)
-                    transaction.commit()
-                    break
-                except OperationalError as exc:
-                    if transaction is not None:
-                        transaction.rollback()
-                    if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+            with sqlite_writer_guard(engine):
+                for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
+                    conn = engine.connect()
+                    transaction = None
+                    old_timeout = None
+                    try:
+                        if engine.dialect.name == "sqlite":
+                            old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                            conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                            conn.commit()
+                        transaction = conn.begin()
+                        if engine.dialect.name == "sqlite":
+                            conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        canonical_persisted_count = persist_atomic(conn)
+                        transaction.commit()
+                        break
+                    except OperationalError as exc:
+                        if transaction is not None:
+                            transaction.rollback()
+                        if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+                            raise
+                        conn.invalidate()
+                        if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
+                            self.metrics.reject_persistence_failures += 1
+                            self.metrics.reject_persistence_degraded = True
+                            self._recovery_required = True
+                            self._runtime_status = "RECOVERY_REQUIRED"
+                            self._fail_closed_reason = self._fail_closed_reason or "REJECT_PERSISTENCE_FAILED"
+                            self._last_error = (
+                                "SQLITE_BUSY reject persistence after "
+                                f"{attempt + 1} attempts; reject_decision_id={payload['reject_decision_id']}"
+                            )
+                            logger.error("reject_persistence_degraded reason=%s", self._last_error)
+                            return
+                        time.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
+                    except BaseException:
+                        if transaction is not None:
+                            transaction.rollback()
                         raise
-                    conn.invalidate()
-                    if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
-                        self.metrics.reject_persistence_failures += 1
-                        self.metrics.reject_persistence_degraded = True
-                        self._recovery_required = True
-                        self._runtime_status = "RECOVERY_REQUIRED"
-                        self._fail_closed_reason = self._fail_closed_reason or "REJECT_PERSISTENCE_FAILED"
-                        self._last_error = (
-                            "SQLITE_BUSY reject persistence after "
-                            f"{attempt + 1} attempts; reject_decision_id={payload['reject_decision_id']}"
-                        )
-                        logger.error("reject_persistence_degraded reason=%s", self._last_error)
-                        return
-                    time.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
-                except BaseException:
-                    if transaction is not None:
-                        transaction.rollback()
-                    raise
-                finally:
-                    if old_timeout is not None and not conn.invalidated:
-                        conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
-                        conn.commit()
-                    conn.close()
+                    finally:
+                        if old_timeout is not None and not conn.invalidated:
+                            conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                            conn.commit()
+                        conn.close()
         else:
             self._persist_burnin_decision(
                 {**payload, "decision": "REJECTED"},
@@ -7360,26 +7361,40 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
             "execution_ctx_missing": details.get("execution_ctx_missing"),
         }
 
+        def persist_lifecycle_once() -> None:
+            with sqlite_writer_guard(engine):
+                conn = engine.connect()
+                old_timeout = None
+                try:
+                    if engine.dialect.name == "sqlite":
+                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                        conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                        conn.commit()
+                    if not save_trade_lifecycle_event(conn, _commit=True, **lifecycle_kwargs):
+                        raise RuntimeError("trade_lifecycle_event_persistence_failed")
+                except BaseException as exc:
+                    with contextlib.suppress(Exception):
+                        conn.rollback()
+                    if engine.dialect.name == "sqlite" and is_sqlite_busy_error(exc):
+                        conn.invalidate()
+                    raise
+                finally:
+                    if old_timeout is not None and not conn.invalidated:
+                        with contextlib.suppress(Exception):
+                            conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                            conn.commit()
+                    conn.close()
+
         for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
-            conn = engine.connect()
-            old_timeout = None
             try:
-                if engine.dialect.name == "sqlite":
-                    old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
-                    conn.exec_driver_sql("PRAGMA busy_timeout=50")
-                    conn.commit()
-                if not save_trade_lifecycle_event(conn, _commit=True, **lifecycle_kwargs):
-                    raise RuntimeError("trade_lifecycle_event_persistence_failed")
+                persist_lifecycle_once()
                 if orchestrator.metrics.lifecycle_persistence_degraded:
                     orchestrator.metrics.lifecycle_persistence_degraded = False
                     orchestrator.metrics.lifecycle_persistence_recoveries += 1
                 return
             except BaseException as exc:
-                with contextlib.suppress(Exception):
-                    conn.rollback()
                 if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
                     raise
-                conn.invalidate()
                 if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
                     orchestrator.metrics.lifecycle_persistence_failures += 1
                     orchestrator.metrics.lifecycle_persistence_degraded = True
@@ -7401,12 +7416,6 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, executi
                     )
                     return
                 await asyncio.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
-            finally:
-                if old_timeout is not None and not conn.invalidated:
-                    with contextlib.suppress(Exception):
-                        conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
-                        conn.commit()
-                conn.close()
 
     def _persist_reject(conn: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
         if not persistence_enabled:
