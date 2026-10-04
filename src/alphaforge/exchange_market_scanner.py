@@ -11,7 +11,7 @@ from urllib import error, parse, request
 
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
-SUPPORTED_BINANCE_DECISION_TIMEFRAMES = frozenset({"1m", "15m", "1h", "4h", "1d"})
+SUPPORTED_BINANCE_DECISION_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"})
 
 _BINANCE_SNAPSHOT_CACHE: dict[tuple[object, object, str], dict[str, Any]] = {}
 _BINANCE_SNAPSHOT_CACHE_LOCK = threading.Lock()
