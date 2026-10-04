@@ -119,6 +119,7 @@ jobs:
           pytest -q tests/test_issue569_lifecycle_sqlite_contention.py
           pytest -q tests/test_issue571_sqlite_writer_survivability.py
           pytest -q tests/test_issue588_universe_writer_contention.py
+          pytest -q tests/test_issue603_sqlite_writer_arbitration.py
           pytest -q tests/test_runtime_heartbeat.py
           pytest -q tests/test_reconciliation_sqlite_contention.py
           pytest -q tests/test_issue450_sqlite_concurrency.py

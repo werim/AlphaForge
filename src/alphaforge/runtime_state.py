@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.schema_doctor import ExposureStateError, exposure_count
 from alphaforge.process_liveness import process_is_alive
+from alphaforge.sqlite_safety import sqlite_writer_guard
 
 
 def build_readonly_reconciliation_probe(provider: Any | None) -> Any:
@@ -100,65 +101,67 @@ class RuntimeStateSnapshot:
         return data
 
 def ensure_runtime_state_schema(engine: Engine) -> None:
-    with engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS runtime_state_snapshots (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, instance_id TEXT NOT NULL,
-          startup_id TEXT, campaign_id TEXT, burnin_run_id TEXT, release_id TEXT, process_id INTEGER, mode TEXT, requested_mode TEXT, actual_mode TEXT,
-          runtime_status TEXT, heartbeat_age_sec REAL, last_start_time TEXT, last_shutdown_time TEXT,
-          last_error TEXT, kill_switch_active INTEGER, kill_switch_reason TEXT, active_symbols TEXT,
-          active_position_count INTEGER, active_positions TEXT, pending_order_count INTEGER,
-          pending_orders TEXT, cooldown_symbols TEXT, stale_market_data_symbols TEXT,
-          unreconciled_symbols TEXT, orphan_order_count INTEGER, orphan_orders TEXT,
-          orphan_position_count INTEGER, orphan_positions TEXT, unknown_exchange_state INTEGER,
-          exchange_connectivity_status TEXT, exchange_read_only_status TEXT, reconciliation_status TEXT,
-          reconciliation_mismatch_count INTEGER, recovery_action_required INTEGER, fail_closed_reason TEXT,
-          runtime_flags TEXT, diagnostics_json TEXT, created_at TEXT
-        )"""))
-        conn.execute(text("""CREATE TABLE IF NOT EXISTS runtime_recovery_events (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT,
-          mode TEXT, status TEXT, reason TEXT, diagnostics_json TEXT)"""))
-        conn.execute(text("""CREATE TABLE IF NOT EXISTS exchange_reconciliation_events (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT,
-          mode TEXT, status TEXT, mismatch_count INTEGER, orphan_order_count INTEGER,
-          orphan_position_count INTEGER, exchange_read_only_status TEXT, diagnostics_json TEXT,
-          cycle_id TEXT)"""))
-        event_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(exchange_reconciliation_events)"))}
-        if "cycle_id" not in event_columns:
-            conn.execute(text("ALTER TABLE exchange_reconciliation_events ADD COLUMN cycle_id TEXT"))
-        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_exchange_reconciliation_cycle_id ON exchange_reconciliation_events(cycle_id)"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_runtime_state_latest ON runtime_state_snapshots(timestamp DESC, id DESC)"))
-        # Existing production databases predate lineage columns.  Additive migration
-        # preserves the append-only snapshot history and is safe on SQLite.
-        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(runtime_state_snapshots)"))}
-        # Some early ops databases created a reduced snapshot table.  Keep the
-        # canonical writer append-only by additively completing that schema.
-        canonical_columns = {
-            "timestamp": "TEXT", "instance_id": "TEXT", "startup_id": "TEXT",
-            "campaign_id": "TEXT", "burnin_run_id": "TEXT", "release_id": "TEXT",
-            "process_id": "INTEGER", "mode": "TEXT", "requested_mode": "TEXT", "actual_mode": "TEXT",
-            "runtime_status": "TEXT", "heartbeat_age_sec": "REAL", "last_start_time": "TEXT",
-            "last_shutdown_time": "TEXT", "last_error": "TEXT", "kill_switch_active": "INTEGER",
-            "kill_switch_reason": "TEXT", "active_symbols": "TEXT", "active_position_count": "INTEGER",
-            "active_positions": "TEXT", "pending_order_count": "INTEGER", "pending_orders": "TEXT",
-            "cooldown_symbols": "TEXT", "stale_market_data_symbols": "TEXT", "unreconciled_symbols": "TEXT",
-            "orphan_order_count": "INTEGER", "orphan_orders": "TEXT", "orphan_position_count": "INTEGER",
-            "orphan_positions": "TEXT", "unknown_exchange_state": "INTEGER", "exchange_connectivity_status": "TEXT",
-            "exchange_read_only_status": "TEXT", "reconciliation_status": "TEXT", "reconciliation_mismatch_count": "INTEGER",
-            "recovery_action_required": "INTEGER", "fail_closed_reason": "TEXT", "runtime_flags": "TEXT",
-            "diagnostics_json": "TEXT", "created_at": "TEXT",
-        }
-        for name, sql_type in canonical_columns.items():
-            if name not in columns:
-                conn.execute(text(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {name} {sql_type}"))
+    with sqlite_writer_guard(engine):
+        with engine.begin() as conn:
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS runtime_state_snapshots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, instance_id TEXT NOT NULL,
+              startup_id TEXT, campaign_id TEXT, burnin_run_id TEXT, release_id TEXT, process_id INTEGER, mode TEXT, requested_mode TEXT, actual_mode TEXT,
+              runtime_status TEXT, heartbeat_age_sec REAL, last_start_time TEXT, last_shutdown_time TEXT,
+              last_error TEXT, kill_switch_active INTEGER, kill_switch_reason TEXT, active_symbols TEXT,
+              active_position_count INTEGER, active_positions TEXT, pending_order_count INTEGER,
+              pending_orders TEXT, cooldown_symbols TEXT, stale_market_data_symbols TEXT,
+              unreconciled_symbols TEXT, orphan_order_count INTEGER, orphan_orders TEXT,
+              orphan_position_count INTEGER, orphan_positions TEXT, unknown_exchange_state INTEGER,
+              exchange_connectivity_status TEXT, exchange_read_only_status TEXT, reconciliation_status TEXT,
+              reconciliation_mismatch_count INTEGER, recovery_action_required INTEGER, fail_closed_reason TEXT,
+              runtime_flags TEXT, diagnostics_json TEXT, created_at TEXT
+            )"""))
+            conn.execute(text("""CREATE TABLE IF NOT EXISTS runtime_recovery_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT,
+              mode TEXT, status TEXT, reason TEXT, diagnostics_json TEXT)"""))
+            conn.execute(text("""CREATE TABLE IF NOT EXISTS exchange_reconciliation_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT,
+              mode TEXT, status TEXT, mismatch_count INTEGER, orphan_order_count INTEGER,
+              orphan_position_count INTEGER, exchange_read_only_status TEXT, diagnostics_json TEXT,
+              cycle_id TEXT)"""))
+            event_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(exchange_reconciliation_events)"))}
+            if "cycle_id" not in event_columns:
+                conn.execute(text("ALTER TABLE exchange_reconciliation_events ADD COLUMN cycle_id TEXT"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_exchange_reconciliation_cycle_id ON exchange_reconciliation_events(cycle_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_runtime_state_latest ON runtime_state_snapshots(timestamp DESC, id DESC)"))
+            # Existing production databases predate lineage columns.  Additive migration
+            # preserves the append-only snapshot history and is safe on SQLite.
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(runtime_state_snapshots)"))}
+            # Some early ops databases created a reduced snapshot table.  Keep the
+            # canonical writer append-only by additively completing that schema.
+            canonical_columns = {
+                "timestamp": "TEXT", "instance_id": "TEXT", "startup_id": "TEXT",
+                "campaign_id": "TEXT", "burnin_run_id": "TEXT", "release_id": "TEXT",
+                "process_id": "INTEGER", "mode": "TEXT", "requested_mode": "TEXT", "actual_mode": "TEXT",
+                "runtime_status": "TEXT", "heartbeat_age_sec": "REAL", "last_start_time": "TEXT",
+                "last_shutdown_time": "TEXT", "last_error": "TEXT", "kill_switch_active": "INTEGER",
+                "kill_switch_reason": "TEXT", "active_symbols": "TEXT", "active_position_count": "INTEGER",
+                "active_positions": "TEXT", "pending_order_count": "INTEGER", "pending_orders": "TEXT",
+                "cooldown_symbols": "TEXT", "stale_market_data_symbols": "TEXT", "unreconciled_symbols": "TEXT",
+                "orphan_order_count": "INTEGER", "orphan_orders": "TEXT", "orphan_position_count": "INTEGER",
+                "orphan_positions": "TEXT", "unknown_exchange_state": "INTEGER", "exchange_connectivity_status": "TEXT",
+                "exchange_read_only_status": "TEXT", "reconciliation_status": "TEXT", "reconciliation_mismatch_count": "INTEGER",
+                "recovery_action_required": "INTEGER", "fail_closed_reason": "TEXT", "runtime_flags": "TEXT",
+                "diagnostics_json": "TEXT", "created_at": "TEXT",
+            }
+            for name, sql_type in canonical_columns.items():
+                if name not in columns:
+                    conn.execute(text(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {name} {sql_type}"))
 
 def save_runtime_state_snapshot(engine: Engine, snapshot: RuntimeStateSnapshot) -> int:
-    ensure_runtime_state_schema(engine)
-    rec = snapshot.to_record(); rec["created_at"] = canonical_utc_timestamp()
-    cols = ",".join(rec.keys()); vals = ",".join(f":{k}" for k in rec)
-    with engine.begin() as conn:
-        result = conn.execute(text(f"INSERT INTO runtime_state_snapshots ({cols}) VALUES ({vals})"), rec)
-        return int(result.lastrowid)
+    with sqlite_writer_guard(engine):
+        ensure_runtime_state_schema(engine)
+        rec = snapshot.to_record(); rec["created_at"] = canonical_utc_timestamp()
+        cols = ",".join(rec.keys()); vals = ",".join(f":{k}" for k in rec)
+        with engine.begin() as conn:
+            result = conn.execute(text(f"INSERT INTO runtime_state_snapshots ({cols}) VALUES ({vals})"), rec)
+            return int(result.lastrowid)
 
 def latest_runtime_state_snapshot(engine: Engine) -> dict[str, Any] | None:
     if not inspect(engine).has_table("runtime_state_snapshots"):
@@ -322,14 +325,16 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
             "reconciliation_probe_clean": probe_clean, "reconciliation_probe": probe if reconciliation_probe is not None and 'probe' in locals() else None}
 
 def save_runtime_recovery_event(engine: Engine, *, instance_id: str, startup_id: str, mode: str, status: str, reason: str, diagnostics: Mapping[str, Any] | None = None) -> None:
-    ensure_runtime_state_schema(engine)
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO runtime_recovery_events(event_ts,instance_id,startup_id,mode,status,reason,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:r,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"r":reason,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
+    with sqlite_writer_guard(engine):
+        ensure_runtime_state_schema(engine)
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO runtime_recovery_events(event_ts,instance_id,startup_id,mode,status,reason,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:r,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"r":reason,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
 
 def save_exchange_reconciliation_event(engine: Engine, *, instance_id: str, startup_id: str, mode: str, status: str, mismatch_count: int = 0, orphan_order_count: int = 0, orphan_position_count: int = 0, exchange_read_only_status: str = "UNKNOWN", diagnostics: Mapping[str, Any] | None = None) -> None:
-    ensure_runtime_state_schema(engine)
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"mc":mismatch_count,"oo":orphan_order_count,"op":orphan_position_count,"ro":exchange_read_only_status,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
+    with sqlite_writer_guard(engine):
+        ensure_runtime_state_schema(engine)
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"mc":mismatch_count,"oo":orphan_order_count,"op":orphan_position_count,"ro":exchange_read_only_status,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
 
 
 class ReconciliationPersistenceFailure(RuntimeError):
@@ -348,64 +353,65 @@ def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: lis
     """Commit one observed result, its findings and state together; return False for an existing cycle."""
     deadline = time.monotonic() + 0.75
     backoffs = (0.025, 0.05, 0.1)
-    for attempt in range(4):
-        try:
-            with engine.begin() as conn:
-                old_timeout = None
-                try:
-                    if engine.dialect.name == "sqlite":
-                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
-                        conn.exec_driver_sql("PRAGMA busy_timeout=50")
-                        conn.exec_driver_sql("BEGIN IMMEDIATE")
-                    for failure in pending_failures or []:
-                        conn.execute(text("""INSERT INTO exchange_reconciliation_events
-                        (event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json,cycle_id)
-                        VALUES (:ts,:i,:s,:m,'PERSISTENCE_FAILED',NULL,NULL,NULL,:ro,:d,:cycle)
-                        ON CONFLICT(cycle_id) DO NOTHING"""), {
-                            "ts": failure["timestamp"], "i": snapshot.instance_id, "s": snapshot.startup_id,
-                            "m": snapshot.mode, "ro": snapshot.exchange_read_only_status,
-                            "d": json.dumps(dict(failure), sort_keys=True, default=str), "cycle": failure["cycle_id"],
-                        })
-                    result = conn.execute(text("""INSERT INTO exchange_reconciliation_events
-                    (event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json,cycle_id)
-                    VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d,:cycle)
-                    ON CONFLICT(cycle_id) DO NOTHING"""), {
-                        "ts": canonical_utc_timestamp(), "i": snapshot.instance_id, "s": snapshot.startup_id,
-                        "m": snapshot.mode, "st": snapshot.reconciliation_status, "mc": len(findings),
-                        "oo": snapshot.orphan_order_count, "op": snapshot.orphan_position_count,
-                        "ro": snapshot.exchange_read_only_status,
-                        "d": json.dumps(dict(diagnostics), sort_keys=True, default=str), "cycle": cycle_id,
-                    })
-                    if result.rowcount:
-                        if recovery_transition is not None:
-                            conn.execute(text("INSERT INTO runtime_recovery_events(event_ts,instance_id,startup_id,mode,status,reason,diagnostics_json) VALUES (:ts,:i,:s,:m,'RECOVERED',:reason,:d)"), {
-                                "ts": canonical_utc_timestamp(), "i": snapshot.instance_id,
-                                "s": snapshot.startup_id, "m": snapshot.mode,
-                                "reason": "CLEAN_RECONCILIATION_COMMITTED",
-                                "d": json.dumps(dict(recovery_transition), sort_keys=True, default=str),
+    with sqlite_writer_guard(engine):
+        for attempt in range(4):
+            try:
+                with engine.begin() as conn:
+                    old_timeout = None
+                    try:
+                        if engine.dialect.name == "sqlite":
+                            old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                            conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                            conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        for failure in pending_failures or []:
+                            conn.execute(text("""INSERT INTO exchange_reconciliation_events
+                            (event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json,cycle_id)
+                            VALUES (:ts,:i,:s,:m,'PERSISTENCE_FAILED',NULL,NULL,NULL,:ro,:d,:cycle)
+                            ON CONFLICT(cycle_id) DO NOTHING"""), {
+                                "ts": failure["timestamp"], "i": snapshot.instance_id, "s": snapshot.startup_id,
+                                "m": snapshot.mode, "ro": snapshot.exchange_read_only_status,
+                                "d": json.dumps(dict(failure), sort_keys=True, default=str), "cycle": failure["cycle_id"],
                             })
-                        for finding in findings:
-                            conn.execute(text("""INSERT INTO reconciliation_incidents
-                            (incident_type,severity,symbol,lifecycle_ref,remediation_status,operator_acknowledged,fail_closed,forensic_payload)
-                            VALUES (:incident_type,:severity,:symbol,:lifecycle_ref,:remediation_status,:operator_acknowledged,:fail_closed,:forensic_payload)"""), finding.to_incident_row())
-                        rec = snapshot.to_record()
-                        rec["created_at"] = canonical_utc_timestamp()
-                        columns = ",".join(rec)
-                        values = ",".join(f":{key}" for key in rec)
-                        conn.execute(text(f"INSERT INTO runtime_state_snapshots ({columns}) VALUES ({values})"), rec)
-                    return bool(result.rowcount)
-                finally:
-                    if old_timeout is not None:
-                        conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
-        except OperationalError as exc:
-            if engine.dialect.name != "sqlite" or not _sqlite_busy(exc):
-                raise
-            if attempt == 3 or time.monotonic() >= deadline:
-                raise ReconciliationPersistenceFailure(f"SQLITE_BUSY reconciliation persistence after {attempt + 1} attempts; cycle_id={cycle_id}") from exc
-            remaining = max(0.0, deadline - time.monotonic())
-            base_sleep = min(backoffs[attempt], remaining)
-            time.sleep(min(base_sleep * random.uniform(0.80, 1.20), remaining))
-    raise AssertionError("unreachable")
+                        result = conn.execute(text("""INSERT INTO exchange_reconciliation_events
+                        (event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json,cycle_id)
+                        VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d,:cycle)
+                        ON CONFLICT(cycle_id) DO NOTHING"""), {
+                            "ts": canonical_utc_timestamp(), "i": snapshot.instance_id, "s": snapshot.startup_id,
+                            "m": snapshot.mode, "st": snapshot.reconciliation_status, "mc": len(findings),
+                            "oo": snapshot.orphan_order_count, "op": snapshot.orphan_position_count,
+                            "ro": snapshot.exchange_read_only_status,
+                            "d": json.dumps(dict(diagnostics), sort_keys=True, default=str), "cycle": cycle_id,
+                        })
+                        if result.rowcount:
+                            if recovery_transition is not None:
+                                conn.execute(text("INSERT INTO runtime_recovery_events(event_ts,instance_id,startup_id,mode,status,reason,diagnostics_json) VALUES (:ts,:i,:s,:m,'RECOVERED',:reason,:d)"), {
+                                    "ts": canonical_utc_timestamp(), "i": snapshot.instance_id,
+                                    "s": snapshot.startup_id, "m": snapshot.mode,
+                                    "reason": "CLEAN_RECONCILIATION_COMMITTED",
+                                    "d": json.dumps(dict(recovery_transition), sort_keys=True, default=str),
+                                })
+                            for finding in findings:
+                                conn.execute(text("""INSERT INTO reconciliation_incidents
+                                (incident_type,severity,symbol,lifecycle_ref,remediation_status,operator_acknowledged,fail_closed,forensic_payload)
+                                VALUES (:incident_type,:severity,:symbol,:lifecycle_ref,:remediation_status,:operator_acknowledged,:fail_closed,:forensic_payload)"""), finding.to_incident_row())
+                            rec = snapshot.to_record()
+                            rec["created_at"] = canonical_utc_timestamp()
+                            columns = ",".join(rec)
+                            values = ",".join(f":{key}" for key in rec)
+                            conn.execute(text(f"INSERT INTO runtime_state_snapshots ({columns}) VALUES ({values})"), rec)
+                        return bool(result.rowcount)
+                    finally:
+                        if old_timeout is not None:
+                            conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+            except OperationalError as exc:
+                if engine.dialect.name != "sqlite" or not _sqlite_busy(exc):
+                    raise
+                if attempt == 3 or time.monotonic() >= deadline:
+                    raise ReconciliationPersistenceFailure(f"SQLITE_BUSY reconciliation persistence after {attempt + 1} attempts; cycle_id={cycle_id}") from exc
+                remaining = max(0.0, deadline - time.monotonic())
+                base_sleep = min(backoffs[attempt], remaining)
+                time.sleep(min(base_sleep * random.uniform(0.80, 1.20), remaining))
+        raise AssertionError("unreachable")
 
 
 def persist_historical_paper_recovery_without_provider(engine: Engine, *, prior_snapshot: Mapping[str, Any] | None, diagnostics: Mapping[str, Any]) -> None:

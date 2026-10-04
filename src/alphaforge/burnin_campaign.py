@@ -16,6 +16,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThr
 from alphaforge.config import runtime_filter_config
 from alphaforge.process_liveness import process_is_alive
 from alphaforge.provider_failures import classify_provider_exception, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, RETRYABLE_MARKET_DATA
+from alphaforge.sqlite_safety import sqlite_writer_guard
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 CANONICAL_CAMPAIGN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}$")
@@ -71,26 +72,27 @@ def configure_sqlite_engine(engine: Engine) -> Engine:
 def _with_fresh_lock_retry(engine: Engine, operation: Any, *, attempts: int = SQLITE_LOCK_RETRY_ATTEMPTS) -> Any:
     """Retry only SQLite contention; each failed transaction is rolled back and closed."""
     configure_sqlite_engine(engine)
-    for attempt in range(max(1, attempts)):
-        conn = engine.connect()
-        transaction = conn.begin()
-        try:
-            result = operation(conn)
-            transaction.commit()
-            return result
-        except OperationalError as exc:
-            transaction.rollback()
-            # Do not return a connection associated with a failed locked
-            # transaction to the pool: the retry must open a new DBAPI handle.
-            conn.invalidate()
-            if not _is_sqlite_lock_error(exc) or attempt + 1 >= attempts:
+    with sqlite_writer_guard(engine):
+        for attempt in range(max(1, attempts)):
+            conn = engine.connect()
+            transaction = conn.begin()
+            try:
+                result = operation(conn)
+                transaction.commit()
+                return result
+            except OperationalError as exc:
+                transaction.rollback()
+                # Do not return a connection associated with a failed locked
+                # transaction to the pool: the retry must open a new DBAPI handle.
+                conn.invalidate()
+                if not _is_sqlite_lock_error(exc) or attempt + 1 >= attempts:
+                    raise
+                time.sleep(SQLITE_LOCK_RETRY_BASE_SECONDS * (2 ** attempt))
+            except BaseException:
+                transaction.rollback()
                 raise
-            time.sleep(SQLITE_LOCK_RETRY_BASE_SECONDS * (2 ** attempt))
-        except BaseException:
-            transaction.rollback()
-            raise
-        finally:
-            conn.close()
+            finally:
+                conn.close()
 
 def bootstrap_campaign_schema(conn: Any) -> None:
     bootstrap_burnin_schema(conn)
