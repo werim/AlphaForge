@@ -7,7 +7,11 @@ import pytest
 from alphaforge.config import load_config_from_env
 from alphaforge.config_audit import audit_config
 from alphaforge.config_registry import CONFIG_REGISTRY, ENV_CONTRACT, effective_config_values
-from alphaforge.exchange_market_scanner import _scan_binance, _scan_hyperliquid
+from alphaforge.exchange_market_scanner import (
+    SUPPORTED_BINANCE_DECISION_TIMEFRAMES,
+    _scan_binance,
+    _scan_hyperliquid,
+)
 from alphaforge.burnin_campaign import build_phase8_campaign_identity
 
 
@@ -77,7 +81,9 @@ def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypat
         calls.append(args[0])
         return None
 
-    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "5m")
+    assert "5m" in SUPPORTED_BINANCE_DECISION_TIMEFRAMES
+
+    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "7m")
     unsupported = load_config_from_env()
     monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", fetch)
     assert _scan_binance(unsupported, timeout_sec=0.01) == []
@@ -85,8 +91,8 @@ def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypat
     unsupported_identity = build_phase8_campaign_identity(
         unsupported.runtime, ["BTCUSDT"], ["1h"]
     )
-    assert unsupported_identity["config_payload"]["decision_setup_timeframe"] == "5m"
-    assert unsupported_identity["config_payload"]["reject_evaluation_timeframe"] == "5m"
+    assert unsupported_identity["config_payload"]["decision_setup_timeframe"] == "7m"
+    assert unsupported_identity["config_payload"]["reject_evaluation_timeframe"] == "7m"
 
     responses = iter([
             {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT"}]},
