@@ -402,6 +402,18 @@ class PaperPositionManagementShadowProvider:
                     "reason": "PROPOSAL_NOT_ELIGIBLE",
                 }
             )
+            evidence_signature = canonical_hash({
+                "closed_candle_time": boundary_key,
+                "errors": errors,
+                "observed_price": observed_price,
+                "mfe_r": mfe_r,
+                "mae_r": mae_r,
+                "target_policy": target_policy,
+                "execution_status": execution_evidence["status"],
+                "eligibility_status": status,
+                "reason": reason,
+                "parameters": parameters,
+            })
             identity = {
                 "campaign_id": campaign.get("campaign_id"),
                 "burnin_run_id": active_run_id,
@@ -411,6 +423,7 @@ class PaperPositionManagementShadowProvider:
                 "trade_id": position.get("trade_id"),
                 "closed_candle_time": boundary_key,
                 "proposed_action": action,
+                "evidence_signature": evidence_signature,
             }
             proposal_id = "pmshadow_" + canonical_hash(identity)[:24]
             payload = {
@@ -418,7 +431,7 @@ class PaperPositionManagementShadowProvider:
                 "proposal_id": proposal_id,
                 "strategy_config_hash": campaign.get("strategy_config_hash"),
                 "position_entry_run_id": position_entry_run_id,
-                "proposal_time": proposal_time,
+                "proposal_time": closed_boundary or position.get("decision_time") or position.get("entry_time"),
                 "decision_time": position.get("decision_time") or position.get("entry_time"),
                 "symbol": position.get("symbol"),
                 "side": side,
