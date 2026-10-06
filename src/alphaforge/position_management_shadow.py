@@ -425,7 +425,11 @@ class PaperPositionManagementShadowProvider:
         if terminal_time is not None and not normalized:
             errors.append("NO_PRE_TERMINAL_CLOSED_CANDLE")
         elif not normalized:
-            errors.append("CLOSED_CANDLE_EVIDENCE_UNAVAILABLE")
+            # Preserve the concrete fail-closed cause (open/future candle,
+            # missing interval, malformed evidence, etc.) instead of masking it
+            # with a generic absence reason.
+            if not errors:
+                errors.append("CLOSED_CANDLE_EVIDENCE_UNAVAILABLE")
         elif now is not None:
             boundary_dt = _dt(closed_boundary)
             if boundary_dt is None or (now - boundary_dt).total_seconds() > self.max_evidence_age_seconds:
