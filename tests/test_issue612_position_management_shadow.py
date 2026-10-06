@@ -20,6 +20,7 @@ from alphaforge.position_management_shadow import (
     PaperPositionManagementShadowProvider,
     persist_position_management_shadow_proposals,
 )
+from alphaforge.runtime import ExecutionMode, _runtime_config_from_app_config
 
 
 def _cost_model() -> dict:
@@ -125,6 +126,37 @@ def test_shadow_config_defaults_off_and_is_identity_bearing_when_enabled():
     assert disabled_identity["config_hash"] != enabled_identity["config_hash"]
     # Counterfactual observation must not silently become strategy authority.
     assert disabled_identity["strategy_config_hash"] == enabled_identity["strategy_config_hash"]
+
+
+def test_runtime_startup_snapshot_preserves_enabled_shadow_identity(tmp_path):
+    app_config = load_config_from_env(
+        env={
+            "ALPHAFORGE_EXECUTION_MODE": "PAPER",
+            "ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED": "true",
+        },
+        root=tmp_path,
+    )
+    runtime_config = _runtime_config_from_app_config(app_config, ExecutionMode.PAPER)
+
+    candidate = build_phase8_campaign_identity(
+        app_config.runtime,
+        ["BTCUSDT"],
+        ["1m"],
+        release_id="issue612-runtime-parity",
+    )
+    observed = build_phase8_campaign_identity(
+        runtime_config,
+        ["BTCUSDT"],
+        ["1m"],
+        release_id="issue612-runtime-parity",
+    )
+
+    assert runtime_config.paper_position_management_shadow_enabled is True
+    assert observed["config_payload"]["PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED"] is True
+    assert observed["config_hash"] == candidate["config_hash"]
+    assert observed["strategy_config_hash"] == candidate["strategy_config_hash"]
+    assert observed["universe_hash"] == candidate["universe_hash"]
+    assert observed["execution_cost_config_hash"] == candidate["execution_cost_config_hash"]
 
 
 def test_shadow_config_is_paper_only(tmp_path):
