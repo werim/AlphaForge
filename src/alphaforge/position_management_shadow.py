@@ -249,6 +249,75 @@ def _excursions(
     return max(0.0, max(favorable, default=0.0)), max(0.0, max(adverse, default=0.0))
 
 
+def _first_terminal_candle_time(
+    *,
+    side: str,
+    current_stop: float | None,
+    target: float | None,
+    candles: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Return the first candle where the authoritative static geometry terminates.
+
+    Shadow decisions happen only after a candle closes. A candle that already
+    touched stop/target cannot be used to propose a management action at its
+    close, because the canonical position is terminal intra-candle.
+    """
+    if side not in {"LONG", "SHORT"} or current_stop is None or target is None:
+        return None
+    for candle in candles:
+        high = float(candle["high"])
+        low = float(candle["low"])
+        if side == "LONG":
+            terminal = low <= current_stop or high >= target
+        else:
+            terminal = high >= current_stop or low <= target
+        if terminal:
+            return str(candle["timestamp"])
+    return None
+
+
+def _raw_before_boundary(
+    candles: Sequence[Mapping[str, Any]] | None,
+    terminal_time: str | None,
+) -> list[Mapping[str, Any]]:
+    if terminal_time is None:
+        return list(candles or ())
+    boundary = _dt(terminal_time)
+    if boundary is None:
+        return list(candles or ())
+    causal: list[Mapping[str, Any]] = []
+    for raw in candles or ():
+        if not isinstance(raw, Mapping):
+            # Unknown placement cannot be proven post-terminal; retain it so
+            # normalization fails closed.
+            causal.append(raw)
+            continue
+        timestamp = _dt(raw.get("timestamp") or raw.get("open_time") or raw.get("time"))
+        if timestamp is None or timestamp < boundary:
+            causal.append(raw)
+    return causal
+
+
+def _candle_gap_errors(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    entry_time: datetime | None,
+) -> list[str]:
+    if entry_time is None or not candles:
+        return []
+    previous = entry_time
+    for index, candle in enumerate(candles):
+        current = _dt(candle.get("timestamp"))
+        if current is None:
+            return ["MARKET_CANDLE_GAP_OR_TIME_INVALID"]
+        delta = (current - previous).total_seconds()
+        max_gap = 60.0 if index == 0 else 90.0
+        if delta <= 0 or delta > max_gap:
+            return ["MARKET_CANDLE_GAP_OR_TIME_INVALID"]
+        previous = current
+    return []
+
+
 class PaperPositionManagementShadowProvider:
     """Generate deterministic PAPER-only counterfactual proposal evidence.
 
@@ -272,30 +341,6 @@ class PaperPositionManagementShadowProvider:
 
         now = _dt(proposal_time)
         entry_time = _dt(position.get("entry_time"))
-        if now is None or entry_time is None or now <= entry_time:
-            normalized: list[dict[str, Any]] = []
-            errors = ["PROPOSAL_TIME_INVALID"]
-        else:
-            normalized, errors = _normalize_candles(
-                candles, entry_time=entry_time, proposal_time=now
-            )
-
-        scope_error = _scope_error(position, campaign, normalized)
-        if scope_error:
-            errors.append(scope_error)
-
-        closed_boundary = normalized[-1]["timestamp"] if normalized else None
-        observed_price = float(normalized[-1]["close"]) if normalized else None
-        if not normalized:
-            errors.append("CLOSED_CANDLE_EVIDENCE_UNAVAILABLE")
-        elif now is not None:
-            boundary_dt = _dt(closed_boundary)
-            # Candle timestamps are open-boundary timestamps. Permit one full 1m
-            # candle plus the canonical market-data staleness allowance.
-            max_age = self.max_evidence_age_seconds + 60.0
-            if boundary_dt is None or (now - boundary_dt).total_seconds() > max_age:
-                errors.append("STALE_MARKET_EVIDENCE")
-
         entry = _finite(position.get("simulated_fill") or position.get("planned_entry"), positive=True)
         initial_stop = _finite(position.get("stop"), positive=True)
         current_stop = _finite(
@@ -313,6 +358,54 @@ class PaperPositionManagementShadowProvider:
             positive=True,
         )
         side = str(position.get("side") or "").upper()
+
+        if now is None or entry_time is None or now <= entry_time:
+            normalized_all: list[dict[str, Any]] = []
+            errors = ["PROPOSAL_TIME_INVALID"]
+        else:
+            normalized_all, errors = _normalize_candles(
+                candles, entry_time=entry_time, proposal_time=now
+            )
+
+        terminal_time = _first_terminal_candle_time(
+            side=side,
+            current_stop=current_stop,
+            target=target,
+            candles=normalized_all,
+        )
+        # Re-normalize only raw observations strictly before the first terminal
+        # candle. This prevents terminal-candle and post-terminal OHLC, close,
+        # provenance, or malformed/stale flags from influencing a decision that
+        # could only have existed before canonical closure.
+        if terminal_time is not None and now is not None and entry_time is not None:
+            normalized, causal_errors = _normalize_candles(
+                _raw_before_boundary(candles, terminal_time),
+                entry_time=entry_time,
+                proposal_time=now,
+            )
+            errors = causal_errors
+        else:
+            normalized = normalized_all
+
+        errors.extend(_candle_gap_errors(normalized, entry_time=entry_time))
+        scope_error = _scope_error(position, campaign, normalized)
+        if scope_error:
+            errors.append(scope_error)
+
+        closed_boundary = normalized[-1]["timestamp"] if normalized else None
+        observed_price = float(normalized[-1]["close"]) if normalized else None
+        if terminal_time is not None and not normalized:
+            errors.append("NO_PRE_TERMINAL_CLOSED_CANDLE")
+        elif not normalized:
+            errors.append("CLOSED_CANDLE_EVIDENCE_UNAVAILABLE")
+        elif now is not None:
+            boundary_dt = _dt(closed_boundary)
+            # Candle timestamps are open-boundary timestamps. Permit one full 1m
+            # candle plus the canonical market-data staleness allowance.
+            max_age = self.max_evidence_age_seconds + 60.0
+            if boundary_dt is None or (now - boundary_dt).total_seconds() > max_age:
+                errors.append("STALE_MARKET_EVIDENCE")
+
         if None in {entry, initial_stop, current_stop, target, remaining_quantity} or side not in {"LONG", "SHORT"}:
             errors.append("POSITION_GEOMETRY_OR_SIZE_INCOMPLETE")
 
@@ -341,6 +434,8 @@ class PaperPositionManagementShadowProvider:
             "candle_count": len(normalized),
             "mfe_r_as_of_proposal": mfe_r,
             "mae_r_as_of_proposal": mae_r,
+            "first_terminal_candle_time": terminal_time,
+            "terminal_and_post_terminal_candles_excluded": terminal_time is not None,
             "errors": errors,
             "latest_candle": normalized[-1] if normalized else None,
         }
