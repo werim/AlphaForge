@@ -189,6 +189,7 @@ class RuntimeConfig:
     execution_timeframe: str= field(default_factory=lambda: canonical_field_default("execution_timeframe"))
     mtf_guided_signal_generation_enabled: bool= field(default_factory=lambda: canonical_field_default("mtf_guided_signal_generation_enabled"))
     mtf_execution_confirmation_mode: str= field(default_factory=lambda: canonical_field_default("mtf_execution_confirmation_mode"))
+    paper_position_management_shadow_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_position_management_shadow_enabled"))
     regime_direction_threshold: float= field(default_factory=lambda: canonical_field_default("regime_direction_threshold"))
     setup_direction_threshold: float= field(default_factory=lambda: canonical_field_default("setup_direction_threshold"))
     execution_direction_threshold: float= field(default_factory=lambda: canonical_field_default("execution_direction_threshold"))
@@ -7236,6 +7237,7 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         execution_timeframe=cfg.runtime.execution_timeframe,
         mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled,
         mtf_execution_confirmation_mode=cfg.runtime.mtf_execution_confirmation_mode,
+        paper_position_management_shadow_enabled=cfg.runtime.paper_position_management_shadow_enabled,
         regime_direction_threshold=cfg.runtime.regime_direction_threshold,
         setup_direction_threshold=cfg.runtime.setup_direction_threshold,
         execution_direction_threshold=cfg.runtime.execution_direction_threshold,
