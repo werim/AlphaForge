@@ -1,3 +1,17 @@
+# #612 causal shadow proposal replay repair — 2026-10-06
+
+## Why / root cause
+
+Fresh PAPER campaign `camp_5f5d0b543fde5848` on exact SHA `c415edd8b2446a88cf3f0b350dfcfece9b53f69f` persisted twelve counterfactual rows, then failed three resolver cycles with `POSITION_MANAGEMENT_SHADOW_PROPOSAL_ID_CONFLICT` and paused fail-closed. The proposal ID was derived from the causal closed-candle decision, but the payload hash also included terminal-candle diagnostics learned only later. The same causal proposal therefore retained its ID while its hash changed.
+
+## Change / behavior
+
+The compatibility terminal-diagnostic keys remain in the immutable proposal payload, but retain proposal-time unknown values (`null`, `null`, `false`). Terminal/post-terminal candles are still used to bound the causal candle set and by the authoritative resolver, but their later-discovered metadata cannot rewrite the earlier counterfactual decision. This preserves existing pre-terminal hashes and storage shape while making restart/replay idempotent. No threshold, action policy, authoritative stop/target/quantity/trailing rule, schema, migration, historical record, or LIVE surface changed.
+
+## Validation / risks / recommendation
+
+The regression first persists four pre-terminal proposals, adds terminal and adversarial post-terminal candles, then requires identical proposal IDs, payloads, and hashes with `inserted=0/idempotent=4`. Runner-level restart replay additionally proves no `RESOLVER_BATCH_FAILED`, no authoritative management event, unchanged shadow-owned management fields, and continued canonical `TP_HIT` closure. Thirty-seven focused #612, #505 management, and position-resolver tests pass; compile and diff checks pass. PR CI and exact merged-dev CI remain required, followed by fresh PAPER-only evidence on the merged SHA/config. Do not resume the paused reproduction campaign. LIVE remains NOT READY.
+
 # #354 Telegram Control Center — read-only diagnostics — 2026-10-01
 
 ## Why / root cause

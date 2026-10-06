@@ -456,10 +456,6 @@ class PaperPositionManagementShadowProvider:
         if not active_run_id:
             raise ValueError("POSITION_MANAGEMENT_SHADOW_ACTIVE_RUN_ID_MISSING")
 
-        terminal_candle = next(
-            (candle for candle in normalized_all if candle.get("timestamp") == terminal_time),
-            None,
-        )
         market_evidence = {
             "status": "COMPLETE" if not errors else "INCOMPLETE",
             "closed_candle_time": closed_boundary,
@@ -467,11 +463,13 @@ class PaperPositionManagementShadowProvider:
             "candle_count": len(normalized),
             "mfe_r_as_of_proposal": mfe_r,
             "mae_r_as_of_proposal": mae_r,
-            "first_terminal_candle_open_time": terminal_time,
-            "first_terminal_candle_close_time": (
-                terminal_candle.get("closed_candle_time") if terminal_candle else None
-            ),
-            "terminal_and_post_terminal_candles_excluded": terminal_time is not None,
+            # These compatibility fields describe only what was knowable at
+            # the proposal boundary. A later terminal candle must not rewrite
+            # an already-persisted causal proposal; later terminal diagnostics
+            # belong outside this immutable payload.
+            "first_terminal_candle_open_time": None,
+            "first_terminal_candle_close_time": None,
+            "terminal_and_post_terminal_candles_excluded": False,
             "errors": errors,
             "latest_candle": normalized[-1] if normalized else None,
         }
