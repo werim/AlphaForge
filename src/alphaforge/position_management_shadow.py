@@ -516,7 +516,9 @@ class PaperPositionManagementShadowProvider:
                 "git_commit": campaign.get("git_commit"),
                 "config_hash": campaign.get("config_hash"),
                 "trade_id": position.get("trade_id"),
-                "closed_candle_time": boundary_key,
+                # Keep the persisted evidence field semantically nullable. The
+                # sentinel belongs only inside the deterministic hash material.
+                "closed_candle_time": closed_boundary,
                 "proposed_action": action,
                 "evidence_signature": evidence_signature,
             }
