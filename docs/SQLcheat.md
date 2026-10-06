@@ -1721,3 +1721,109 @@ sqlite3 -readonly -header -column "$DB" "SELECT allocation_cycle_id,candidate_id
 Exact retry of an existing `allocation_cycle_id` is accepted only when the
 stored payload and evidence hash match. A conflicting reuse fails closed; do
 not update or delete immutable allocation evidence to make a replay pass.
+
+
+---
+
+## #612 — PAPER position-management shadow proposals
+
+`ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED=true` creates a
+**PAPER-only counterfactual ledger** on demand. The table is intentionally not
+part of the normal Phase 8 bootstrap when the feature is OFF, so existing
+authoritative campaign DB/schema surfaces remain unchanged.
+
+### `burnin_position_management_shadow_proposals`
+
+This table is **not production action authority**. Rows describe
+`WOULD_*` proposals or explicit denials and must never be treated as realized
+PnL or as `burnin_position_management_events`.
+
+Key columns:
+
+| Column | Meaning |
+|---|---|
+| `proposal_id` | deterministic replay/idempotency identity |
+| `proposal_hash` | full causal payload hash; same id + different hash is a conflict |
+| `campaign_id` | campaign identity |
+| `burnin_run_id` | active continuation that produced the proposal |
+| `position_entry_run_id` | continuation where the position originally entered |
+| `release_id`, `git_commit`, `config_hash`, `strategy_config_hash` | exact prospective identity |
+| `trade_id`, `symbol` | canonical position linkage |
+| `proposal_time` | deterministic closed-candle decision boundary |
+| `closed_candle_time` | latest causal closed candle used |
+| `proposed_action` | `WOULD_TIGHTEN_STOP`, `WOULD_PARTIAL_EXIT`, `WOULD_ENABLE_TRAILING`, or `WOULD_PROTECTIVE_EXIT` |
+| `eligibility_status` | `ELIGIBLE` or `DENIED` |
+| `reason` | explicit eligibility/denial reason |
+| `observed_price`, `mfe_r`, `mae_r` | as-of-proposal causal market evidence |
+| `payload_json` | full market/regime/execution evidence, parameters, estimated costs, and counterfactual net-R semantics |
+| `schema_version` | shadow-ledger schema version |
+
+### Latest shadow proposals for one campaign
+
+```sql
+SELECT
+  id,
+  proposal_time,
+  closed_candle_time,
+  symbol,
+  trade_id,
+  proposed_action,
+  eligibility_status,
+  reason,
+  observed_price,
+  mfe_r,
+  mae_r,
+  burnin_run_id,
+  position_entry_run_id,
+  git_commit,
+  config_hash
+FROM burnin_position_management_shadow_proposals
+WHERE campaign_id = :campaign_id
+ORDER BY id DESC
+LIMIT 100;
+```
+
+### Proposal/denial summary
+
+```sql
+SELECT
+  proposed_action,
+  eligibility_status,
+  reason,
+  COUNT(*) AS n
+FROM burnin_position_management_shadow_proposals
+WHERE campaign_id = :campaign_id
+GROUP BY proposed_action, eligibility_status, reason
+ORDER BY proposed_action, eligibility_status, n DESC;
+```
+
+### Verify shadow never became authoritative management
+
+```sql
+SELECT
+  (SELECT COUNT(*)
+     FROM burnin_position_management_shadow_proposals
+    WHERE campaign_id = :campaign_id) AS shadow_proposals,
+  (SELECT COUNT(*)
+     FROM burnin_position_management_events
+    WHERE campaign_id = :campaign_id) AS authoritative_management_events;
+```
+
+Do not infer a mutation from the two counts alone. For #612 campaigns the
+authoritative event count must be explained by independent canonical management
+authority; shadow rows themselves are never valid action inputs.
+
+### Replay/idempotency check
+
+```sql
+SELECT
+  proposal_id,
+  COUNT(*) AS n,
+  COUNT(DISTINCT proposal_hash) AS distinct_hashes
+FROM burnin_position_management_shadow_proposals
+WHERE campaign_id = :campaign_id
+GROUP BY proposal_id
+HAVING COUNT(*) != 1 OR COUNT(DISTINCT proposal_hash) != 1;
+```
+
+Expected result: **zero rows**.
