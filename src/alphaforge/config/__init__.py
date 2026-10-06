@@ -120,6 +120,7 @@ class RuntimeSettings:
     execution_timeframe: str= field(default_factory=lambda: canonical_field_default("execution_timeframe"))
     mtf_guided_signal_generation_enabled: bool= field(default_factory=lambda: canonical_field_default("mtf_guided_signal_generation_enabled"))
     mtf_execution_confirmation_mode: str= field(default_factory=lambda: canonical_field_default("mtf_execution_confirmation_mode"))
+    paper_position_management_shadow_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_position_management_shadow_enabled"))
     regime_direction_threshold: float= field(default_factory=lambda: canonical_field_default("regime_direction_threshold"))
     setup_direction_threshold: float= field(default_factory=lambda: canonical_field_default("setup_direction_threshold"))
     execution_direction_threshold: float= field(default_factory=lambda: canonical_field_default("execution_direction_threshold"))
@@ -415,6 +416,10 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
             "MAX_CORRELATION_GROUP_EXPOSURE": runtime.max_correlation_group_exposure,
             "MAX_CORRELATED_POSITIONS": runtime.max_correlated_positions,
         })
+        if getattr(runtime, "paper_position_management_shadow_enabled", False):
+            # Preserve legacy OFF hashes/surfaces; enabling the experiment must
+            # become part of prospective campaign identity.
+            cfg["PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED"] = True
     return cfg
 
 def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> AlphaForgeConfig:
@@ -440,6 +445,12 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     if (mtf_execution_confirmation_mode == "SHADOW"
             and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
         raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
+    paper_position_management_shadow_enabled = bool(
+        val("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED")
+    )
+    if (paper_position_management_shadow_enabled
+            and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
+        raise ValueError("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED is PAPER-only")
     runtime = RuntimeSettings(
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
@@ -488,6 +499,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         mtf_guided_signal_generation_enabled=val("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED"),
         mtf_execution_confirmation_mode=mtf_execution_confirmation_mode,
+        paper_position_management_shadow_enabled=paper_position_management_shadow_enabled,
         regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
         setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
         execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),
