@@ -933,6 +933,114 @@ def test_recovery_drill_recovers_dead_pidless_running_continuation_with_evidence
     assert json.loads(details)["transition"] == "RUNNING->RECOVERY_REQUIRED"
 
 
+def test_watchdog_terminalized_dead_worker_recovers_and_preserves_pending_rejects(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    db, conn = _conn(tmp_path)
+    camp, old_run = _campaign(conn)
+    _runtime_table(conn, camp, old_run)
+    conn.execute(
+        "INSERT INTO burnin_pending_reject_labels("
+        "pending_label_id,campaign_id,burnin_run_id,reject_decision_id,signal_id,symbol,side,"
+        "decision_timestamp,entry,stop,target,horizon_seconds,execution_cost_assumptions_json,"
+        "regime,reject_reason,source_provenance_json,due_at,status,created_at,schema_version"
+        ") VALUES ('p_watchdog',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            camp.campaign_id, old_run, "r_watchdog", "s_watchdog", "BTCUSDT", "LONG",
+            utc_now(), 1, 0.9, 1.2, 3600, "{}", "TREND", "LOW", "{}", utc_now(),
+            "PENDING", utc_now(), "sv",
+        ),
+    )
+    conn.execute(
+        "UPDATE burnin_campaigns SET worker_pid=99999,worker_started_at=?,last_heartbeat_at=? "
+        "WHERE campaign_id=?",
+        (utc_now(), utc_now(), camp.campaign_id),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: int(pid or 0) == 501)
+    watched = watch_once(conn, camp.campaign_id)
+    assert watched["status"] == "RECOVERY_REQUIRED"
+    assert watched["cleaned_dead_worker"] is True
+    terminal_before = dict(conn.execute(
+        "SELECT terminal_cause,terminal_cause_source,terminal_event_id FROM burnin_terminal_causes "
+        "WHERE campaign_id=? AND burnin_run_id=?",
+        (camp.campaign_id, old_run),
+    ).fetchone())
+    assert terminal_before["terminal_cause"] == "DEAD_WORKER_RECOVERY_REQUIRED"
+    assert terminal_before["terminal_cause_source"] == "PHASE9_DEAD_WORKER_RECOVERY_REQUIRED"
+    assert get_campaign(conn, camp.campaign_id)["worker_pid"] is None
+
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_a, **_k: _clean_runtime_recovery(conn))
+    proc = SimpleNamespace(pid=501)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *_a, **_k: proc)
+    monkeypatch.setattr(
+        ops,
+        "verify_worker_attachment",
+        lambda *_a, **_k: {"status": "ATTACHED", "runtime_instance_id": "runtime:recovered"},
+    )
+
+    out = recovery_drill(conn, camp.campaign_id, attach_timeout_seconds=0.01)
+
+    assert out["status"] == "PASS"
+    assert out["checks"]["watchdog_dead_worker_recovery"] is True
+    assert out["checks"]["pending_reject_ids_preserved_exactly"] is True
+    assert out["checks"]["exactly_one_new_continuation"] is True
+    assert conn.execute(
+        "SELECT COUNT(*) FROM burnin_pending_reject_labels "
+        "WHERE campaign_id=? AND pending_label_id='p_watchdog' AND status='PENDING'",
+        (camp.campaign_id,),
+    ).fetchone()[0] == 1
+    terminal_after = dict(conn.execute(
+        "SELECT terminal_cause,terminal_cause_source,terminal_event_id FROM burnin_terminal_causes "
+        "WHERE campaign_id=? AND burnin_run_id=?",
+        (camp.campaign_id, old_run),
+    ).fetchone())
+    assert terminal_after == terminal_before
+    current = get_campaign(conn, camp.campaign_id)
+    assert current["campaign_status"] == "RUNNING"
+    assert current["active_run_id"] != old_run
+    assert current["restart_count"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? "
+        "AND event_type='PHASE9_WATCHDOG_DEAD_WORKER_RECOVERY_ACCEPTED'",
+        (camp.campaign_id,),
+    ).fetchone()[0] == 1
+
+
+def test_spoofed_recovery_required_without_dead_worker_terminal_cause_does_not_resume(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, old_run = _campaign(conn)
+    _runtime_table(conn, camp, old_run)
+    conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (old_run,))
+    conn.execute(
+        "UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE campaign_id=? AND burnin_run_id=?",
+        (camp.campaign_id, old_run),
+    )
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL,worker_started_at=NULL "
+        "WHERE campaign_id=?",
+        (camp.campaign_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(ops, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_a, **_k: _clean_runtime_recovery(conn))
+    monkeypatch.setattr(
+        ops,
+        "_launch_worker",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not launch")),
+    )
+
+    out = recovery_drill(conn, camp.campaign_id)
+
+    assert out["status"] == "FAIL"
+    assert out["checks"]["watchdog_dead_worker_recovery"] is False
+    assert out["after"]["resume"] is None
+    assert get_campaign(conn, camp.campaign_id)["active_run_id"] == old_run
+
+
 @pytest.mark.parametrize("field", ["active_positions", "pending_orders", "orphan_orders", "orphan_positions"])
 def test_dead_continuation_with_runtime_exposure_never_resumes(monkeypatch, tmp_path, field):
     import alphaforge.burnin_ops as ops
