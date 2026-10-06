@@ -93,14 +93,14 @@ def _candles():
             "high": 105.0,
             "low": 98.0,
             "close": 104.0,
-            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES"},
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
         {
             "timestamp": "2026-10-06T12:02:00Z",
             "high": 109.0,
             "low": 101.0,
             "close": 108.0,
-            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES"},
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
     ]
 
@@ -146,7 +146,7 @@ def test_pullback_proposals_are_causal_and_authoritative_trailing_denial_is_pres
     result = provider(
         _position(trailing_allowed=False),
         _candles(),
-        "2026-10-06T12:02:30Z",
+        "2026-10-06T12:03:30Z",
         _campaign(),
     )
     proposals = result["proposals"]
@@ -157,8 +157,10 @@ def test_pullback_proposals_are_causal_and_authoritative_trailing_denial_is_pres
         "WOULD_ENABLE_TRAILING",
         "WOULD_PROTECTIVE_EXIT",
     }
-    assert all(row["closed_candle_time"] == "2026-10-06T12:02:00Z" for row in proposals)
-    assert all(row["proposal_time"] == "2026-10-06T12:02:00Z" for row in proposals)
+    assert all(row["closed_candle_time"] == "2026-10-06T12:03:00Z" for row in proposals)
+    assert all(row["proposal_time"] == "2026-10-06T12:03:00Z" for row in proposals)
+    assert all(row["decision_time"] == "2026-10-06T12:03:00Z" for row in proposals)
+    assert all(row["source_trade_decision_time"] == "2026-10-06T12:00:00Z" for row in proposals)
     assert all(row["observed_price"] == pytest.approx(108.0) for row in proposals)
     assert all(row["mfe_r"] == pytest.approx(0.9) for row in proposals)
     assert all(row["mae_r"] == pytest.approx(0.2) for row in proposals)
@@ -173,7 +175,7 @@ def test_explicit_calibrated_trailing_distance_can_be_proposed_but_not_realized(
     proposals = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
         _candles(),
-        "2026-10-06T12:02:30Z",
+        "2026-10-06T12:03:30Z",
         _campaign(),
     )["proposals"]
     trailing = next(row for row in proposals if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
@@ -187,6 +189,54 @@ def test_explicit_calibrated_trailing_distance_can_be_proposed_but_not_realized(
     assert trailing["authoritative_realized_pnl"] is False
 
 
+def test_kline_open_timestamp_is_not_mislabeled_as_closed_boundary():
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
+    candle = {
+        "timestamp": "2026-10-06T12:01:00Z",
+        "high": 105.0,
+        "low": 98.0,
+        "close": 104.0,
+        "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
+    }
+
+    proposals = provider(
+        _position(trailing_allowed=True, trailing_distance=0.75),
+        [candle],
+        "2026-10-06T12:02:30Z",
+        _campaign(),
+    )["proposals"]
+
+    trailing = next(row for row in proposals if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
+    assert trailing["eligibility_status"] == "ELIGIBLE"
+    assert trailing["closed_candle_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["proposal_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["decision_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["market_evidence"]["latest_candle"]["open_time"] == "2026-10-06T12:01:00Z"
+    assert trailing["market_evidence"]["latest_candle"]["closed_candle_time"] == "2026-10-06T12:02:00Z"
+
+
+def test_open_kline_cannot_be_used_before_its_close():
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
+    candle = {
+        "timestamp": "2026-10-06T12:02:00Z",
+        "high": 119.0,
+        "low": 101.0,
+        "close": 118.0,
+        "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
+    }
+
+    proposals = provider(
+        _position(trailing_allowed=True, trailing_distance=0.75),
+        [candle],
+        "2026-10-06T12:02:30Z",
+        _campaign(),
+    )["proposals"]
+
+    assert all(row["eligibility_status"] == "DENIED" for row in proposals)
+    assert all(row["reason"] == "OPEN_OR_FUTURE_CANDLE_PRESENT" for row in proposals)
+    assert all(row["closed_candle_time"] is None for row in proposals)
+
+
 def test_future_candle_never_leaks_into_mfe_or_favorable_proposal():
     provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
     candles = _candles() + [{
@@ -194,16 +244,17 @@ def test_future_candle_never_leaks_into_mfe_or_favorable_proposal():
         "high": 999.0,
         "low": 1.0,
         "close": 500.0,
+        "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
     }]
     proposals = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
         candles,
-        "2026-10-06T12:02:30Z",
+        "2026-10-06T12:03:30Z",
         _campaign(),
     )["proposals"]
 
     assert all(row["eligibility_status"] == "DENIED" for row in proposals)
-    assert all(row["reason"] == "FUTURE_CANDLE_PRESENT" for row in proposals)
+    assert all(row["reason"] == "OPEN_OR_FUTURE_CANDLE_PRESENT" for row in proposals)
     assert all(row["mfe_r"] == pytest.approx(0.9) for row in proposals)
     assert all(row["mae_r"] == pytest.approx(0.2) for row in proposals)
 
@@ -216,6 +267,7 @@ def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal()
             "high": 105.0,
             "low": 98.0,
             "close": 104.0,
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
         {
             # Target=120 is hit intra-candle. A management proposal at this
@@ -224,6 +276,7 @@ def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal()
             "high": 121.0,
             "low": 103.0,
             "close": 119.0,
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
         {
             # Extreme post-terminal values are deliberately adversarial.
@@ -232,23 +285,25 @@ def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal()
             "low": 1.0,
             "close": 500.0,
             "stale": True,
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
     ]
     proposals = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
         candles,
-        "2026-10-06T12:03:30Z",
+        "2026-10-06T12:05:30Z",
         _campaign(),
     )["proposals"]
 
     trailing = next(row for row in proposals if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
     assert trailing["eligibility_status"] == "ELIGIBLE"
-    assert trailing["closed_candle_time"] == "2026-10-06T12:01:00Z"
-    assert trailing["proposal_time"] == "2026-10-06T12:01:00Z"
+    assert trailing["closed_candle_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["proposal_time"] == "2026-10-06T12:02:00Z"
     assert trailing["observed_price"] == pytest.approx(104.0)
     assert trailing["mfe_r"] == pytest.approx(0.5)
     assert trailing["mae_r"] == pytest.approx(0.2)
-    assert trailing["market_evidence"]["first_terminal_candle_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["market_evidence"]["first_terminal_candle_open_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["market_evidence"]["first_terminal_candle_close_time"] == "2026-10-06T12:03:00Z"
     assert trailing["market_evidence"]["terminal_and_post_terminal_candles_excluded"] is True
     assert "STALE_OR_UNAVAILABLE_MARKET_EVIDENCE" not in trailing["market_evidence"]["errors"]
 
@@ -260,11 +315,12 @@ def test_first_post_entry_candle_terminal_emits_only_explicit_no_action_reasons(
         "high": 121.0,
         "low": 99.0,
         "close": 119.0,
+        "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
     }]
     proposals = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
         candles,
-        "2026-10-06T12:01:30Z",
+        "2026-10-06T12:02:30Z",
         _campaign(),
     )["proposals"]
 
@@ -290,6 +346,7 @@ def test_missing_candle_gap_is_fail_closed_for_all_shadow_actions():
             "high": 106.0,
             "low": 103.0,
             "close": 105.0,
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
     ]
     proposals = provider(
@@ -314,6 +371,8 @@ def test_missing_candle_gap_is_fail_closed_for_all_shadow_actions():
         ), "EXECUTION_COST_EVIDENCE_INCOMPLETE"),
         (lambda position, candles, campaign: campaign.update(campaign_id="camp_other"),
          "CROSS_SCOPED_POSITION_CAMPAIGN"),
+        (lambda position, candles, campaign: candles[1]["source_provenance"].pop("interval"),
+         "CANDLE_INTERVAL_UNAVAILABLE_OR_UNSUPPORTED"),
     ],
 )
 def test_missing_stale_or_cross_scoped_evidence_never_produces_favorable_proposal(
@@ -325,7 +384,7 @@ def test_missing_stale_or_cross_scoped_evidence_never_produces_favorable_proposa
     campaign = _campaign()
     mutation(position, candles, campaign)
 
-    proposals = provider(position, candles, "2026-10-06T12:02:30Z", campaign)["proposals"]
+    proposals = provider(position, candles, "2026-10-06T12:03:30Z", campaign)["proposals"]
 
     assert all(row["eligibility_status"] == "DENIED" for row in proposals)
     assert all(expected_reason in row["market_evidence"]["errors"] or row["reason"] == expected_reason
@@ -339,7 +398,7 @@ def test_shadow_persistence_is_idempotent_and_conflicts_fail_closed():
     proposals = provider(
         _position(),
         _candles(),
-        "2026-10-06T12:02:30Z",
+        "2026-10-06T12:03:30Z",
         _campaign(),
     )["proposals"]
 
@@ -424,7 +483,7 @@ def test_runner_shadow_is_immutable_and_restart_replay_does_not_duplicate(tmp_pa
             "high": 105.0,
             "low": 98.0,
             "close": 104.0,
-            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES"},
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         }]
 
     engine = create_engine(f"sqlite+pysqlite:///{path}", future=True)
@@ -495,6 +554,7 @@ def test_export_labels_counterfactual_rows_separately(tmp_path):
             "high": 105.0,
             "low": 98.0,
             "close": 104.0,
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         }]
 
     engine = create_engine(f"sqlite+pysqlite:///{path}", future=True)
