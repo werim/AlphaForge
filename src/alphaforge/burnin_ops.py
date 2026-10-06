@@ -1726,11 +1726,22 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     runtime_exposure = dict(runtime_recovery.get("current_exposure_check") or {})
     unsafe_exposure = {name: int(runtime_exposure.get(name) or 0) for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")}
     stale_dead_worker = old_status == "RUNNING" and not old_alive
+    terminal_cause = get_terminal_cause(conn, campaign_id, old_run) if old_run else None
+    watchdog_dead_worker_recovery = bool(
+        campaign.get("campaign_status") == "RECOVERY_REQUIRED"
+        and old_status == "RECOVERY_REQUIRED"
+        and not old_alive
+        and old_pid is None
+        and terminal_cause is not None
+        and terminal_cause.get("terminal_cause") == "DEAD_WORKER_RECOVERY_REQUIRED"
+        and terminal_cause.get("terminal_cause_source") == "PHASE9_DEAD_WORKER_RECOVERY_REQUIRED"
+    )
     provider_unavailable_errors = list(runtime_recovery.get("provider_unavailable_errors") or [])
     all_runtime_query_errors = list(runtime_recovery.get("query_errors") or [])
     provider_only_error = bool(provider_unavailable_errors) and sorted(provider_unavailable_errors) == sorted(all_runtime_query_errors)
     campaign_available = all((exposure.get("availability") or {}).values()) and not exposure.get("query_errors")
     zero_campaign_exposure = exposure["open_positions"] == 0 and exposure["pending_reject_labels"] == 0
+    continuation_execution_exposure_clear = exposure["open_positions"] == 0
     local_runtime_zero_available = runtime_zero_available(runtime_recovery)
     mode_safe_for_local_fallback = str((runtime_recovery.get("latest") or {}).get("mode") or "PAPER").upper() not in {"LIVE", "LIVE_PRECHECK"}
     historical_zero_local_fallback_candidate = (
@@ -1773,7 +1784,8 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         and provider_only_error
     )
     recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and local_runtime_zero_available
-    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_status": campaign_status, "last_error": campaign_last_error, "campaign_state_terminalizable": campaign_state_terminalizable, "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "startup_terminalization_evidence": startup_evidence, "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False, "terminal_zero_startup_fallback_candidate": terminal_zero_startup_fallback_candidate}
+    continuation_recovery_safe = not runtime_recovery.get("blocked") and campaign_available and continuation_execution_exposure_clear and local_runtime_zero_available
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_status": campaign_status, "last_error": campaign_last_error, "campaign_state_terminalizable": campaign_state_terminalizable, "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "startup_terminalization_evidence": startup_evidence, "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False, "terminal_zero_startup_fallback_candidate": terminal_zero_startup_fallback_candidate, "watchdog_dead_worker_recovery": watchdog_dead_worker_recovery, "watchdog_terminal_cause": terminal_cause}
     run_decisions = startup_evidence.get("decisions")
     zero_exposure_failed_startup = (
         old_status in {"FAILED", "STARTING"}
@@ -1827,7 +1839,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], "PASS", json.dumps(payload["checks"]), json.dumps(payload["before"]), json.dumps(payload["after"], default=str), PHASE9_SCHEMA_VERSION))
         conn.commit()
         return payload
-    if stale_dead_worker and recovery_safe:
+    if stale_dead_worker and continuation_recovery_safe:
         # PID metadata is attachment evidence, not a prerequisite for recovery.
         # Terminalize both linked rows before allocating a successor.
         evidence = {"old_run_id": old_run, "old_status": old_status, "worker_pid": old_pid, "worker_alive": old_alive, "heartbeat_at": campaign.get("last_heartbeat_at"), "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "transition": "RUNNING->RECOVERY_REQUIRED"}
@@ -1841,6 +1853,21 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
             details=evidence,
         )
         persist_incident(conn, campaign_id, "STALE_CONTINUATION_ZERO_EXPOSURE", evidence)
+        conn.commit()
+    elif watchdog_dead_worker_recovery and continuation_recovery_safe:
+        # watch_once() has already persisted the immutable terminal cause and
+        # cleared dead worker metadata. Continue only from that exact state.
+        event(
+            conn,
+            campaign_id,
+            "PHASE9_WATCHDOG_DEAD_WORKER_RECOVERY_ACCEPTED",
+            burnin_run_id=old_run,
+            details={
+                "terminal_event_id": terminal_cause.get("terminal_event_id") if terminal_cause else None,
+                "pending_reject_labels_preserved": exposure["pending_reject_labels"],
+                "campaign_open_positions": exposure["open_positions"],
+            },
+        )
         conn.commit()
     elif not all((bool(old_pid), old_alive, old_status == "RUNNING")):
         prior_campaign_status = str(campaign.get("campaign_status") or "")
@@ -1862,7 +1889,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "precheck": prechecks})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "FAIL", "checks": {**prechecks, "failure_reasons": [failure["reason"]]}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None, "failure": failure}}
         conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], "FAIL", json.dumps(payload["checks"]), json.dumps(payload["before"]), json.dumps(payload["after"]), PHASE9_SCHEMA_VERSION)); conn.commit()
         return payload
-    terminated = True if stale_dead_worker else _stop_worker(old_pid)
+    terminated = True if (stale_dead_worker or watchdog_dead_worker_recovery) else _stop_worker(old_pid)
     if not terminated:
         prior_campaign_status = str((get_campaign(conn, campaign_id) or {}).get("campaign_status") or "")
         conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='RECOVERY_DRILL_WORKER_TERMINATION_FAILED' WHERE campaign_id=?", (campaign_id,))
