@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy import text
@@ -101,6 +101,20 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _interval_seconds(value: Any) -> int | None:
+    mapping = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "2h": 7200,
+        "4h": 14400,
+        "1d": 86400,
+    }
+    return mapping.get(str(value or "").strip().lower())
+
+
 def _position_provenance(position: Mapping[str, Any]) -> dict[str, Any]:
     raw = position.get("source_provenance")
     if isinstance(raw, Mapping):
@@ -131,14 +145,25 @@ def _normalize_candles(
             # Explicitly open candles are ignored; they never participate in
             # proposal evidence or MFE/MAE.
             continue
-        timestamp = _dt(raw.get("timestamp") or raw.get("open_time") or raw.get("time"))
-        if timestamp is None:
+        open_time = _dt(raw.get("timestamp") or raw.get("open_time") or raw.get("time"))
+        if open_time is None:
             errors.append(f"CANDLE_{index}_TIMESTAMP_MALFORMED")
             continue
-        if timestamp > proposal_time:
-            errors.append("FUTURE_CANDLE_PRESENT")
+        source = raw.get("source_provenance")
+        source_dict = dict(source) if isinstance(source, Mapping) else {}
+        interval = source_dict.get("interval") or raw.get("interval")
+        interval_seconds = _interval_seconds(interval)
+        if interval_seconds is None:
+            errors.append("CANDLE_INTERVAL_UNAVAILABLE_OR_UNSUPPORTED")
             continue
-        if timestamp <= entry_time:
+        closed_candle_time = open_time + timedelta(seconds=interval_seconds)
+        if closed_candle_time > proposal_time:
+            # Binance kline timestamps are OPEN boundaries. A candle whose close
+            # is after the decision time is not causal even if its open time is
+            # already in the past.
+            errors.append("OPEN_OR_FUTURE_CANDLE_PRESENT")
+            continue
+        if open_time <= entry_time:
             continue
         high = _finite(raw.get("high"), positive=True)
         low = _finite(raw.get("low"), positive=True)
@@ -146,23 +171,26 @@ def _normalize_candles(
         if high is None or low is None or close is None or high < low or not (low <= close <= high):
             errors.append(f"CANDLE_{index}_OHLC_MALFORMED")
             continue
-        source = raw.get("source_provenance")
-        source_dict = dict(source) if isinstance(source, Mapping) else {}
         status = str(source_dict.get("evidence_status") or raw.get("evidence_status") or "").upper()
         if status in {"STALE", "UNAVAILABLE", "MALFORMED", "INCOMPLETE"} or raw.get("stale") is True:
             errors.append("STALE_OR_UNAVAILABLE_MARKET_EVIDENCE")
         candle = {
-            "timestamp": _iso(timestamp),
+            # Preserve the provider's Binance kline open-boundary timestamp for
+            # continuity/terminal-candle ordering, but never call it a close.
+            "timestamp": _iso(open_time),
+            "open_time": _iso(open_time),
+            "closed_candle_time": _iso(closed_candle_time),
+            "interval": str(interval),
             "high": high,
             "low": low,
             "close": close,
             "source_provenance": source_dict,
         }
-        existing = unique.get(timestamp)
-        if existing is not None and any(existing[key] != candle[key] for key in ("high", "low", "close")):
+        existing = unique.get(open_time)
+        if existing is not None and any(existing[key] != candle[key] for key in ("high", "low", "close", "closed_candle_time")):
             errors.append("DUPLICATE_CANDLE_CONFLICT")
             continue
-        unique[timestamp] = candle
+        unique[open_time] = candle
     return [unique[key] for key in sorted(unique)], sorted(set(errors))
 
 
@@ -392,7 +420,7 @@ class PaperPositionManagementShadowProvider:
         if scope_error:
             errors.append(scope_error)
 
-        closed_boundary = normalized[-1]["timestamp"] if normalized else None
+        closed_boundary = normalized[-1]["closed_candle_time"] if normalized else None
         observed_price = float(normalized[-1]["close"]) if normalized else None
         if terminal_time is not None and not normalized:
             errors.append("NO_PRE_TERMINAL_CLOSED_CANDLE")
@@ -400,10 +428,7 @@ class PaperPositionManagementShadowProvider:
             errors.append("CLOSED_CANDLE_EVIDENCE_UNAVAILABLE")
         elif now is not None:
             boundary_dt = _dt(closed_boundary)
-            # Candle timestamps are open-boundary timestamps. Permit one full 1m
-            # candle plus the canonical market-data staleness allowance.
-            max_age = self.max_evidence_age_seconds + 60.0
-            if boundary_dt is None or (now - boundary_dt).total_seconds() > max_age:
+            if boundary_dt is None or (now - boundary_dt).total_seconds() > self.max_evidence_age_seconds:
                 errors.append("STALE_MARKET_EVIDENCE")
 
         if None in {entry, initial_stop, current_stop, target, remaining_quantity} or side not in {"LONG", "SHORT"}:
@@ -427,6 +452,10 @@ class PaperPositionManagementShadowProvider:
         if not active_run_id:
             raise ValueError("POSITION_MANAGEMENT_SHADOW_ACTIVE_RUN_ID_MISSING")
 
+        terminal_candle = next(
+            (candle for candle in normalized_all if candle.get("timestamp") == terminal_time),
+            None,
+        )
         market_evidence = {
             "status": "COMPLETE" if not errors else "INCOMPLETE",
             "closed_candle_time": closed_boundary,
@@ -434,7 +463,10 @@ class PaperPositionManagementShadowProvider:
             "candle_count": len(normalized),
             "mfe_r_as_of_proposal": mfe_r,
             "mae_r_as_of_proposal": mae_r,
-            "first_terminal_candle_time": terminal_time,
+            "first_terminal_candle_open_time": terminal_time,
+            "first_terminal_candle_close_time": (
+                terminal_candle.get("closed_candle_time") if terminal_candle else None
+            ),
             "terminal_and_post_terminal_candles_excluded": terminal_time is not None,
             "errors": errors,
             "latest_candle": normalized[-1] if normalized else None,
@@ -528,8 +560,11 @@ class PaperPositionManagementShadowProvider:
                 "proposal_id": proposal_id,
                 "strategy_config_hash": campaign.get("strategy_config_hash"),
                 "position_entry_run_id": position_entry_run_id,
+                # A shadow proposal is a closed-candle decision. Keep the
+                # original trade decision timestamp separately.
                 "proposal_time": closed_boundary or position.get("decision_time") or position.get("entry_time"),
-                "decision_time": position.get("decision_time") or position.get("entry_time"),
+                "decision_time": closed_boundary,
+                "source_trade_decision_time": position.get("decision_time") or position.get("entry_time"),
                 "symbol": position.get("symbol"),
                 "side": side,
                 "entry": entry,
