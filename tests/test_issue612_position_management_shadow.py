@@ -208,6 +208,101 @@ def test_future_candle_never_leaks_into_mfe_or_favorable_proposal():
     assert all(row["mae_r"] == pytest.approx(0.2) for row in proposals)
 
 
+def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal():
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
+    candles = [
+        {
+            "timestamp": "2026-10-06T12:01:00Z",
+            "high": 105.0,
+            "low": 98.0,
+            "close": 104.0,
+        },
+        {
+            # Target=120 is hit intra-candle. A management proposal at this
+            # candle's close would be too late and must not read this OHLC.
+            "timestamp": "2026-10-06T12:02:00Z",
+            "high": 121.0,
+            "low": 103.0,
+            "close": 119.0,
+        },
+        {
+            # Extreme post-terminal values are deliberately adversarial.
+            "timestamp": "2026-10-06T12:03:00Z",
+            "high": 999.0,
+            "low": 1.0,
+            "close": 500.0,
+            "stale": True,
+        },
+    ]
+    proposals = provider(
+        _position(trailing_allowed=True, trailing_distance=0.75),
+        candles,
+        "2026-10-06T12:03:30Z",
+        _campaign(),
+    )["proposals"]
+
+    trailing = next(row for row in proposals if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
+    assert trailing["eligibility_status"] == "ELIGIBLE"
+    assert trailing["closed_candle_time"] == "2026-10-06T12:01:00Z"
+    assert trailing["proposal_time"] == "2026-10-06T12:01:00Z"
+    assert trailing["observed_price"] == pytest.approx(104.0)
+    assert trailing["mfe_r"] == pytest.approx(0.5)
+    assert trailing["mae_r"] == pytest.approx(0.2)
+    assert trailing["market_evidence"]["first_terminal_candle_time"] == "2026-10-06T12:02:00Z"
+    assert trailing["market_evidence"]["terminal_and_post_terminal_candles_excluded"] is True
+    assert "STALE_OR_UNAVAILABLE_MARKET_EVIDENCE" not in trailing["market_evidence"]["errors"]
+
+
+def test_first_post_entry_candle_terminal_emits_only_explicit_no_action_reasons():
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
+    candles = [{
+        "timestamp": "2026-10-06T12:01:00Z",
+        "high": 121.0,
+        "low": 99.0,
+        "close": 119.0,
+    }]
+    proposals = provider(
+        _position(trailing_allowed=True, trailing_distance=0.75),
+        candles,
+        "2026-10-06T12:01:30Z",
+        _campaign(),
+    )["proposals"]
+
+    assert len(proposals) == 4
+    assert all(row["eligibility_status"] == "DENIED" for row in proposals)
+    assert all(row["reason"] == "NO_PRE_TERMINAL_CLOSED_CANDLE" for row in proposals)
+    assert all(row["closed_candle_time"] is None for row in proposals)
+    assert all(row["mfe_r"] == pytest.approx(0.0) for row in proposals)
+    assert all(row["mae_r"] == pytest.approx(0.0) for row in proposals)
+
+
+def test_missing_candle_gap_is_fail_closed_for_all_shadow_actions():
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
+    candles = [
+        {
+            "timestamp": "2026-10-06T12:01:00Z",
+            "high": 105.0,
+            "low": 98.0,
+            "close": 104.0,
+        },
+        {
+            "timestamp": "2026-10-06T12:04:00Z",
+            "high": 106.0,
+            "low": 103.0,
+            "close": 105.0,
+        },
+    ]
+    proposals = provider(
+        _position(trailing_allowed=True, trailing_distance=0.75),
+        candles,
+        "2026-10-06T12:04:30Z",
+        _campaign(),
+    )["proposals"]
+
+    assert all(row["eligibility_status"] == "DENIED" for row in proposals)
+    assert all(row["reason"] == "MARKET_CANDLE_GAP_OR_TIME_INVALID" for row in proposals)
+
+
 @pytest.mark.parametrize(
     "mutation, expected_reason",
     [
