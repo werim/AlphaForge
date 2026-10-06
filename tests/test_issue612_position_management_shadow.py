@@ -260,7 +260,7 @@ def test_future_candle_never_leaks_into_mfe_or_favorable_proposal():
 
 
 def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal():
-    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=120.0)
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=300.0)
     candles = [
         {
             "timestamp": "2026-10-06T12:01:00Z",
@@ -291,7 +291,7 @@ def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal()
     proposals = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
         candles,
-        "2026-10-06T12:05:30Z",
+        "2026-10-06T12:04:30Z",
         _campaign(),
     )["proposals"]
 
@@ -340,6 +340,7 @@ def test_missing_candle_gap_is_fail_closed_for_all_shadow_actions():
             "high": 105.0,
             "low": 98.0,
             "close": 104.0,
+            "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
         {
             "timestamp": "2026-10-06T12:04:00Z",
@@ -352,7 +353,7 @@ def test_missing_candle_gap_is_fail_closed_for_all_shadow_actions():
     proposals = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
         candles,
-        "2026-10-06T12:04:30Z",
+        "2026-10-06T12:05:30Z",
         _campaign(),
     )["proposals"]
 
