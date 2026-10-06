@@ -1,3 +1,16 @@
+# #612 causal shadow replay idempotency — 2026-10-06
+
+### Changed
+- PAPER position-management shadow proposals keep terminal-candle diagnostic compatibility fields at proposal-time unknown values; later terminal/post-terminal observations cannot enter an earlier immutable payload.
+### Fixed
+- `POSITION_MANAGEMENT_SHADOW_PROPOSAL_ID_CONFLICT` when a stable causal proposal ID was replayed after later terminal evidence changed the full payload hash.
+### Validation
+- Added direct persist-before-terminal/replay-after-terminal coverage and runner-level restart coverage proving identical IDs/hashes, `inserted=0/idempotent=4`, no `RESOLVER_BATCH_FAILED`, canonical TP resolution, and no shadow authoritative-management event or state mutation.
+### Breaking Changes
+- None. Existing field shape and pre-terminal payload hashes are preserved; no schema or migration change.
+### Known Issues
+- Issue #612 still requires fresh PAPER evidence on the exact merged dev SHA/config. The paused reproduction campaign remains evidence only and must not be resumed. LIVE NOT READY.
+
 # #354 Telegram Control Center read-only diagnostics — 2026-10-01
 
 ### Added

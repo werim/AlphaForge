@@ -291,9 +291,9 @@ def test_future_candle_never_leaks_into_mfe_or_favorable_proposal():
     assert all(row["mae_r"] == pytest.approx(0.2) for row in proposals)
 
 
-def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal():
+def test_terminal_and_post_terminal_candles_never_rewrite_persisted_preterminal_proposal():
     provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=300.0)
-    candles = [
+    preterminal_candles = [
         {
             "timestamp": "2026-10-06T12:01:00Z",
             "high": 105.0,
@@ -301,6 +301,8 @@ def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal()
             "close": 104.0,
             "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
+    ]
+    terminal_and_post_terminal_candles = [
         {
             # Target=120 is hit intra-candle. A management proposal at this
             # candle's close would be too late and must not read this OHLC.
@@ -320,23 +322,43 @@ def test_terminal_and_post_terminal_candles_never_rewrite_preterminal_proposal()
             "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
     ]
-    proposals = provider(
+    original = provider(
         _position(trailing_allowed=True, trailing_distance=0.75),
-        candles,
+        preterminal_candles,
+        "2026-10-06T12:02:30Z",
+        _campaign(),
+    )["proposals"]
+    replay = provider(
+        _position(trailing_allowed=True, trailing_distance=0.75),
+        preterminal_candles + terminal_and_post_terminal_candles,
         "2026-10-06T12:04:30Z",
         _campaign(),
     )["proposals"]
 
-    trailing = next(row for row in proposals if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
+    assert [row["proposal_id"] for row in replay] == [row["proposal_id"] for row in original]
+    assert [row["proposal_hash"] for row in replay] == [row["proposal_hash"] for row in original]
+    assert replay == original
+
+    conn = sqlite3.connect(":memory:")
+    assert persist_position_management_shadow_proposals(conn, original) == {
+        "inserted": 4,
+        "idempotent": 0,
+    }
+    assert persist_position_management_shadow_proposals(conn, replay) == {
+        "inserted": 0,
+        "idempotent": 4,
+    }
+
+    trailing = next(row for row in replay if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
     assert trailing["eligibility_status"] == "ELIGIBLE"
     assert trailing["closed_candle_time"] == "2026-10-06T12:02:00Z"
     assert trailing["proposal_time"] == "2026-10-06T12:02:00Z"
     assert trailing["observed_price"] == pytest.approx(104.0)
     assert trailing["mfe_r"] == pytest.approx(0.5)
     assert trailing["mae_r"] == pytest.approx(0.2)
-    assert trailing["market_evidence"]["first_terminal_candle_open_time"] == "2026-10-06T12:02:00Z"
-    assert trailing["market_evidence"]["first_terminal_candle_close_time"] == "2026-10-06T12:03:00Z"
-    assert trailing["market_evidence"]["terminal_and_post_terminal_candles_excluded"] is True
+    assert trailing["market_evidence"]["first_terminal_candle_open_time"] is None
+    assert trailing["market_evidence"]["first_terminal_candle_close_time"] is None
+    assert trailing["market_evidence"]["terminal_and_post_terminal_candles_excluded"] is False
     assert "STALE_OR_UNAVAILABLE_MARKET_EVIDENCE" not in trailing["market_evidence"]["errors"]
 
 
@@ -508,16 +530,41 @@ def _runner_setup(tmp_path):
 
 def test_runner_shadow_is_immutable_and_restart_replay_does_not_duplicate(tmp_path):
     path, campaign_id = _runner_setup(tmp_path)
+    phase = {"terminal_visible": False}
 
     def candle_provider(symbol, start, end, timeframe="1m"):
         assert symbol == "BTCUSDT"
-        return [{
+        candles = [{
             "timestamp": "2026-10-06T12:01:00Z",
             "high": 105.0,
             "low": 98.0,
             "close": 104.0,
             "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         }]
+        if phase["terminal_visible"]:
+            candles.extend([
+                {
+                    "timestamp": "2026-10-06T12:02:00Z",
+                    "high": 121.0,
+                    "low": 103.0,
+                    "close": 119.0,
+                    "source_provenance": {
+                        "provider": "BINANCE_READ_ONLY_KLINES",
+                        "interval": "1m",
+                    },
+                },
+                {
+                    "timestamp": "2026-10-06T12:03:00Z",
+                    "high": 999.0,
+                    "low": 1.0,
+                    "close": 500.0,
+                    "source_provenance": {
+                        "provider": "BINANCE_READ_ONLY_KLINES",
+                        "interval": "1m",
+                    },
+                },
+            ])
+        return candles
 
     engine = create_engine(f"sqlite+pysqlite:///{path}", future=True)
     provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=1_000_000_000.0)
@@ -567,6 +614,7 @@ def test_runner_shadow_is_immutable_and_restart_replay_does_not_duplicate(tmp_pa
         ),
     )
     restarted._qualify_if_due = lambda: None
+    phase["terminal_visible"] = True
     replay = restarted.resolver_tick()
     assert replay["status"] == "OK"
     assert replay["position_management_shadow"] == {"inserted": 0, "idempotent": 4}
@@ -575,6 +623,28 @@ def test_runner_shadow_is_immutable_and_restart_replay_does_not_duplicate(tmp_pa
         assert db.exec_driver_sql(
             "SELECT COUNT(*) FROM burnin_position_management_shadow_proposals"
         ).scalar_one() == 4
+        resolved = db.exec_driver_sql(
+            "SELECT status,exit_reason,current_stop,current_target,remaining_quantity,"
+            "trailing_enabled,management_version FROM burnin_pending_position_outcomes "
+            "WHERE trade_id='trade-runner-612'"
+        ).mappings().one()
+        assert resolved["status"] == "CLOSED"
+        assert resolved["exit_reason"] == "TP_HIT"
+        assert resolved["current_stop"] == before["current_stop"]
+        assert resolved["current_target"] == before["current_target"]
+        # The canonical resolver closes the position at target; this is not a
+        # shadow mutation. Shadow-specific authoritative fields stay unchanged.
+        assert resolved["remaining_quantity"] == pytest.approx(0.0)
+        assert resolved["trailing_enabled"] == before["trailing_enabled"]
+        assert resolved["management_version"] == before["management_version"]
+        assert db.exec_driver_sql(
+            "SELECT COUNT(*) FROM burnin_position_management_events"
+        ).scalar_one() == 0
+        assert db.exec_driver_sql(
+            "SELECT COUNT(*) FROM burnin_campaign_events "
+            "WHERE campaign_id=? AND event_type='RESOLVER_BATCH_FAILED'",
+            (campaign_id,),
+        ).scalar_one() == 0
     engine.dispose()
 
 

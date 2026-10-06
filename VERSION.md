@@ -1,3 +1,10 @@
+# AlphaForge 0.1.0 — #612 causal shadow replay idempotency — 2026-10-06
+
+- Current phase: repair the fresh PAPER replay conflict reproduced on exact SHA `c415edd8b2446a88cf3f0b350dfcfece9b53f69f`; fresh fixed-SHA PAPER acceptance remains required before issue closure.
+- Runtime maturity/alignment: later terminal/post-terminal discovery no longer rewrites an already-produced causal PAPER shadow proposal. Compatibility terminal-diagnostic fields remain present but fixed to their proposal-time unknown values. Thresholds, authoritative position management, BACKTEST, LIVE_PRECHECK, and LIVE behavior are unchanged.
+- Lifecycle/persistence: proposal ID and full payload hash now stay stable across persist-before-terminal and replay-after-terminal. Replay is idempotent while canonical position resolution continues independently; no schema, migration, backfill, historical rewrite, or paused-campaign mutation.
+- Validation: 37 focused #612, authoritative position-management, and resolver tests pass, including `inserted=0/idempotent=4`, no resolver failure event, canonical TP closure, restart replay, and shadow immutability. PR CI and exact merged-dev CI remain required. LIVE NOT READY.
+
 # AlphaForge 0.1.0 — #354 Telegram Control Center read-only diagnostics — 2026-10-01
 
 - Current phase: first Telegram-only control-center slice. Existing allowlist/replay/offset/delivery safety is extended with real `/report`, `/rejects`, `/labels`, and `/errors` handlers.
