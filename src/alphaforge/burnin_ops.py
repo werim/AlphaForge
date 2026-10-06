@@ -1811,6 +1811,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
             runtime_recovery["fallback_original_runtime_recovery"] = original_runtime_recovery
             prechecks["runtime_recovery_after_fallback"] = runtime_recovery
             recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and runtime_zero_available(runtime_recovery)
+            continuation_recovery_safe = not runtime_recovery.get("blocked") and campaign_available and continuation_execution_exposure_clear and runtime_zero_available(runtime_recovery)
             prechecks["historical_zero_local_fallback"] = recovery_safe
         finally:
             engine.dispose()
