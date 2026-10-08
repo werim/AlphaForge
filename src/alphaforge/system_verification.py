@@ -82,6 +82,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue438_market_data_supervision.py",
     ),
     "NO_LOOKAHEAD": ("tests/test_multi_timeframe.py",),
+    "STORAGE_RETENTION": ("tests/test_issue620_storage_policy.py",),
     "PERSISTENCE_ATOMICITY": (
         "tests/test_issue550_atomic_reject_persistence.py",
         "tests/test_issue450_sqlite_concurrency.py",
@@ -250,6 +251,7 @@ def assess_path(raw_path: str) -> PathAssessment:
             (("decision_invariant.py",), ("DECISION_PARITY",), "cross-mode decision invariant changed"),
             (("portfolio_risk",), ("PORTFOLIO_RISK",), "portfolio-risk authority changed"),
             (("burnin_resolver.py",), ("RESOLVER_INTEGRITY", "TIME_INTEGRITY"), "resolver authority changed"),
+            (("storage_policy.py",), ("STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "storage lifecycle authority changed"),
             (("persistence.py",), ("PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "authoritative persistence changed"),
             (("runtime_state.py",), ("RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "runtime/reconciliation state changed"),
             (("live_readiness.py",), ("READINESS_EVIDENCE", "FAIL_CLOSED_PROMOTION"), "readiness authority changed"),

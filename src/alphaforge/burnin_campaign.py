@@ -193,6 +193,8 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
+    from alphaforge.storage_policy import StoragePolicy
+    config_payload["storage_policy"] = StoragePolicy.from_config(runtime_config).identity()
     config_payload["symbols"] = sorted(map(str, symbols))
     config_payload["intervals"] = sorted(map(str, intervals))
     config_payload["campaign_intervals"] = sorted(map(str, intervals))
@@ -534,9 +536,17 @@ def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str,
     event(conn, campaign_id, "PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL", burnin_run_id=run_id,
           details={"runtime_instance_id": runtime_instance_id, "transition": "STARTING->RUNNING"})
 
+def require_operational_campaign_evidence(conn: Any, campaign_id: str) -> None:
+    if not isinstance(conn, sqlite3.Connection) and conn.dialect.name != "sqlite":
+        return
+    if _exec(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='storage_archives'").fetchone():
+        if _exec(conn, "SELECT 1 FROM storage_archives WHERE campaign_id=:cid", {"cid": campaign_id}).fetchone():
+            raise RuntimeError("ARCHIVED_CAMPAIGN_REQUIRES_REPLAY_DATABASE")
+
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")
+    require_operational_campaign_evidence(conn, campaign_id)
     require_valid_release_id(str(c.get("release_id") or ""), conn)
     pid = c.get("worker_pid")
     if pid:
@@ -1033,6 +1043,7 @@ def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresho
     # The progress/hash check is read-only.  Do not rebuild the synthetic run
     # when the latest qualification already names the exact current evidence.
     with engine.connect() as read_conn:
+        require_operational_campaign_evidence(read_conn, campaign_id)
         current = aggregate_campaign(read_conn, campaign_id)
         campaign = get_campaign(read_conn, campaign_id)
         latest = None

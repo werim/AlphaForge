@@ -94,6 +94,15 @@ def is_sqlite_busy_error(exc: BaseException) -> bool:
     )
 
 
+def is_sqlite_full_error(exc: BaseException) -> bool:
+    """Classify physical capacity exhaustion separately from schema failures."""
+    original = getattr(exc, "orig", exc)
+    code = getattr(original, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) == sqlite3.SQLITE_FULL
+    return "database or disk is full" in str(original).lower()
+
+
 def run_sqlite_write_with_retry(
     engine: Engine,
     operation: Callable[[Connection], _T],

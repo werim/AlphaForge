@@ -136,6 +136,9 @@ class LiveReadinessAgent:
                 g10=self.g("CONTAMINATION",BLOCKED,"DYNAMIC_UNIVERSE_EVIDENCE_MISSING",contamination_source,{"outside":outside,"selected_symbols":[]},"every observed symbol has campaign-scoped canonical selection evidence")
             else:
                 g10=self.g("CONTAMINATION",BLOCKED if outside else PASS,"OUT_OF_UNIVERSE_OBSERVATION" if outside else "NO_CONTAMINATION",contamination_source,{"outside":outside,"selected_symbols":sorted(declared) if dynamic_universe else None},"no out-of-universe observations")
+            archived=db.one("SELECT archive_path,state FROM storage_archives WHERE campaign_id=? AND state IN ('REMOVING','ARCHIVED')",(self.cid,)) if "storage_archives" in tabs else None
+            if archived:
+                g10=self.g("CONTAMINATION",NOT_OBSERVABLE,"ARCHIVED_UNIVERSE_EVIDENCE_REQUIRES_REPLAY","storage_archives",archived,"verified archive replay required")
             lifecycle_rows=db.rows("SELECT signal_id,lifecycle_state,mode FROM trade_lifecycle_events WHERE UPPER(mode)='PAPER'") if "trade_lifecycle_events" in tabs else []
             scoped_lifecycle=scoped_rows(lifecycle_rows,scoped_signal_ids)
             lifecycle_errors=[x for x in scoped_lifecycle if str(x.get("lifecycle_state") or "").upper() in {"ERROR","EXECUTION_ERROR"}]

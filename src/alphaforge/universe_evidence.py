@@ -243,6 +243,8 @@ def persist_burnin_universe_selection_link(
     burnin_run_id = str(burnin_run_id or "").strip()
     if not campaign_id or not burnin_run_id:
         raise ValueError("campaign_id and burnin_run_id are required")
+    from alphaforge.burnin_campaign import require_operational_campaign_evidence
+    require_operational_campaign_evidence(conn, campaign_id)
     link_id = f"burnin-universe:{campaign_id}:{burnin_run_id}:{selection.cycle_id}"
     params = {
         "link_id": link_id,

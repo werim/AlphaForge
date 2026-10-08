@@ -487,7 +487,7 @@ def _readonly_reconciliation_provider(cfg: Any, symbols: Sequence[str] = ()) -> 
     )
 
 
-def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
+def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None, expected_duration_seconds: float = 0) -> dict[str, Any]:
     cfg = load_config_from_env()
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -500,6 +500,16 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         checks.append({"name": name, "status": status, "details": details, "critical": critical})
         if critical and status != "PASS":
             blockers.append(name)
+
+    from alphaforge.storage_policy import StoragePolicy, disk_budget
+    storage_budget = disk_budget(Path(db), StoragePolicy.from_config(cfg.runtime), duration_seconds=expected_duration_seconds)
+    add("disk_space_sufficient", "PASS" if storage_budget["status"] == "PASS" else "FAIL", storage_budget)
+    if storage_budget["status"] != "PASS":
+        # Refuse before DB bootstrap, write probe, recovery materialization or
+        # artifact creation. The caller receives honest in-memory diagnostics.
+        return {"status": "FAIL_CLOSED", "release_id": release_id, "campaign_id": None,
+                "checks": checks, "blockers": blockers,
+                "evidence_locations": {"unavailable_reason": "STORAGE_DISK_RESERVE_INSUFFICIENT"}}
 
     env_audit = audit_config()
     dotenv = dotenv_status()
@@ -667,8 +677,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
             add("runtime_recovery_scope", "PASS" if not recovery["blocked"] else "FAIL", recovery)
         finally:
             recovery_engine.dispose()
-    usage = __import__("shutil").disk_usage(Path(db).parent if Path(db).parent.exists() else Path.cwd())
-    add("disk_space_sufficient", "PASS" if usage.free > 100 * 1024 * 1024 else "FAIL", {"free_bytes": usage.free})
+
     if require_market_data:
         try:
             connectivity_probe_symbol = symbols[0] if symbols else ("BTCUSDT" if dynamic_universe else None)
@@ -895,6 +904,7 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
         symbols,
         intervals,
         dynamic_universe=dynamic_universe,
+        expected_duration_seconds=max(0, duration_days * 86400),
     )
     if pf["status"] != "PASS":
         return {"status": "FAILED_CLOSED", "preflight": pf}
