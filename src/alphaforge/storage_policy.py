@@ -467,8 +467,6 @@ def verified_archive(engine, policy, campaign_id, *, deadline_seconds=30):
 def _verified_archive(engine, policy, campaign_id, *, deadline_seconds):
     path = database_path(engine)
     destination = Path(policy.archive_dir).expanduser().resolve()
-    if shutil.disk_usage(destination).free < _size(path) + policy.reserve(_size(Path(str(path) + "-wal"))):
-        raise ValueError("ARCHIVE_DESTINATION_CAPACITY_INSUFFICIENT")
     deadline = time.monotonic() + deadline_seconds
     with readonly(path) as source:
         reason = campaign_eligibility(source, campaign_id, min_age_sec=policy.min_age_sec)
@@ -478,6 +476,8 @@ def _verified_archive(engine, policy, campaign_id, *, deadline_seconds):
         archive = destination / f"{path.name}.{key}.archive.db"
         manifest_path = archive.with_suffix(archive.suffix + ".json")
         if not manifest_path.exists():
+            if shutil.disk_usage(destination).free < _size(path) + policy.reserve(_size(Path(str(path) + "-wal"))):
+                raise ValueError("ARCHIVE_DESTINATION_CAPACITY_INSUFFICIENT")
             partial = archive.with_suffix(archive.suffix + ".partial")
             partial.unlink(missing_ok=True)  # only unpublished incomplete work
             with sqlite3.connect(partial) as target:

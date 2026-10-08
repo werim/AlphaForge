@@ -495,3 +495,14 @@ def test_unknown_exposure_does_not_authorize_empty_shutdown(db,tmp_path,monkeypa
     asyncio.run(r._scan_once())
     assert r._storage_pressure and not r._stop_event.is_set()
     assert r._execution_reconciliation_blocked()
+
+
+def test_verified_archive_restart_does_not_require_capacity_for_another_backup(db,tmp_path,monkeypatch):
+    terminal(db)
+    p=archive_policy(tmp_path,batch_rows=3,batch_seconds=2)
+    m=verified_archive(db,p,CID)
+    usage=__import__('shutil').disk_usage(tmp_path)
+    monkeypatch.setattr('alphaforge.storage_policy.shutil.disk_usage',lambda location:usage._replace(free=1))
+    resumed=verified_archive(db,p,CID)
+    assert resumed == m
+    assert remove_archived_batch(db,p,resumed)['rows_removed'] == 3
