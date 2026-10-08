@@ -26,6 +26,7 @@ from sqlalchemy.exc import OperationalError
 
 from alphaforge.config_registry import CONFIG_REGISTRY, canonical_field_default
 from alphaforge.sqlite_safety import SQLiteBusyExhausted, is_sqlite_full_error, run_sqlite_write_with_retry, sqlite_writer_guard
+from alphaforge.universe_evidence import load_persisted_universe_selection
 
 POLICY_VERSION = "sqlite-storage-v1"
 SETTINGS = tuple(s for s in CONFIG_REGISTRY if s.field_name.startswith("storage_"))
@@ -463,6 +464,21 @@ def campaign_eligibility(conn, campaign_id, *, min_age_sec=0):
             OR NOT EXISTS (SELECT 1 FROM burnin_campaign_runs r
                 WHERE r.campaign_id=l.campaign_id AND r.burnin_run_id=l.burnin_run_id)) LIMIT 1""", (campaign_id,)).fetchone():
         return "UNIVERSE_DOMAIN_OR_REPLAY_INCOMPLETE"
+    # Normalize-era cycles are validated against their immutable candidate rows
+    # *before* archival. A syntactically valid small v2 metadata JSON is not
+    # enough to establish replay completeness or canonical evidence integrity.
+    # Legacy full-payload rows retain the pre-#622 domain checks above.
+    for cycle_id, payload_json in conn.execute("""
+        SELECT c.cycle_id, c.payload_json FROM universe_selection_cycles c
+        JOIN burnin_universe_selection_links l ON l.cycle_id=c.cycle_id
+        WHERE l.campaign_id=? ORDER BY c.cycle_id
+    """, (campaign_id,)).fetchall():
+        try:
+            payload = json.loads(payload_json)
+            if isinstance(payload, dict) and payload.get("_storage_codec") is not None:
+                load_persisted_universe_selection(conn, cycle_id)
+        except (TypeError, ValueError, KeyError, IndexError, sqlite3.Error):
+            return "UNIVERSE_DOMAIN_OR_REPLAY_INCOMPLETE"
     if "runtime_state_snapshots" in tab and "campaign_id" in columns(conn, "runtime_state_snapshots"):
         row = conn.execute("SELECT * FROM runtime_state_snapshots WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
         if row:
