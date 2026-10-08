@@ -576,3 +576,21 @@ def test_concurrent_resolver_reconciliation_and_retention_preserve_pending_evide
         assert conn.exec_driver_sql('SELECT COUNT(*) FROM universe_selection_cycles').scalar_one() == 3
         assert conn.exec_driver_sql("SELECT COUNT(*) FROM exchange_reconciliation_events WHERE cycle_id='issue620-reconciliation'").scalar_one() == 1
         assert conn.exec_driver_sql('SELECT COUNT(*) FROM runtime_heartbeats').scalar_one() == 25
+
+
+def test_maintenance_dependency_scan_deadline_rolls_back_and_releases_writer(db):
+    from alphaforge.storage_policy import MaintenanceBudgetExhausted,run_bounded_maintenance_write
+    with db.begin() as conn:
+        conn.exec_driver_sql('CREATE TABLE maintenance_atomicity_probe(id INTEGER PRIMARY KEY)')
+    def expensive(conn):
+        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        conn.exec_driver_sql('INSERT INTO maintenance_atomicity_probe VALUES (1)')
+        conn.exec_driver_sql('WITH RECURSIVE scan(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM scan WHERE n<100000000) SELECT SUM(n) FROM scan').scalar_one()
+    started=time.monotonic()
+    with pytest.raises(MaintenanceBudgetExhausted):
+        run_bounded_maintenance_write(db,policy(batch_seconds=0.01),expensive,operation_name='bounded_dependency_scan')
+    assert time.monotonic()-started < 2
+    with db.begin() as conn:
+        assert conn.exec_driver_sql('SELECT COUNT(*) FROM maintenance_atomicity_probe').scalar_one() == 0
+        conn.exec_driver_sql('INSERT INTO maintenance_atomicity_probe VALUES (2)')
+        assert conn.exec_driver_sql('PRAGMA busy_timeout').scalar_one() == 30000

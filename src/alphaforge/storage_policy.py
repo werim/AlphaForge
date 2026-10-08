@@ -262,6 +262,31 @@ def prune_telemetry(engine, policy):
         return {"rows_removed": 0, "reason": "MAINTENANCE_TIME_BUDGET_EXHAUSTED"}
 
 
+class MaintenanceBudgetExhausted(ValueError):
+    """A bounded maintenance transaction rolled back without deleting evidence."""
+
+
+def run_bounded_maintenance_write(engine, policy, operation, *, operation_name):
+    # Bound dependency scans/schema work as well as the final DELETE loop.
+    # The guard/retry authority rolls back interrupted transactions. Install the
+    # deadline only after arbitration so waiting for another legitimate writer
+    # does not consume the maintenance SQL budget.
+    def bounded(conn):
+        raw = conn.connection.driver_connection
+        deadline = time.monotonic() + policy.batch_seconds
+        raw.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        try:
+            return operation(conn)
+        finally:
+            raw.set_progress_handler(None, 0)
+    try:
+        return run_sqlite_write_with_retry(engine, bounded, operation_name=operation_name)
+    except OperationalError as exc:
+        if getattr(exc.orig, "sqlite_errorcode", None) != sqlite3.SQLITE_INTERRUPT:
+            raise
+        raise MaintenanceBudgetExhausted("MAINTENANCE_TIME_BUDGET_EXHAUSTED") from exc
+
+
 def checkpoint(engine, *, truncate=False):
     # PASSIVE does not wait on a long reader and never unlinks sidecar files.
     mode = "TRUNCATE" if truncate else "PASSIVE"
@@ -522,7 +547,7 @@ def _verified_archive(engine, policy, campaign_id, *, deadline_seconds):
         if old and old[0] != manifest["checksum"]:
             raise ValueError("ARCHIVE_MANIFEST_CONFLICT")
         conn.exec_driver_sql("INSERT OR IGNORE INTO storage_archives VALUES (?,?,?,?, 'VERIFIED')", (campaign_id, str(archive), manifest["checksum"], json.dumps(manifest, sort_keys=True)))
-    run_sqlite_write_with_retry(engine, publish, operation_name="storage_archive_manifest")
+    run_bounded_maintenance_write(engine, policy, publish, operation_name="storage_archive_manifest")
     return manifest
 
 
@@ -588,7 +613,7 @@ def remove_archived_batch(engine, policy, manifest):
             finally:
                 raw.create_function("storage_archive_authorize", 1, lambda value: 0)
             return {"rows_removed": removed, "campaign_id": cid, "archive_path": str(archive_path), "state": "REMOVING" if remaining else "ARCHIVED"}
-        return run_sqlite_write_with_retry(engine, operation, operation_name="storage_archive_removal")
+        return run_bounded_maintenance_write(engine, policy, operation, operation_name="storage_archive_removal")
 
 
 def archive_location(conn, campaign_id):
