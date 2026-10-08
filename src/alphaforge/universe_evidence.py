@@ -121,13 +121,24 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
     # The canonical evidence hash still binds the *complete* decision-time
     # selection. Candidate details already have immutable, verified rows below;
     # keeping another copy in the cycle JSON doubled database growth (#622).
-    complete_payload = selection.as_dict()
-    legacy_payload_json = json.dumps(complete_payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    payload_json = json.dumps(
-        {**{key: value for key, value in complete_payload.items() if key != "candidates"},
-         "_storage_codec": UNIVERSE_CYCLE_STORAGE_CODEC},
-        sort_keys=True, separators=(",", ":"), allow_nan=False,
-    )
+    # Serialize metadata only on the common write path. Only an exact replay
+    # colliding with a pre-#622 full-payload row needs legacy serialization.
+    payload_json = json.dumps({
+        "_storage_codec": UNIVERSE_CYCLE_STORAGE_CODEC,
+        "cycle_id": selection.cycle_id,
+        "decision_timestamp": selection.decision_timestamp,
+        "execution_mode": selection.execution_mode,
+        "constraints": selection.constraints.as_dict(),
+        "selected_symbols": list(selection.selected_symbols),
+        "config_hash": selection.config_hash,
+        "strategy_config_hash": selection.strategy_config_hash,
+        "universe_hash": selection.universe_hash,
+        "evidence_hash": selection.evidence_hash,
+        "git_sha": selection.git_sha,
+        "source_provenance": list(selection.source_provenance),
+        "ranking_version": selection.ranking_version,
+        "schema_version": selection.schema_version,
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False)
     cycle_params = {
         "cycle_id": selection.cycle_id,
         "decision_timestamp": selection.decision_timestamp,
@@ -162,10 +173,14 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
         "SELECT evidence_hash, payload_json FROM universe_selection_cycles WHERE cycle_id=:cycle_id",
         {"cycle_id": selection.cycle_id},
     ).fetchone()
-    # Exact legacy retries on pre-#622 files must remain idempotent.
-    if (existing is None or str(existing[0]) != selection.evidence_hash
-            or str(existing[1]) not in (payload_json, legacy_payload_json)):
+    # Exact legacy retries on pre-#622 files must remain idempotent, without
+    # serializing every candidate twice on the usual new-cycle write path.
+    if existing is None or str(existing[0]) != selection.evidence_hash:
         raise RuntimeError(f"UNIVERSE_SELECTION_IDEMPOTENCY_CONFLICT:{selection.cycle_id}")
+    if str(existing[1]) != payload_json:
+        legacy_json = json.dumps(selection.as_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if str(existing[1]) != legacy_json:
+            raise RuntimeError(f"UNIVERSE_SELECTION_IDEMPOTENCY_CONFLICT:{selection.cycle_id}")
 
     candidate_params: list[dict[str, Any]] = []
     for index, candidate in enumerate(selection.candidates):
