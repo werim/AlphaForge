@@ -25,7 +25,7 @@ from alphaforge.storage_policy import (
     disk_budget, inventory, plan_telemetry, prune_telemetry, readonly,
     remove_archived_batch, verified_archive, verify_manifest,
 )
-from alphaforge.universe_evidence import UNIVERSE_SELECTION_DDL
+from alphaforge.universe_evidence import UNIVERSE_SELECTION_DDL, persist_universe_selection
 
 CID = 'camp_6200000000000001'
 RUN = CID + '_run_0000'
@@ -594,3 +594,55 @@ def test_maintenance_dependency_scan_deadline_rolls_back_and_releases_writer(db)
         assert conn.exec_driver_sql('SELECT COUNT(*) FROM maintenance_atomicity_probe').scalar_one() == 0
         conn.exec_driver_sql('INSERT INTO maintenance_atomicity_probe VALUES (2)')
         assert conn.exec_driver_sql('PRAGMA busy_timeout').scalar_one() == 30000
+
+
+def test_issue622_archival_fails_closed_on_corrupted_compact_universe(db, tmp_path):
+    """A v2 metadata envelope alone never authorizes archival of damaged rows."""
+    from alphaforge.symbol_selector import UniverseConstraints, build_selected_universe
+    terminal(db, cycles=0)
+    decision_ts = 1577850000.0
+    selection = build_selected_universe(
+        [{
+            'symbol': 'BTCUSDT',
+            'source_exchange': 'binance',
+            'market_ts': decision_ts,
+            'market_observed_at': decision_ts,
+            'volume_24h_usdt': 10_000_000.0,
+            'spread_pct': 0.0001,
+            'expected_slippage_pct': 0.0001,
+            'volatility_pct': 0.03,
+            'trend_strength': 0.9,
+            'chop_score': 0.1,
+            'liquidity_score': 0.9,
+        }],
+        UniverseConstraints(max_active_symbols=1),
+        decision_timestamp=decision_ts,
+        execution_mode='PAPER',
+        git_sha='sha620',
+        strategy_config_hash='strategy620',
+    )
+    with db.begin() as conn:
+        persist_universe_selection(conn, selection)
+        conn.execute(text("""
+            INSERT INTO burnin_universe_selection_links
+            (link_id,campaign_id,burnin_run_id,cycle_id,decision_timestamp,schema_version)
+            VALUES (:link_id,:campaign,:run,:cycle,:ts,:schema)
+        """), {
+            'link_id': 'link-issue622', 'campaign': CID, 'run': RUN,
+            'cycle': selection.cycle_id, 'ts': decision_ts, 'schema': selection.schema_version,
+        })
+    with readonly(Path(db.url.database)) as conn:
+        assert campaign_eligibility(conn, CID, min_age_sec=0) is None
+
+    with db.begin() as conn:
+        conn.execute(text('DROP TRIGGER trg_universe_selection_candidates_no_update'))
+        conn.execute(text("""
+            UPDATE universe_selection_candidates SET eligibility_state='INVALID'
+            WHERE cycle_id=:cycle_id AND candidate_index=0
+        """), {'cycle_id': selection.cycle_id})
+
+    with readonly(Path(db.url.database)) as conn:
+        assert campaign_eligibility(conn, CID, min_age_sec=0) == 'UNIVERSE_DOMAIN_OR_REPLAY_INCOMPLETE'
+
+    with pytest.raises(ValueError, match='UNIVERSE_DOMAIN_OR_REPLAY_INCOMPLETE'):
+        verified_archive(db, archive_policy(tmp_path), CID)
