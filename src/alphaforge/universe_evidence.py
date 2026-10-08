@@ -6,7 +6,12 @@ from typing import Any
 
 from sqlalchemy import text
 
-from alphaforge.symbol_selector import SelectedUniverse
+from alphaforge.symbol_selector import SelectedUniverse, _canonical_hash
+
+
+# Storage representation version is intentionally separate from the canonical
+# strategy/economic schema_version and evidence_hash. Legacy full JSON stays readable.
+UNIVERSE_CYCLE_STORAGE_CODEC = "candidate-rows-v2"
 
 
 UNIVERSE_SELECTION_DDL: tuple[str, ...] = (
@@ -113,7 +118,16 @@ def _execute_many(
 
 def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
     """Insert immutable selection evidence, accepting exact replay idempotently."""
-    payload_json = json.dumps(selection.as_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    # The canonical evidence hash still binds the *complete* decision-time
+    # selection. Candidate details already have immutable, verified rows below;
+    # keeping another copy in the cycle JSON doubled database growth (#622).
+    complete_payload = selection.as_dict()
+    legacy_payload_json = json.dumps(complete_payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    payload_json = json.dumps(
+        {**{key: value for key, value in complete_payload.items() if key != "candidates"},
+         "_storage_codec": UNIVERSE_CYCLE_STORAGE_CODEC},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
     cycle_params = {
         "cycle_id": selection.cycle_id,
         "decision_timestamp": selection.decision_timestamp,
@@ -148,7 +162,9 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
         "SELECT evidence_hash, payload_json FROM universe_selection_cycles WHERE cycle_id=:cycle_id",
         {"cycle_id": selection.cycle_id},
     ).fetchone()
-    if existing is None or str(existing[0]) != selection.evidence_hash or str(existing[1]) != payload_json:
+    # Exact legacy retries on pre-#622 files must remain idempotent.
+    if (existing is None or str(existing[0]) != selection.evidence_hash
+            or str(existing[1]) not in (payload_json, legacy_payload_json)):
         raise RuntimeError(f"UNIVERSE_SELECTION_IDEMPOTENCY_CONFLICT:{selection.cycle_id}")
 
     candidate_params: list[dict[str, Any]] = []
@@ -229,6 +245,107 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
             )
     return True
 
+
+
+def load_persisted_universe_selection(conn: Any, cycle_id: str) -> dict[str, Any]:
+    """Losslessly reconstruct and verify one immutable decision-time universe.
+
+    The v2 cycle JSON contains metadata and constraints; candidate rows are its
+    only candidate-data authority. Historical full v1 payloads remain readable.
+    Missing, malformed, altered, or wrong-cycle data fail closed: no fallback to
+    the latest universe or another campaign/run is permitted.
+    """
+    row = _execute(conn, """
+        SELECT cycle_id, decision_timestamp, execution_mode, selected_symbols_json,
+               candidate_count, config_hash, strategy_config_hash, universe_hash,
+               evidence_hash, git_sha, source_provenance_json, ranking_version,
+               schema_version, payload_json
+        FROM universe_selection_cycles WHERE cycle_id=:cycle_id
+    """, {"cycle_id": cycle_id}).fetchone()
+    if row is None:
+        raise ValueError(f"UNIVERSE_SELECTION_EVIDENCE_MISSING:{cycle_id}")
+    (stored_id, decision_ts, mode, selected_json, count, config_hash, strategy_hash,
+     universe_hash, evidence_hash, git_sha, providers_json, rank_version,
+     schema_version, payload_json) = tuple(row)
+
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("cycle payload is not an object")
+        codec = payload.get("_storage_codec")
+        if codec not in (None, UNIVERSE_CYCLE_STORAGE_CODEC):
+            raise ValueError("unknown storage codec")
+        stored = _execute(conn, """
+            SELECT candidate_index, symbol, eligibility_state, exclusion_reasons_json,
+                   observed_inputs_json, ranking_components_json, ranking_score,
+                   ranking_order, selected, evidence_availability_json
+            FROM universe_selection_candidates
+            WHERE cycle_id=:cycle_id ORDER BY candidate_index
+        """, {"cycle_id": cycle_id}).fetchall()
+        if len(stored) != count:
+            raise ValueError("candidate count mismatch")
+
+        candidates = []
+        for index, record in enumerate(stored):
+            (stored_index, symbol, state, reasons, observed, components,
+             score, rank, selected, availability) = tuple(record)
+            if stored_index != index or selected not in (0, 1):
+                raise ValueError("candidate index or boolean mismatch")
+            candidate = {
+                "symbol": symbol, "state": state, "reasons": json.loads(reasons),
+                "observed_inputs": json.loads(observed),
+                "ranking_components": json.loads(components), "score": score,
+                "rank": rank, "selected": bool(selected),
+                "evidence_availability": json.loads(availability),
+            }
+            if not isinstance(candidate["reasons"], list) or not all(
+                isinstance(candidate[key], dict)
+                for key in ("observed_inputs", "ranking_components", "evidence_availability")
+            ):
+                raise ValueError("candidate JSON structure invalid")
+            candidates.append(candidate)
+
+        if codec == UNIVERSE_CYCLE_STORAGE_CODEC:
+            if "candidates" in payload:
+                raise ValueError("normalized cycle contains duplicate candidates")
+            payload.pop("_storage_codec")
+            payload["candidates"] = candidates
+        elif codec is None:
+            if payload.get("candidates") != candidates:
+                raise ValueError("legacy candidate rows diverge from cycle payload")
+
+        expected = {
+            "cycle_id": stored_id, "decision_timestamp": decision_ts,
+            "execution_mode": mode, "selected_symbols": json.loads(selected_json),
+            "config_hash": config_hash, "strategy_config_hash": strategy_hash,
+            "universe_hash": universe_hash, "evidence_hash": evidence_hash,
+            "git_sha": git_sha, "source_provenance": json.loads(providers_json),
+            "ranking_version": rank_version, "schema_version": schema_version,
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise ValueError("cycle metadata mismatch")
+        if not isinstance(payload.get("constraints"), dict):
+            raise ValueError("constraints unavailable")
+        if _canonical_hash(payload["constraints"]) != config_hash:
+            raise ValueError("constraints hash mismatch")
+        canonical = {
+            "decision_timestamp": decision_ts, "constraints": payload["constraints"],
+            "candidates": candidates, "git_sha": git_sha,
+            "strategy_config_hash": strategy_hash, "ranking_version": rank_version,
+            "schema_version": schema_version,
+        }
+        if _canonical_hash(canonical) != evidence_hash:
+            raise ValueError("canonical decision evidence hash mismatch")
+        if stored_id != f"universe:{mode}:{evidence_hash}":
+            raise ValueError("cycle ID / evidence hash mismatch")
+        actual_selected = [candidate["symbol"] for candidate in candidates if candidate["selected"]]
+        if actual_selected != payload["selected_symbols"]:
+            raise ValueError("selected symbol projection mismatch")
+        if _canonical_hash({"symbols": actual_selected, "evidence_hash": evidence_hash}) != universe_hash:
+            raise ValueError("universe hash mismatch")
+        return payload
+    except (TypeError, KeyError, IndexError, ValueError) as exc:
+        raise ValueError(f"UNIVERSE_SELECTION_EVIDENCE_INVALID:{cycle_id}:{exc}") from exc
 
 
 def persist_burnin_universe_selection_link(
