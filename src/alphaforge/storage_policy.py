@@ -25,7 +25,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
 from alphaforge.config_registry import CONFIG_REGISTRY, canonical_field_default
-from alphaforge.sqlite_safety import SQLiteBusyExhausted, run_sqlite_write_with_retry, sqlite_writer_guard
+from alphaforge.sqlite_safety import SQLiteBusyExhausted, is_sqlite_full_error, run_sqlite_write_with_retry, sqlite_writer_guard
 
 POLICY_VERSION = "sqlite-storage-v1"
 SETTINGS = tuple(s for s in CONFIG_REGISTRY if s.field_name.startswith("storage_"))
@@ -656,6 +656,10 @@ class StorageController:
                     report["checkpoint"] = checkpoint(self.engine, truncate=True)
             except SQLiteBusyExhausted:
                 report["blockers"].append("STORAGE_WRITER_BUSY")
+            except (sqlite3.Error, OperationalError) as exc:
+                if not is_sqlite_full_error(exc):
+                    raise
+                report["blockers"].append("STORAGE_ARCHIVE_OR_MAINTENANCE_DISK_FULL")
             except (ValueError, TimeoutError, OSError) as exc:
                 report["blockers"].append(str(exc))
         after = inventory(path, self.policy, detailed=False)
@@ -671,6 +675,9 @@ class StorageController:
             report["status"] = "STORAGE_DISK_PRESSURE"
         elif report["status"] == "TARGET_NOT_REACHABLE_PROTECTED_DATA":
             report["blocked"] = True
+        if "STORAGE_ARCHIVE_OR_MAINTENANCE_DISK_FULL" in report["blockers"]:
+            report["blocked"] = True
+            report["status"] = "STORAGE_DISK_FULL_RECOVERY_REQUIRED"
         cp = report["checkpoint"]
         if cp and cp["busy"] and after["allocated_live_bytes"] + max(0, cp["wal_frames"] - cp["checkpointed_frames"]) * after["page_size"] >= self.policy.high_bytes:
             report["status"] = "WAL_CHECKPOINT_BLOCKED"

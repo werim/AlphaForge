@@ -506,3 +506,73 @@ def test_verified_archive_restart_does_not_require_capacity_for_another_backup(d
     resumed=verified_archive(db,p,CID)
     assert resumed == m
     assert remove_archived_batch(db,p,resumed)['rows_removed'] == 3
+
+
+def test_archive_sqlite_full_is_an_explicit_pressure_blocker_not_scanner_death(db,tmp_path,monkeypatch):
+    import alphaforge.storage_policy as storage
+    terminal(db)
+    failure=sqlite3.OperationalError('database or disk is full')
+    failure.sqlite_errorcode=sqlite3.SQLITE_FULL
+    def full(*args,**kwargs):raise failure
+    monkeypatch.setattr(storage,'verified_archive',full)
+    p=archive_policy(tmp_path,high_bytes=100000,low_bytes=1,batch_seconds=2)
+    result=StorageController(db,p).check(force=True)
+    assert result['blocked']
+    assert result['status'] == 'STORAGE_DISK_FULL_RECOVERY_REQUIRED'
+    assert 'STORAGE_ARCHIVE_OR_MAINTENANCE_DISK_FULL' in result['blockers']
+    with db.connect() as conn:
+        assert conn.exec_driver_sql('SELECT COUNT(*) FROM universe_selection_cycles').scalar_one() == 3
+
+
+def test_failed_disk_full_recovery_persistence_is_explicit_and_does_not_stop_exposure(db,tmp_path,monkeypatch):
+    from alphaforge.runtime import RuntimeOrchestrator
+    usage=__import__('shutil').disk_usage(tmp_path)
+    monkeypatch.setattr('alphaforge.storage_policy.shutil.disk_usage',lambda p:usage._replace(free=139*1024**2))
+    failure=sqlite3.OperationalError('database or disk is full')
+    failure.sqlite_errorcode=sqlite3.SQLITE_FULL
+    def full(*args,**kwargs):raise OperationalError('snapshot',{},failure)
+    monkeypatch.setattr(RuntimeOrchestrator,'_persist_runtime_state_snapshot',full)
+    r=runtime(db)
+    r._active_positions['BTCUSDT']=100.0
+    asyncio.run(r._scan_once())
+    assert r._storage_report['recovery_state_persisted'] is False
+    assert r._burnin_evidence_incomplete
+    assert not r._stop_event.is_set()
+    assert r._execution_reconciliation_blocked()
+    assert r._active_positions['BTCUSDT'] == 100.0
+
+
+def test_nontransient_maintenance_schema_errors_remain_fatal(db,monkeypatch):
+    import alphaforge.storage_policy as storage
+    heartbeats(db)
+    def schema_failure(*args):raise OperationalError('DELETE',{},sqlite3.OperationalError('no such column: corrupt'))
+    monkeypatch.setattr(storage,'prune_telemetry',schema_failure)
+    with pytest.raises(OperationalError,match='no such column'):
+        StorageController(db,policy(high_bytes=100000,low_bytes=1)).check(force=True)
+
+
+def test_concurrent_resolver_reconciliation_and_retention_preserve_pending_evidence(db):
+    from alphaforge.burnin_campaign import _with_fresh_lock_retry
+    from alphaforge.burnin_resolver import resolve_campaign_batch
+    from alphaforge.runtime_state import persist_reconciliation_cycle
+    terminal(db)
+    heartbeats(db)
+    with db.begin() as conn:
+        conn.exec_driver_sql("""INSERT INTO burnin_pending_reject_labels(pending_label_id,campaign_id,burnin_run_id,reject_decision_id,symbol,side,decision_timestamp,execution_cost_assumptions_json,source_provenance_json,due_at,status,created_at,schema_version) VALUES ('pending',?,?,'reject','BTCUSDT','LONG','2020-01-01','{}','{}','2999-01-01','PENDING','2020-01-01','v1')""",(CID,RUN))
+    errors=[]
+    def invoke(operation):
+        try:operation()
+        except BaseException as exc:errors.append(exc)
+    state=RuntimeStateSnapshot(mode='PAPER',requested_mode='PAPER',actual_mode='PAPER',runtime_status='OPERATING',instance_id='reconciler',unknown_exchange_state=False,reconciliation_status='CLEAN')
+    operations=[lambda:prune_telemetry(db,policy(batch_rows=5,batch_seconds=2)),
+                lambda:_with_fresh_lock_retry(db,lambda conn:resolve_campaign_batch(conn,CID,{},now='2020-01-02T00:00:00Z')),
+                lambda:persist_reconciliation_cycle(db,cycle_id='issue620-reconciliation',findings=[],snapshot=state,diagnostics={'evidence_status':'COMPLETE'},pending_failures=[])]
+    threads=[threading.Thread(target=invoke,args=(operation,)) for operation in operations]
+    for thread in threads:thread.start()
+    for thread in threads:thread.join(5)
+    assert not errors and not any(thread.is_alive() for thread in threads)
+    with db.connect() as conn:
+        assert conn.exec_driver_sql("SELECT status FROM burnin_pending_reject_labels WHERE pending_label_id='pending'").scalar_one() == 'PENDING'
+        assert conn.exec_driver_sql('SELECT COUNT(*) FROM universe_selection_cycles').scalar_one() == 3
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM exchange_reconciliation_events WHERE cycle_id='issue620-reconciliation'").scalar_one() == 1
+        assert conn.exec_driver_sql('SELECT COUNT(*) FROM runtime_heartbeats').scalar_one() == 25

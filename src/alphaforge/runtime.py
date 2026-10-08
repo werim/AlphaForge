@@ -1143,9 +1143,22 @@ class RuntimeOrchestrator:
                 # recovery transition once, then keep management/reconciliation
                 # alive for outstanding exposure. Empty campaigns stop through
                 # the normal supervised finalization path.
-                self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
+                try:
+                    await asyncio.to_thread(self._persist_runtime_state_snapshot, "RECOVERY_REQUIRED")
+                    report["recovery_state_persisted"] = True
+                except OperationalError as exc:
+                    from alphaforge.sqlite_safety import is_sqlite_full_error
+                    if not is_sqlite_full_error(exc) and not is_sqlite_busy_error(exc):
+                        raise
+                    # Capacity exhaustion is explicit missing mandatory evidence.
+                    # Do not invent successful persistence or abandon exposure.
+                    report["recovery_state_persisted"] = False
+                    report["persistence_failure_class"] = "SQLITE_FULL" if is_sqlite_full_error(exc) else "SQLITE_BUSY"
+                    self._burnin_evidence_incomplete = True
+                    logger.exception("STORAGE_PRESSURE_RECOVERY_STATE_NOT_PERSISTED")
                 if (not self._active_positions and not self._pending_orders
-                        and not self._unknown_exchange_state and self._reconciliation_status == "CLEAN"):
+                        and not self._unknown_exchange_state and self._reconciliation_status == "CLEAN"
+                        and report["recovery_state_persisted"]):
                     self.shutdown()
                 logger.warning("storage_pressure report=%s", report)
         # Clearing disk pressure never implicitly reopens execution. Recovery

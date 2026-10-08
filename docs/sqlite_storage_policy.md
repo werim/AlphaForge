@@ -118,8 +118,12 @@ If reserve is insufficient or protected live data prevents reclaiming the
 budget, new evidence-producing scans and entries stop. The runtime records a
 recovery-required transition before exhaustion. With open positions/orders,
 position management and reconciliation stay alive and exposure is preserved.
-An empty campaign requests normal supervised shutdown only after its recovery
-state is durably written. Removing pressure does not automatically clear recovery
+An empty, reconciled campaign requests normal supervised shutdown only after its
+recovery state is durably written. Unknown exposure keeps supervision alive.
+If reserve is exhausted despite the gate, SQLite FULL is a concrete maintenance
+blocker. Missing mandatory recovery persistence remains explicit and incomplete;
+it cannot authorize shutdown or favorable evidence. The state write runs off the
+event loop so position management can keep operating. Removing pressure does not automatically clear recovery
 or reopen execution. Unknown/nontransient persistence errors remain fatal.
 
 A controller holds one current diagnostic report; it creates no append-only
