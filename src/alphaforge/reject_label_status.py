@@ -81,6 +81,9 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                 declared_providers = set()
                 dynamic_universe = False
     run_ph = ",".join("?" for _ in run_ids) or "NULL"
+    archived_universe = False
+    if "storage_archives" in tables:
+        archived_universe = bool(conn.execute("SELECT 1 FROM storage_archives WHERE campaign_id=? AND state IN ('REMOVING','ARCHIVED')", (identity,)).fetchone())
     if dynamic_universe:
         dynamic_tables = {"burnin_universe_selection_links", "universe_selection_candidates"}
         if dynamic_tables.issubset(tables):
@@ -102,7 +105,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                 )
                 if row[0]
             }
-            dynamic_universe_evidence_available = dynamic_selection_link_count > 0
+            dynamic_universe_evidence_available = dynamic_selection_link_count > 0 and not archived_universe
         else:
             declared_symbols = set()
             dynamic_universe_evidence_available = False

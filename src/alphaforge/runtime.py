@@ -139,6 +139,16 @@ class LiveReconciliationProvider(ExchangeSnapshotProvider, Protocol):
 
 @dataclass(slots=True)
 class RuntimeConfig:
+    storage_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_enabled"))
+    storage_high_bytes: int= field(default_factory=lambda: canonical_field_default("storage_high_bytes"))
+    storage_low_bytes: int= field(default_factory=lambda: canonical_field_default("storage_low_bytes"))
+    storage_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_min_age_sec"))
+    storage_check_interval_sec: float= field(default_factory=lambda: canonical_field_default("storage_check_interval_sec"))
+    storage_batch_rows: int= field(default_factory=lambda: canonical_field_default("storage_batch_rows"))
+    storage_batch_seconds: float= field(default_factory=lambda: canonical_field_default("storage_batch_seconds"))
+    storage_free_reserve_bytes: int= field(default_factory=lambda: canonical_field_default("storage_free_reserve_bytes"))
+    storage_growth_budget_bytes_per_sec: int= field(default_factory=lambda: canonical_field_default("storage_growth_budget_bytes_per_sec"))
+    storage_archive_dir: str= field(default_factory=lambda: canonical_field_default("storage_archive_dir"))
     execution_mode: ExecutionMode = field(default_factory=lambda: ExecutionMode(canonical_field_default("execution_mode")))
     min_signal_score: float= field(default_factory=lambda: canonical_field_default("min_signal_score"))
     scan_interval_sec: float= field(default_factory=lambda: canonical_field_default("scan_interval_sec"))
@@ -375,6 +385,9 @@ class RuntimeOrchestrator:
     control_store: RuntimeControlStore | None = None
     selected_candidate_enricher: Callable[[list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]] | None = None
     mtf_context_provider: Any | None = None
+    _storage_controller: Any = field(default=None, init=False)
+    _storage_pressure: bool = field(default=False, init=False)
+    _storage_report: dict[str, Any] = field(default_factory=dict, init=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
@@ -999,13 +1012,13 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "storage_policy": self._storage_report, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
 
     def _execution_reconciliation_blocked(self) -> bool:
         if self.config.execution_mode == ExecutionMode.BACKTEST:
             return False
-        return bool(self._reconciliation_persistence_unhealthy or self._fail_closed_reason
+        return bool(self._storage_pressure or self._reconciliation_persistence_unhealthy or self._fail_closed_reason
                     or self._recovery_required or self._unknown_exchange_state
                     or self._resolver_provider_unavailable or self._resolver_provider_recovery_pending
                     or self._exchange_read_only_status == "UNAVAILABLE"
@@ -1097,7 +1110,50 @@ class RuntimeOrchestrator:
         if self._kill_switch_active():
             self._recovery_required = True; self._fail_closed_reason = self._fail_closed_reason or "KILL_SWITCH_ACTIVE"
 
+    async def _check_storage_pressure(self, *, startup: bool = False) -> bool:
+        if not self.metrics.persistence_enabled:
+            return False
+        engine = self._resolve_persistence_engine()
+        if engine is None or engine.dialect.name != "sqlite" or not engine.url.database or engine.url.database == ":memory:":
+            return False
+        from alphaforge.storage_policy import StorageController, StoragePolicy, database_path, disk_budget
+        if self._storage_controller is None:
+            self._storage_controller = StorageController(engine, StoragePolicy.from_config(self.config))
+        if startup:
+            budget = disk_budget(database_path(engine), self._storage_controller.policy)
+            if budget["status"] != "PASS":
+                self._storage_report = budget
+                self._runtime_status = "STARTUP_BLOCKED"
+                self._fail_closed_reason = "STORAGE_DISK_RESERVE_INSUFFICIENT"
+                raise RuntimeError(self._fail_closed_reason)
+            return False
+        report = await asyncio.to_thread(self._storage_controller.check)
+        if report is None:
+            return self._storage_pressure
+        self._storage_report = report
+        if report["blocked"]:
+            first_failure = not self._storage_pressure
+            self._storage_pressure = True
+            self._recovery_required = True
+            self._runtime_status = "RECOVERY_REQUIRED"
+            self._fail_closed_reason = "STORAGE_PRESSURE_RECOVERY_REQUIRED"
+            self._last_scan_gate_blockers = [self._fail_closed_reason]
+            if first_failure:
+                # Reserve is checked before physical exhaustion. Persist the
+                # recovery transition once, then keep management/reconciliation
+                # alive for outstanding exposure. Empty campaigns stop through
+                # the normal supervised finalization path.
+                self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
+                if (not self._active_positions and not self._pending_orders
+                        and not self._unknown_exchange_state and self._reconciliation_status == "CLEAN"):
+                    self.shutdown()
+                logger.warning("storage_pressure report=%s", report)
+        # Clearing disk pressure never implicitly reopens execution. Recovery
+        # requires the existing reconciliation/restart workflow.
+        return self._storage_pressure
+
     async def start(self) -> None:
+        await self._check_storage_pressure(startup=True)
         self._last_start_time = canonical_utc_timestamp()
         self._runtime_status = "STARTING"
         if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK}:
@@ -1246,6 +1302,9 @@ class RuntimeOrchestrator:
         if engine is None:
             self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_UNAVAILABLE"
             raise RuntimeError(self._fail_closed_reason)
+        from alphaforge.burnin_campaign import require_operational_campaign_evidence
+        with engine.connect() as archive_check:
+            require_operational_campaign_evidence(archive_check, campaign_id)
         observed = None
         mismatches: dict[str, dict[str, Any]] = {}
         reason_map = {
@@ -2818,6 +2877,8 @@ class RuntimeOrchestrator:
 
     async def _scan_once(self) -> None:
         self._sync_resolved_paper_positions()
+        if await self._check_storage_pressure():
+            return
         if self._kill_switch_active():
             self._last_scan_gate_blockers = ["KILL_SWITCH_ACTIVE"]
             return
@@ -7191,6 +7252,17 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
 def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeConfig:
     """Freeze typed application config into the runtime startup snapshot."""
     return RuntimeConfig(
+        storage_enabled=cfg.runtime.storage_enabled,
+        storage_high_bytes=cfg.runtime.storage_high_bytes,
+        storage_low_bytes=cfg.runtime.storage_low_bytes,
+        storage_min_age_sec=cfg.runtime.storage_min_age_sec,
+        storage_check_interval_sec=cfg.runtime.storage_check_interval_sec,
+        storage_batch_rows=cfg.runtime.storage_batch_rows,
+        storage_batch_seconds=cfg.runtime.storage_batch_seconds,
+        storage_free_reserve_bytes=cfg.runtime.storage_free_reserve_bytes,
+        storage_growth_budget_bytes_per_sec=cfg.runtime.storage_growth_budget_bytes_per_sec,
+        storage_archive_dir=cfg.runtime.storage_archive_dir,
+
         execution_mode=mode,
         min_signal_score=cfg.runtime.min_signal_score,
         scan_interval_sec=cfg.runtime.scan_interval_sec,

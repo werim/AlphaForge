@@ -19,6 +19,7 @@ Runtime-critical bounded retries use `alphaforge.sqlite_safety.run_sqlite_write_
 
 | Writer family | Primary call site | Authority | BUSY policy | Exhausted behavior | Scanner/runtime | Restart/idempotence evidence |
 |---|---|---|---|---|---|---|
+| Storage retention / archive removal | `storage_policy.StorageController` | Bounded maintenance with immutable scoped archival | Canonical writer guard + fresh BUSY retries | Explicit pressure blocker; new scans stop; exposure management stays | recovery-required / supervised | #620 archive/manifest/removal crash tests; cycle/hash capabilities |
 | Runtime heartbeat | `runtime_heartbeat.py`, `runtime._heartbeat_loop` | Operational safety evidence | Existing bounded contention handling | degraded; sustained failure -> recovery-required terminalization | controlled | heartbeat identity/state snapshots |
 | Reconciliation evidence | `runtime_state.persist_reconciliation_cycle` | Safety authority | Existing bounded fresh transaction retry | `ReconciliationPersistenceFailure`; execution remains blocked | controlled | cycle identity is idempotent |
 | Canonical reject bundle | `runtime._persist_reject` | Authoritative reject/evidence | Existing #550 bounded fresh-connection retry | `REJECT_PERSISTENCE_FAILED`, evidence degraded, recovery-required | scanner survives | stable reject/signal/decision/lifecycle IDs |

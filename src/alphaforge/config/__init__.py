@@ -73,6 +73,16 @@ def _resolve_database_url(env: Mapping[str, str]) -> str:
 
 @dataclass(slots=True)
 class RuntimeSettings:
+    storage_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_enabled"))
+    storage_high_bytes: int= field(default_factory=lambda: canonical_field_default("storage_high_bytes"))
+    storage_low_bytes: int= field(default_factory=lambda: canonical_field_default("storage_low_bytes"))
+    storage_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_min_age_sec"))
+    storage_check_interval_sec: float= field(default_factory=lambda: canonical_field_default("storage_check_interval_sec"))
+    storage_batch_rows: int= field(default_factory=lambda: canonical_field_default("storage_batch_rows"))
+    storage_batch_seconds: float= field(default_factory=lambda: canonical_field_default("storage_batch_seconds"))
+    storage_free_reserve_bytes: int= field(default_factory=lambda: canonical_field_default("storage_free_reserve_bytes"))
+    storage_growth_budget_bytes_per_sec: int= field(default_factory=lambda: canonical_field_default("storage_growth_budget_bytes_per_sec"))
+    storage_archive_dir: str= field(default_factory=lambda: canonical_field_default("storage_archive_dir"))
     execution_mode: str= field(default_factory=lambda: canonical_field_default("execution_mode"))
     paper_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_enabled"))
     live_enabled: bool= field(default_factory=lambda: canonical_field_default("live_enabled"))
@@ -451,7 +461,20 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     if (paper_position_management_shadow_enabled
             and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
         raise ValueError("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED is PAPER-only")
+    from alphaforge.storage_policy import StoragePolicy
+    StoragePolicy.from_values({name: record["value"] for name, record in managed.items()})
     runtime = RuntimeSettings(
+        storage_enabled=val("ALPHAFORGE_STORAGE_ENABLED"),
+        storage_high_bytes=val("ALPHAFORGE_STORAGE_HIGH_BYTES"),
+        storage_low_bytes=val("ALPHAFORGE_STORAGE_LOW_BYTES"),
+        storage_min_age_sec=val("ALPHAFORGE_STORAGE_MIN_AGE_SEC"),
+        storage_check_interval_sec=val("ALPHAFORGE_STORAGE_CHECK_INTERVAL_SEC"),
+        storage_batch_rows=val("ALPHAFORGE_STORAGE_BATCH_ROWS"),
+        storage_batch_seconds=val("ALPHAFORGE_STORAGE_BATCH_SECONDS"),
+        storage_free_reserve_bytes=val("ALPHAFORGE_STORAGE_FREE_RESERVE_BYTES"),
+        storage_growth_budget_bytes_per_sec=val("ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC"),
+        storage_archive_dir=val("ALPHAFORGE_STORAGE_ARCHIVE_DIR"),
+
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
         live_enabled=val("ALPHAFORGE_ENABLE_LIVE_TRADING"),
