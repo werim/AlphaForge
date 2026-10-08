@@ -155,7 +155,7 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
         "schema_version": selection.schema_version,
         "payload_json": payload_json,
     }
-    _execute(conn, """
+    cycle_insert = _execute(conn, """
         INSERT INTO universe_selection_cycles (
             cycle_id, decision_timestamp, execution_mode, selected_symbols_json,
             candidate_count, config_hash, strategy_config_hash, universe_hash,
@@ -168,6 +168,10 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
             :schema_version, :payload_json
         ) ON CONFLICT(cycle_id) DO NOTHING
     """, cycle_params)
+    if cycle_insert.rowcount not in (0, 1):
+        # Without a reliable write outcome we cannot safely distinguish an
+        # initially new cycle from a damaged existing record.
+        raise RuntimeError(f"UNIVERSE_SELECTION_CYCLE_WRITE_OUTCOME_UNKNOWN:{selection.cycle_id}")
     existing = _execute(
         conn,
         "SELECT evidence_hash, payload_json FROM universe_selection_cycles WHERE cycle_id=:cycle_id",
@@ -210,8 +214,12 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
             ),
         })
 
-    _execute_many(conn, """
-        INSERT INTO universe_selection_candidates (
+    # A replay must NEVER refill missing immutable candidate evidence. A cycle
+    # and all its candidates are one atomic production writer transaction. If
+    # historical candidates went missing, validation below fails closed.
+    if cycle_insert.rowcount == 1:
+        _execute_many(conn, """
+            INSERT INTO universe_selection_candidates (
             cycle_id, candidate_index, symbol, eligibility_state,
             exclusion_reasons_json, observed_inputs_json, ranking_components_json,
             ranking_score, ranking_order, selected, evidence_availability_json
@@ -220,7 +228,7 @@ def persist_universe_selection(conn: Any, selection: SelectedUniverse) -> bool:
             :exclusion_reasons_json, :observed_inputs_json, :ranking_components_json,
             :ranking_score, :ranking_order, :selected, :evidence_availability_json
         ) ON CONFLICT(cycle_id, candidate_index) DO NOTHING
-    """, candidate_params)
+        """, candidate_params)
 
     stored_rows = _execute(
         conn,
