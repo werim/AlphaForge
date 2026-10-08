@@ -82,33 +82,15 @@ def test_legacy_full_cycle_remains_readable_and_retryable(tmp_path):
     legacy_json = json.dumps(selection.as_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
     try:
         with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO universe_selection_cycles
-                (cycle_id,decision_timestamp,execution_mode,selected_symbols_json,
-                 candidate_count,config_hash,strategy_config_hash,universe_hash,
-                 evidence_hash,git_sha,source_provenance_json,ranking_version,
-                 schema_version,payload_json)
-                VALUES (:cycle_id,:decision_timestamp,:execution_mode,:selected_symbols_json,
-                        :candidate_count,:config_hash,:strategy_config_hash,:universe_hash,
-                        :evidence_hash,:git_sha,:source_provenance_json,:ranking_version,
-                        :schema_version,:payload_json)
-            """), {
-                "cycle_id": selection.cycle_id,
-                "decision_timestamp": selection.decision_timestamp,
-                "execution_mode": selection.execution_mode,
-                "selected_symbols_json": json.dumps(list(selection.selected_symbols), sort_keys=True),
-                "candidate_count": len(selection.candidates),
-                "config_hash": selection.config_hash,
-                "strategy_config_hash": selection.strategy_config_hash,
-                "universe_hash": selection.universe_hash,
-                "evidence_hash": selection.evidence_hash,
-                "git_sha": selection.git_sha,
-                "source_provenance_json": json.dumps(list(selection.source_provenance), sort_keys=True),
-                "ranking_version": selection.ranking_version,
-                "schema_version": selection.schema_version,
-                "payload_json": legacy_json,
-            })
-            assert persist_universe_selection(conn, selection)
+            # Model a complete pre-#622 cycle, including its normalized rows.
+            # Fixture-level trigger bypass is solely for version simulation:
+            # production data is never rewritten in place.
+            persist_universe_selection(conn, selection)
+            conn.execute(text("DROP TRIGGER trg_universe_selection_cycles_no_update"))
+            conn.execute(text(
+                "UPDATE universe_selection_cycles SET payload_json=:payload "
+                "WHERE cycle_id=:cycle"
+            ), {"payload": legacy_json, "cycle": selection.cycle_id})
         with engine.connect() as conn:
             assert load_persisted_universe_selection(conn, selection.cycle_id) == selection.as_dict()
             assert conn.execute(text(
@@ -116,6 +98,8 @@ def test_legacy_full_cycle_remains_readable_and_retryable(tmp_path):
             )).scalar_one() == legacy_json
         with engine.begin() as conn:
             assert persist_universe_selection(conn, selection)
+        with engine.connect() as conn:
+            assert load_persisted_universe_selection(conn, selection.cycle_id) == selection.as_dict()
     finally:
         engine.dispose()
 
