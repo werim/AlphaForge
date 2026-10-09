@@ -48,6 +48,12 @@ def test_protected_high_risk_paths_require_t0_through_t3(
     assert plan.selected_tests
 
 
+def test_storage_authority_routes_both_retention_regressions() -> None:
+    plan = _plan("src/alphaforge/storage_policy.py")
+    assert "tests/test_issue620_storage_policy.py" in plan.selected_tests
+    assert "tests/test_issue622_stats_only_retention.py" in plan.selected_tests
+
+
 def test_live_order_boundary_is_critical_and_requires_release_tier() -> None:
     plan = _plan("src/alphaforge/order.py")
     assert plan.risk_level == RiskLevel.CRITICAL

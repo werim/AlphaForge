@@ -189,6 +189,16 @@ def campaign_uses_dynamic_universe(campaign: Mapping[str, Any]) -> bool:
     return str((provenance or {}).get("universe_scope_mode") or "").upper() == DYNAMIC_UNIVERSE_SCOPE_MODE
 
 
+def campaign_uses_stats_only_retention(campaign: Mapping[str, Any]) -> bool:
+    provenance = campaign.get("source_provenance")
+    if not isinstance(provenance, Mapping):
+        try:
+            provenance = json.loads(str(campaign.get("source_provenance_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            provenance = {}
+    return str((provenance or {}).get("storage_retention_mode") or "").upper() == "PAPER_STATS_ONLY"
+
+
 def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",), dynamic_universe: bool = False) -> dict[str, Any]:
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
@@ -349,6 +359,15 @@ def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols
     if dynamic_universe:
         prov["universe_scope_mode"] = DYNAMIC_UNIVERSE_SCOPE_MODE
         prov["universe_scope_authority"] = "alphaforge.symbol_selector.build_selected_universe"
+    if runtime_config is not None and bool(getattr(runtime_config, "storage_stats_only_enabled", False)):
+        mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
+        if str(mode).upper() != "PAPER" or not dynamic_universe:
+            raise ValueError("PAPER_STATS_ONLY_REQUIRES_DYNAMIC_PAPER_CAMPAIGN")
+        from alphaforge.storage_policy import StoragePolicy
+        retention_policy = StoragePolicy.from_config(runtime_config)
+        prov["storage_retention_mode"] = "PAPER_STATS_ONLY"
+        prov["storage_policy_hash"] = retention_policy.identity_hash()
+        prov["qualification_semantics"] = "STATS_ONLY_NOT_QUALIFICATION_ELIGIBLE"
     if not prov: raise ValueError("missing provenance")
     provenance_scope = canonical_paper_source_exchanges(prov)
     identity_scope = tuple(sorted({str(value).strip().lower() for value in
@@ -855,6 +874,16 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     ]
     metrics["position_management_event_count"] = len(management_rows)
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
+    if campaign_uses_stats_only_retention(c):
+        from alphaforge.storage_policy import stats_only_campaign_summary
+        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection.driver_connection
+        retention = stats_only_campaign_summary(raw, campaign_id)
+        metrics["universe_evidence_mode"] = "PAPER_STATS_ONLY"
+        metrics["qualification_eligible"] = False
+        metrics["universe_retention"] = retention
+    else:
+        metrics["universe_evidence_mode"] = "FULL_REPLAY"
+        metrics["qualification_eligible"] = True
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     metrics["reject_candidate_feasibility_shadow"] = reject_candidate_feasibility_shadow(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
@@ -1046,6 +1075,16 @@ def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresho
         require_operational_campaign_evidence(read_conn, campaign_id)
         current = aggregate_campaign(read_conn, campaign_id)
         campaign = get_campaign(read_conn, campaign_id)
+        if campaign and campaign_uses_stats_only_retention(campaign):
+            return {
+                "campaign_id": campaign_id,
+                "qualification_id": None,
+                "verdict": "STATS_ONLY_NOT_QUALIFICATION_ELIGIBLE",
+                "aggregate_evidence_hash": current.get("evidence_hash"),
+                "aggregate_run_id": None,
+                "materialized": False,
+                "full_universe_replay_available": False,
+            }
         latest = None
         if campaign and campaign.get("latest_qualification_id"):
             latest = _exec(read_conn, """SELECT qualification_id,status,aggregate_evidence_hash
@@ -1254,6 +1293,8 @@ class BurnInCampaignRunner:
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
             c = get_campaign(conn, self.campaign_id) or {}
+            if campaign_uses_stats_only_retention(c):
+                return False
             count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
             agg = aggregate_campaign(conn, self.campaign_id)
             latest_hash = _exec(conn,"SELECT aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE qualification_id=:qid",{"qid":c.get("latest_qualification_id")}).scalar() if c.get("latest_qualification_id") else None

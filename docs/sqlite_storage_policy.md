@@ -97,6 +97,53 @@ report archived evidence as requiring replay; they cannot turn a partially
 removed scope into favorable empty evidence. Campaign resume, runtime attachment
 and qualification materialization refuse an archived operational scope.
 
+## Opt-in PAPER stats-only universe retention (#622)
+
+Stats-only retention is a separate, disabled-by-default policy for new dynamic
+PAPER campaign identities. It is never inherited by an existing campaign. The
+initial production budget is explicit canonical configuration:
+
+- `ALPHAFORGE_STORAGE_HIGH_BYTES=10737418240` (10 GiB fail-closed hard cap)
+- `ALPHAFORGE_STORAGE_STATS_ONLY_START_BYTES=8589934592` (8 GiB physical DB+WAL start)
+- `ALPHAFORGE_STORAGE_STATS_ONLY_TARGET_BYTES=5368709120` (5 GiB allocated-live target)
+- `ALPHAFORGE_STORAGE_LOW_BYTES=5368709120`
+- `ALPHAFORGE_STORAGE_STATS_ONLY_ENABLED=true`
+
+Cleanup starts at the physical watermark and stops when allocated live pages
+reach the target. Before the hard cap, protected rows are reported but do not
+by themselves stop scans. At the hard cap, the normal fail-closed storage gate
+still blocks new evidence producers if the target cannot be reached. Reusable
+pages do not mean the SQLite file shrank; no online `VACUUM` or WAL unlink is
+performed.
+
+Only `PAPER` cycles owned by a campaign whose immutable provenance contains the
+exact stats-only policy hash are considered. Cycles are processed oldest first,
+after a configured minimum age, while the configured newest-cycle window stays
+complete. Detail is pinned when the dependency graph is unknown, the cycle is
+shared, qualification authority exists, identity does not match, runtime
+exposure/recovery is unresolved, an order/position or reconciliation incident
+is nonterminal, or the cycle overlaps an unresolved reject/position outcome
+window. Missing or malformed proof is a blocker, never deletion permission.
+
+For each eligible cycle, the writer first reconstructs and verifies the full
+canonical universe hash. In one bounded `BEGIN IMMEDIATE` transaction it writes
+an immutable per-cycle rollup, appends a hash-chained cumulative campaign
+checkpoint, creates a connection-local capability bound to the original
+cycle/evidence/rollup hashes, and deletes link, candidate, then parent rows in
+foreign-key-safe order. The capability is removed before commit. Any error or
+crash rolls back rollup, checkpoint, capability and source deletes together.
+Restart therefore sees either complete source evidence or a complete verified
+tombstone/checkpoint, never a favorable partial state. Ordinary updates and
+deletes remain forbidden.
+
+Trading, reject-forward, decision, fill, position, lifecycle, portfolio-risk,
+expectancy, PnL/net-R, drawdown and reconciliation tables are outside the delete
+surface and remain canonical. Detailed historical universe replay is
+permanently unavailable for compacted cycles. Such campaigns report
+`PAPER_STATS_ONLY`, `full_universe_replay_available=false`, and
+`STATS_ONLY_NOT_QUALIFICATION_ELIGIBLE`; they must never be used as PAPER/SOAK,
+LIVE_PRECHECK or LIVE qualification evidence.
+
 ## Disk pressure and WAL
 
 Startup reserve is the configured free reserve (256 MiB), high-minus-low growth
@@ -126,8 +173,9 @@ it cannot authorize shutdown or favorable evidence. The state write runs off the
 event loop so position management can keep operating. Removing pressure does not automatically clear recovery
 or reopen execution. Unknown/nontransient persistence errors remain fatal.
 
-A controller holds one current diagnostic report; it creates no append-only
-maintenance table. Reports distinguish threshold, logical target, disk reserve,
+A controller holds one current diagnostic report; its only append-only
+maintenance history is the immutable stats-only rollup/checkpoint ledger.
+Reports distinguish threshold, logical target, disk reserve,
 rows/batches, verified archives, checkpoint backlog, protected scope and next
 action. PAPER/FAST/SOAK acceptance remains a separate gated workflow.
 

@@ -149,6 +149,11 @@ class RuntimeConfig:
     storage_free_reserve_bytes: int= field(default_factory=lambda: canonical_field_default("storage_free_reserve_bytes"))
     storage_growth_budget_bytes_per_sec: int= field(default_factory=lambda: canonical_field_default("storage_growth_budget_bytes_per_sec"))
     storage_archive_dir: str= field(default_factory=lambda: canonical_field_default("storage_archive_dir"))
+    storage_stats_only_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_stats_only_enabled"))
+    storage_stats_only_start_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_start_bytes"))
+    storage_stats_only_target_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_target_bytes"))
+    storage_stats_only_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_stats_only_min_age_sec"))
+    storage_stats_only_recent_cycles: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_recent_cycles"))
     execution_mode: ExecutionMode = field(default_factory=lambda: ExecutionMode(canonical_field_default("execution_mode")))
     min_signal_score: float= field(default_factory=lambda: canonical_field_default("min_signal_score"))
     scan_interval_sec: float= field(default_factory=lambda: canonical_field_default("scan_interval_sec"))
@@ -7275,6 +7280,11 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         storage_free_reserve_bytes=cfg.runtime.storage_free_reserve_bytes,
         storage_growth_budget_bytes_per_sec=cfg.runtime.storage_growth_budget_bytes_per_sec,
         storage_archive_dir=cfg.runtime.storage_archive_dir,
+        storage_stats_only_enabled=cfg.runtime.storage_stats_only_enabled,
+        storage_stats_only_start_bytes=cfg.runtime.storage_stats_only_start_bytes,
+        storage_stats_only_target_bytes=cfg.runtime.storage_stats_only_target_bytes,
+        storage_stats_only_min_age_sec=cfg.runtime.storage_stats_only_min_age_sec,
+        storage_stats_only_recent_cycles=cfg.runtime.storage_stats_only_recent_cycles,
 
         execution_mode=mode,
         min_signal_score=cfg.runtime.min_signal_score,
