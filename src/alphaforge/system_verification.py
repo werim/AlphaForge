@@ -82,7 +82,10 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue438_market_data_supervision.py",
     ),
     "NO_LOOKAHEAD": ("tests/test_multi_timeframe.py",),
-    "STORAGE_RETENTION": ("tests/test_issue620_storage_policy.py",),
+    "STORAGE_RETENTION": (
+        "tests/test_issue620_storage_policy.py",
+        "tests/test_issue622_stats_only_retention.py",
+    ),
     "PERSISTENCE_ATOMICITY": (
         "tests/test_issue550_atomic_reject_persistence.py",
         "tests/test_issue450_sqlite_concurrency.py",

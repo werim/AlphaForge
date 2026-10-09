@@ -38,6 +38,15 @@ No in-place migration, row replacement, soft fallback, or alternate economic
 authority is permitted. The `_storage_codec` marker is a representation
 version, **not** an economic schema-version bump.
 
+An explicitly opt-in `PAPER_STATS_ONLY` campaign may later replace an old,
+dependency-proven cycle with an immutable verified rollup and chained compaction
+checkpoint. That representation preserves statistical counts and source
+identity but deliberately cannot reconstruct candidate-level history. The
+loader returns `UNIVERSE_SELECTION_STATS_ONLY_NOT_REPLAYABLE` for such a cycle;
+it never treats a rollup as full replay or qualification evidence. See
+`docs/sqlite_storage_policy.md` for eligibility, atomic deletion and 10/8/5 GiB
+budget semantics.
+
 ## Replay and archival invariants
 
 Each new cycle and candidate record remains immutable. Insert-on-conflict is
@@ -50,17 +59,20 @@ candidate row counts alone are insufficient to prove an uncompromised payload.
 Storage-pressure recovery must still fail closed and preserve reconciliation
 and position management.
 
-## Qualification is not yet demonstrated
+## Qualification boundary
 
 Removing duplicated cycle payloads cuts one large source of disk amplification,
 but each **distinct scan** still produces a new immutable set of candidate
-rows. This patch is **not proof** that repeated 300-candidate scans over 3 or
-7 days will remain below 1 GiB. Qualification requires a measured
-write-amplification profile on an exact merged SHA/config, not extrapolation
-from an unrelated database or arbitrary changes to the storage watermark.
+rows. Full-replay campaigns therefore remain subject to their original storage
+budget and qualification requirements.
 
-Before a new #344 campaign: verify exact SHA, run protected regression/CI,
-measure per-scan bytes for cycles/candidates/indexes/WAL, compare scan cadence
-against duration, and demonstrate a safe sustained storage plan if the budget
-still fails. The paused pre-#622 campaign is diagnostic evidence only; do not
+Opt-in stats-only retention is load-tested with 300- and 525-candidate cycles,
+but that proves storage/reclaim semantics rather than trading acceptance. A
+stats-only campaign is intentionally not PAPER/SOAK/LIVE qualification evidence;
+its economic statistics remain diagnostic and operational.
+
+Before any new full-replay campaign: verify exact SHA, run protected
+regression/CI, measure per-scan bytes for cycles/candidates/indexes/WAL, compare
+scan cadence against duration, and demonstrate a safe sustained storage plan.
+The paused pre-#622 campaign is diagnostic evidence only; do not mutate or
 resume it as qualification for the new code.

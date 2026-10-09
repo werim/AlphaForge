@@ -286,6 +286,19 @@ def load_persisted_universe_selection(conn: Any, cycle_id: str) -> dict[str, Any
         FROM universe_selection_cycles WHERE cycle_id=:cycle_id
     """, {"cycle_id": cycle_id}).fetchone()
     if row is None:
+        has_rollups = _execute(
+            conn,
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='storage_universe_compaction_rollups'",
+        ).fetchone()
+        if has_rollups and _execute(
+            conn,
+            "SELECT 1 FROM storage_universe_compaction_rollups WHERE cycle_id=:cycle_id",
+            {"cycle_id": cycle_id},
+        ).fetchone():
+            raise ValueError(
+                f"UNIVERSE_SELECTION_STATS_ONLY_NOT_REPLAYABLE:{cycle_id}"
+            )
         raise ValueError(f"UNIVERSE_SELECTION_EVIDENCE_MISSING:{cycle_id}")
     (stored_id, decision_ts, mode, selected_json, count, config_hash, strategy_hash,
      universe_hash, evidence_hash, git_sha, providers_json, rank_version,

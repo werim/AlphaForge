@@ -83,6 +83,11 @@ class RuntimeSettings:
     storage_free_reserve_bytes: int= field(default_factory=lambda: canonical_field_default("storage_free_reserve_bytes"))
     storage_growth_budget_bytes_per_sec: int= field(default_factory=lambda: canonical_field_default("storage_growth_budget_bytes_per_sec"))
     storage_archive_dir: str= field(default_factory=lambda: canonical_field_default("storage_archive_dir"))
+    storage_stats_only_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_stats_only_enabled"))
+    storage_stats_only_start_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_start_bytes"))
+    storage_stats_only_target_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_target_bytes"))
+    storage_stats_only_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_stats_only_min_age_sec"))
+    storage_stats_only_recent_cycles: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_recent_cycles"))
     execution_mode: str= field(default_factory=lambda: canonical_field_default("execution_mode"))
     paper_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_enabled"))
     live_enabled: bool= field(default_factory=lambda: canonical_field_default("live_enabled"))
@@ -474,6 +479,11 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         storage_free_reserve_bytes=val("ALPHAFORGE_STORAGE_FREE_RESERVE_BYTES"),
         storage_growth_budget_bytes_per_sec=val("ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC"),
         storage_archive_dir=val("ALPHAFORGE_STORAGE_ARCHIVE_DIR"),
+        storage_stats_only_enabled=val("ALPHAFORGE_STORAGE_STATS_ONLY_ENABLED"),
+        storage_stats_only_start_bytes=val("ALPHAFORGE_STORAGE_STATS_ONLY_START_BYTES"),
+        storage_stats_only_target_bytes=val("ALPHAFORGE_STORAGE_STATS_ONLY_TARGET_BYTES"),
+        storage_stats_only_min_age_sec=val("ALPHAFORGE_STORAGE_STATS_ONLY_MIN_AGE_SEC"),
+        storage_stats_only_recent_cycles=val("ALPHAFORGE_STORAGE_STATS_ONLY_RECENT_CYCLES"),
 
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
