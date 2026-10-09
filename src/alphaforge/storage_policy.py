@@ -135,6 +135,37 @@ def disk_budget(path: Path, policy: StoragePolicy, *, duration_seconds=0):
             "status": "PASS" if free >= reserve else "STORAGE_DISK_RESERVE_INSUFFICIENT"}
 
 
+def full_replay_duration_budget(path: Path, policy: StoragePolicy, *, duration_seconds: float):
+    """Prove a configured full-replay run stays below its physical hard cap.
+
+    The growth rate is operator evidence. Zero means unmeasured, not zero
+    growth. Stats-only campaigns use a different, explicitly non-qualification
+    retention contract and must not use this full-replay calculation.
+    """
+    path = Path(path).expanduser().resolve()
+    current_physical = _size(path) + _size(Path(str(path) + "-wal"))
+    duration = max(0.0, float(duration_seconds))
+    rate = policy.growth_budget_bytes_per_sec
+    projected_growth = int(duration * rate)
+    projected_physical = current_physical + projected_growth
+    result = {
+        "current_physical_bytes": current_physical,
+        "duration_seconds": duration,
+        "growth_budget_bytes_per_sec": rate,
+        "projected_growth_bytes": projected_growth,
+        "projected_physical_bytes": projected_physical,
+        "high_bytes": policy.high_bytes,
+        "scope": "DYNAMIC_PAPER_FULL_REPLAY",
+    }
+    if duration <= 0:
+        return {**result, "status": "NOT_APPLICABLE"}
+    if rate <= 0:
+        return {**result, "status": "STORAGE_GROWTH_BUDGET_UNMEASURED"}
+    if projected_physical >= policy.high_bytes:
+        return {**result, "status": "STORAGE_HIGH_WATERMARK_INSUFFICIENT_FOR_DURATION"}
+    return {**result, "status": "PASS"}
+
+
 def inventory(path: str | Path, policy: StoragePolicy, *, detailed=True):
     path = Path(path).expanduser().resolve()
     with readonly(path) as conn:

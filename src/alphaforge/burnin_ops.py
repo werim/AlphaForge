@@ -501,8 +501,9 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         if critical and status != "PASS":
             blockers.append(name)
 
-    from alphaforge.storage_policy import StoragePolicy, disk_budget
-    storage_budget = disk_budget(Path(db), StoragePolicy.from_config(cfg.runtime), duration_seconds=expected_duration_seconds)
+    from alphaforge.storage_policy import StoragePolicy, disk_budget, full_replay_duration_budget
+    storage_policy = StoragePolicy.from_config(cfg.runtime)
+    storage_budget = disk_budget(Path(db), storage_policy, duration_seconds=expected_duration_seconds)
     add("disk_space_sufficient", "PASS" if storage_budget["status"] == "PASS" else "FAIL", storage_budget)
     if storage_budget["status"] != "PASS":
         # Refuse before DB bootstrap, write probe, recovery materialization or
@@ -510,6 +511,16 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         return {"status": "FAIL_CLOSED", "release_id": release_id, "campaign_id": None,
                 "checks": checks, "blockers": blockers,
                 "evidence_locations": {"unavailable_reason": "STORAGE_DISK_RESERVE_INSUFFICIENT"}}
+
+    if dynamic_universe and not storage_policy.stats_only_enabled and expected_duration_seconds > 0:
+        capacity = full_replay_duration_budget(
+            Path(db), storage_policy, duration_seconds=expected_duration_seconds,
+        )
+        add("full_replay_storage_capacity", "PASS" if capacity["status"] == "PASS" else "FAIL", capacity)
+        if capacity["status"] != "PASS":
+            return {"status": "FAIL_CLOSED", "release_id": release_id, "campaign_id": None,
+                    "checks": checks, "blockers": blockers,
+                    "evidence_locations": {"unavailable_reason": capacity["status"]}}
 
     env_audit = audit_config()
     dotenv = dotenv_status()

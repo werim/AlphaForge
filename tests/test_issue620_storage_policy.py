@@ -22,7 +22,7 @@ from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_sn
 from alphaforge.sqlite_safety import SQLiteBusyExhausted, run_sqlite_write_with_retry
 from alphaforge.storage_policy import (
     StorageController, StoragePolicy, archive_location, campaign_eligibility, checkpoint,
-    disk_budget, inventory, plan_telemetry, prune_telemetry, readonly,
+    disk_budget, full_replay_duration_budget, inventory, plan_telemetry, prune_telemetry, readonly,
     remove_archived_batch, verified_archive, verify_manifest,
 )
 from alphaforge.universe_evidence import UNIVERSE_SELECTION_DDL, persist_universe_selection
@@ -474,6 +474,37 @@ def test_growth_duration_adds_configured_budget_without_fabricated_rate():
     p=policy(growth_budget_bytes_per_sec=1000)
     assert p.reserve(duration_seconds=86400)-p.reserve() == 86400000
     assert policy().reserve(duration_seconds=86400) == policy().reserve()
+
+
+def test_full_replay_duration_budget_requires_measured_rate_and_capacity(tmp_path):
+    db_path = tmp_path / 'future.db'
+    unknown = full_replay_duration_budget(db_path, policy(), duration_seconds=3600)
+    assert unknown['status'] == 'STORAGE_GROWTH_BUDGET_UNMEASURED'
+    assert unknown['projected_growth_bytes'] == 0
+
+    measured = policy(high_bytes=10_000, low_bytes=5_000, growth_budget_bytes_per_sec=100)
+    insufficient = full_replay_duration_budget(db_path, measured, duration_seconds=100)
+    assert insufficient['status'] == 'STORAGE_HIGH_WATERMARK_INSUFFICIENT_FOR_DURATION'
+    assert insufficient['projected_physical_bytes'] == 10_000
+
+    sufficient = full_replay_duration_budget(db_path, replace(measured, high_bytes=10_001), duration_seconds=100)
+    assert sufficient['status'] == 'PASS'
+
+
+def test_dynamic_full_replay_preflight_fails_before_bootstrap_when_growth_is_unmeasured(db,tmp_path,monkeypatch):
+    import alphaforge.burnin_ops as ops
+    monkeypatch.setenv('ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC', '0')
+    monkeypatch.setenv('ALPHAFORGE_STORAGE_STATS_ONLY_ENABLED', 'false')
+    monkeypatch.setattr(ops,'_connect',lambda p:pytest.fail('capacity failure must precede bootstrap/write probes'))
+    output=tmp_path/'preflight-full-replay'
+    result=ops.preflight(
+        db.url.database, 'issue344', [], ['1h'], dynamic_universe=True,
+        expected_duration_seconds=3600, output_dir=output,
+    )
+    assert result['status'] == 'FAIL_CLOSED'
+    assert result['blockers'] == ['full_replay_storage_capacity']
+    assert result['evidence_locations']['unavailable_reason'] == 'STORAGE_GROWTH_BUDGET_UNMEASURED'
+    assert not output.exists()
 
 
 def test_missing_immutable_domain_data_is_not_archivable(db,tmp_path):
