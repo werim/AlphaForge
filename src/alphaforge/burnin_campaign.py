@@ -1548,6 +1548,7 @@ class BurnInCampaignRunner:
         os.environ["EXECUTION_MODE"] = "PAPER"
         self._stop_event = asyncio.Event()
         runtime = None
+        controlled_storage_exit: dict[str, Any] | None = None
         tasks: list[asyncio.Task[Any]] = []
         try:
             if self.runtime_factory is None:
@@ -1592,6 +1593,44 @@ class BurnInCampaignRunner:
                     status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
                 if status in {"STARTING", "RUNNING"}:
                     if task.get_name() == "phase8_runtime_start":
+                        # Only the attached runtime's persisted, scoped recovery
+                        # snapshot can distinguish a deliberate storage stop from
+                        # an unexpected normal return. Never trust in-memory flags.
+                        with self.engine.connect() as conn:
+                            campaign = get_campaign(conn, self.campaign_id) or {}
+                            try:
+                                row = conn.exec_driver_sql("""
+                                SELECT id,runtime_status,fail_closed_reason,
+                                       active_position_count,pending_order_count,
+                                       unknown_exchange_state,reconciliation_status,
+                                       recovery_action_required,diagnostics_json
+                                FROM runtime_state_snapshots
+                                WHERE campaign_id=? AND burnin_run_id=?
+                                  AND instance_id=? AND startup_id=? AND mode='PAPER'
+                                ORDER BY id DESC LIMIT 1
+                                """, (self.campaign_id, campaign.get("active_run_id"),
+                                      getattr(runtime, "runtime_instance_id", None),
+                                      getattr(runtime, "startup_id", None))).mappings().first()
+                            except OperationalError:
+                                # Missing/unreadable proof is an unexpected exit.
+                                row = None
+                        if row and (row["runtime_status"] == "RECOVERY_REQUIRED"
+                                    and row["fail_closed_reason"] == "STORAGE_PRESSURE_RECOVERY_REQUIRED"
+                                    and row["recovery_action_required"] == 1
+                                    and row["active_position_count"] == 0
+                                    and row["pending_order_count"] == 0
+                                    and row["unknown_exchange_state"] == 0
+                                    and row["reconciliation_status"] == "CLEAN"):
+                            try:
+                                report = json.loads(row["diagnostics_json"] or "{}").get("storage_policy")
+                            except (TypeError, ValueError):
+                                report = None
+                            if isinstance(report, dict) and report.get("blocked") is True:
+                                controlled_storage_exit = {"storage_report": {**report, "recovery_state_persisted": True},
+                                                           "recovery_snapshot_id": row["id"],
+                                                           "runtime_instance_id": runtime.runtime_instance_id,
+                                                           "startup_id": runtime.startup_id}
+                                raise RuntimeError("STORAGE_PRESSURE_RECOVERY_REQUIRED")
                         raise RuntimeError("RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING")
                     raise RuntimeError(f"SUPERVISOR_EXITED_WHILE_CAMPAIGN_RUNNING:{task.get_name()}")
             return {"status": "STOPPED", "campaign_id": self.campaign_id}
@@ -1599,14 +1638,16 @@ class BurnInCampaignRunner:
             with self.engine.begin() as conn:
                 campaign = get_campaign(conn, self.campaign_id) or {}
                 if campaign.get("campaign_status") in {"STARTING", "RUNNING"}:
+                    reason = "STORAGE_PRESSURE_RECOVERY_REQUIRED" if controlled_storage_exit else "RUNTIME_SUPERVISION_FAILED"
                     terminalize_active_campaign_run(
                         conn,
                         self.campaign_id,
-                        run_status="FAILED",
-                        campaign_status="FAILED",
-                        reason="RUNTIME_SUPERVISION_FAILED",
-                        event_type="RUNTIME_SUPERVISION_FAILED",
-                        details={"exception_type": exc.__class__.__name__, "message": str(exc)},
+                        run_status="RECOVERY_REQUIRED" if controlled_storage_exit else "FAILED",
+                        campaign_status="RECOVERY_REQUIRED" if controlled_storage_exit else "FAILED",
+                        reason=reason,
+                        event_type=reason,
+                        details={"exception_type": exc.__class__.__name__, "message": str(exc),
+                                 **(controlled_storage_exit or {})},
                     )
             raise
         finally:

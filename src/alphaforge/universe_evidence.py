@@ -87,6 +87,8 @@ UNIVERSE_SELECTION_DDL: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS ix_burnin_universe_selection_links_scope ON burnin_universe_selection_links(campaign_id, burnin_run_id, decision_timestamp)",
+    "CREATE INDEX IF NOT EXISTS ix_burnin_universe_selection_links_recent ON burnin_universe_selection_links(campaign_id, decision_timestamp DESC, cycle_id DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_burnin_universe_selection_links_cycle ON burnin_universe_selection_links(cycle_id)",
     """
     CREATE TRIGGER IF NOT EXISTS trg_burnin_universe_selection_links_no_update
     BEFORE UPDATE ON burnin_universe_selection_links

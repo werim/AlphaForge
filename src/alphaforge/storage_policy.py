@@ -630,42 +630,49 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
             return {"cycles": [], "reason": "OUTSTANDING_OR_UNKNOWN_SAFETY_STATE"}
 
     cutoff = float(time.time() if now is None else now) - policy.stats_only_min_age_sec
+    # Scan oldest candidates through the time index. A window rank over every
+    # campaign/cycle materializes the whole universe before LIMIT or the budget
+    # can protect us; the indexed newer-link probe only needs the first N rows.
     cursor = conn.execute("""
-        WITH ranked AS (
-          SELECT l.campaign_id,l.burnin_run_id,c.*,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY l.campaign_id
-                   ORDER BY c.decision_timestamp DESC,c.cycle_id DESC
-                 ) AS recent_rank,
-                 COUNT(*) OVER (PARTITION BY c.cycle_id) AS link_count
-          FROM universe_selection_cycles c
-          JOIN burnin_universe_selection_links l ON l.cycle_id=c.cycle_id
-        )
-        SELECT r.*,bc.config_hash AS campaign_config_hash,
+        SELECT l.campaign_id,l.burnin_run_id,l.decision_timestamp AS link_decision_timestamp,c.*,
+               (SELECT COUNT(*) FROM burnin_universe_selection_links shared
+                WHERE shared.cycle_id=c.cycle_id) AS link_count,
+               bc.config_hash AS campaign_config_hash,
                bc.strategy_config_hash AS campaign_strategy_config_hash,
                bc.git_commit AS campaign_git_commit,
                bc.source_provenance_json AS campaign_source_provenance_json,
                bc.latest_qualification_id,
                bc.qualification_status
-        FROM ranked r
-        JOIN burnin_campaigns bc ON bc.campaign_id=r.campaign_id
+        FROM universe_selection_cycles c
+        JOIN burnin_universe_selection_links l ON l.cycle_id=c.cycle_id
+        JOIN burnin_campaigns bc ON bc.campaign_id=l.campaign_id
         JOIN burnin_campaign_runs cr
-          ON cr.campaign_id=r.campaign_id AND cr.burnin_run_id=r.burnin_run_id
-        JOIN burnin_runs br ON br.burnin_run_id=r.burnin_run_id
-        WHERE r.execution_mode='PAPER' AND br.execution_mode='PAPER'
+          ON cr.campaign_id=l.campaign_id AND cr.burnin_run_id=l.burnin_run_id
+        JOIN burnin_runs br ON br.burnin_run_id=l.burnin_run_id
+        WHERE c.execution_mode='PAPER' AND br.execution_mode='PAPER'
           AND br.git_commit=bc.git_commit AND br.config_hash=bc.config_hash
-          AND r.decision_timestamp<? AND r.recent_rank>?
+          AND c.decision_timestamp<?
+          AND EXISTS (
+            SELECT 1 FROM burnin_universe_selection_links newer
+            WHERE newer.campaign_id=l.campaign_id
+              AND (newer.decision_timestamp>l.decision_timestamp
+                   OR (newer.decision_timestamp=l.decision_timestamp
+                       AND newer.cycle_id>l.cycle_id))
+            LIMIT 1 OFFSET ?
+          )
           AND NOT EXISTS (
             SELECT 1 FROM storage_universe_compaction_rollups s
-            WHERE s.cycle_id=r.cycle_id
+            WHERE s.cycle_id=c.cycle_id
           )
-        ORDER BY r.decision_timestamp,r.cycle_id
-    """, (cutoff, policy.stats_only_recent_cycles))
-    rows = [_mapping(cursor, row) for row in cursor.fetchall()]
+        ORDER BY c.decision_timestamp,c.cycle_id
+    """, (cutoff, policy.stats_only_recent_cycles - 1))
     chosen: list[dict[str, Any]] = []
     budget = 0
+    scanned = 0
     blocked_reasons: list[str] = []
-    for row in rows:
+    for raw_row in cursor:
+        scanned += 1
+        row = _mapping(cursor, raw_row)
         try:
             provenance = json.loads(row["campaign_source_provenance_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
@@ -689,6 +696,9 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
             continue
         if int(row["link_count"]) != 1:
             blocked_reasons.append("SHARED_CYCLE_PROTECTED")
+            continue
+        if float(row["decision_timestamp"]) != float(row["link_decision_timestamp"]):
+            blocked_reasons.append("CYCLE_LINK_TIMESTAMP_MISMATCH")
             continue
         if row["git_sha"] != row["campaign_git_commit"]:
             blocked_reasons.append("CYCLE_CAMPAIGN_IDENTITY_MISMATCH")
@@ -739,6 +749,7 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
         blocked_reasons[0] if blocked_reasons else "PROTECTED_OR_TOO_RECENT"
     )
     return {"cycles": chosen, "reason": reason, "planned_rows": budget,
+            "scanned_cycles": scanned, "eligible_cycles": len(chosen),
             "blockers": sorted(set(blocked_reasons))}
 
 
@@ -798,7 +809,7 @@ def stats_only_campaign_summary(conn, campaign_id: str) -> dict[str, Any]:
     tab = tables(conn)
     if not {"storage_universe_compaction_rollups", "storage_universe_compaction_checkpoints"} <= tab:
         return {"status": "NO_STATS_ONLY_COMPACTION", "campaign_id": campaign_id,
-                "qualification_eligible": True, "full_universe_replay_available": True}
+                "qualification_eligible": False, "full_universe_replay_available": False}
     rollup_cursor = conn.execute("""
         SELECT * FROM storage_universe_compaction_rollups
         WHERE campaign_id=? ORDER BY decision_timestamp,cycle_id
@@ -811,7 +822,7 @@ def stats_only_campaign_summary(conn, campaign_id: str) -> dict[str, Any]:
     checkpoints = [_mapping(checkpoint_cursor, row) for row in checkpoint_cursor.fetchall()]
     if not rollups and not checkpoints:
         return {"status": "NO_STATS_ONLY_COMPACTION", "campaign_id": campaign_id,
-                "qualification_eligible": True, "full_universe_replay_available": True}
+                "qualification_eligible": False, "full_universe_replay_available": False}
     if len(rollups) != len(checkpoints):
         raise ValueError("STATS_ONLY_LEDGER_INCOMPLETE")
     for rollup in rollups:
@@ -861,11 +872,12 @@ def compact_stats_only_universe_batch(engine, policy: StoragePolicy):
     compacted_at = datetime.now(timezone.utc).isoformat()
 
     def operation(conn):
+        started = time.monotonic()
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         ensure_stats_only_schema(conn)
         raw = conn.connection.driver_connection
-        plan = plan_stats_only_universe(raw, policy)
         deadline = time.monotonic() + policy.batch_seconds
+        plan = plan_stats_only_universe(raw, policy)
         removed = 0
         compacted = 0
         validated_campaigns: set[str] = set()
@@ -939,7 +951,12 @@ def compact_stats_only_universe_batch(engine, policy: StoragePolicy):
         finally:
             raw.create_function("storage_stats_only_authorize", 1, lambda value: 0)
         return {"rows_removed": removed, "cycles_compacted": compacted,
-                "reason": plan["reason"], "blockers": plan.get("blockers", [])}
+                "reason": plan["reason"], "blockers": plan.get("blockers", []),
+                "scanned_cycles": plan["scanned_cycles"],
+                "eligible_cycles": plan["eligible_cycles"],
+                "planned_rows": plan["planned_rows"],
+                "elapsed_seconds": time.monotonic() - started,
+                "policy_hash": policy.identity_hash()}
 
     return run_bounded_maintenance_write(
         engine, policy, operation, operation_name="storage_stats_only_universe_retention"
@@ -1248,11 +1265,12 @@ class StorageController:
             try:
                 if self.policy.stats_only_enabled and (self.stats_cleaning or disk_pressure):
                     result = compact_stats_only_universe_batch(self.engine, self.policy)
+                    report["stats_only_maintenance"] = dict(result)
                 else:
                     result = prune_telemetry(self.engine, self.policy)
-                result_blockers = result.pop("blockers", [])
+                result_blockers = result.get("blockers", [])
                 report.update(result)
-                report["blockers"].extend(result_blockers)
+                report["blockers"] = list(result_blockers)
                 report["batches"] = int(result["rows_removed"] > 0)
                 if not result["rows_removed"]:
                     telemetry = prune_telemetry(self.engine, self.policy)
@@ -1279,12 +1297,15 @@ class StorageController:
                     report["checkpoint"] = checkpoint(self.engine, truncate=True)
             except SQLiteBusyExhausted:
                 report["blockers"].append("STORAGE_WRITER_BUSY")
+                report["maintenance_error"] = {"type": "SQLiteBusyExhausted", "reason": "STORAGE_WRITER_BUSY"}
             except (sqlite3.Error, OperationalError) as exc:
                 if not is_sqlite_full_error(exc):
                     raise
                 report["blockers"].append("STORAGE_ARCHIVE_OR_MAINTENANCE_DISK_FULL")
+                report["maintenance_error"] = {"type": type(exc).__name__, "reason": "STORAGE_ARCHIVE_OR_MAINTENANCE_DISK_FULL", "message": str(exc)}
             except (ValueError, TimeoutError, OSError) as exc:
                 report["blockers"].append(str(exc))
+                report["maintenance_error"] = {"type": type(exc).__name__, "reason": str(exc)}
         after = inventory(path, self.policy, detailed=False)
         report["after"] = after
         if after["allocated_live_bytes"] <= self.policy.low_bytes:
