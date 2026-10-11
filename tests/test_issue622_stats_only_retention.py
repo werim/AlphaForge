@@ -1,6 +1,7 @@
 """#622: opt-in PAPER stats-only universe retention is safe and explicit."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -394,6 +395,98 @@ def test_stats_only_runtime_preserves_historical_qualification_protection(tmp_pa
         assert "QUALIFICATION_AUTHORITY_PROTECTED" in result.get("blockers", [])
         with engine.connect() as conn:
             assert conn.exec_driver_sql("SELECT * FROM burnin_qualification_snapshots").all() == snapshots
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("strategy_changes", [
+    {},
+    {"mtf_guided_signal_generation_enabled": False, "enable_state_direction_resolution": True},
+    {"mtf_execution_confirmation_mode": "SHADOW"},
+])
+def test_runtime_scan_uses_campaign_strategy_identity_for_compaction(tmp_path, monkeypatch, strategy_changes):
+    from alphaforge.burnin_campaign import start_or_resume_campaign
+    from dataclasses import fields
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+
+    settings = configured_runtime()
+    cfg = RuntimeConfig(
+        execution_mode=ExecutionMode.PAPER, paper_fee_bps=4,
+        **{field.name: getattr(settings, field.name) for field in fields(RuntimeConfig) if field.name.startswith("storage_")},
+        **strategy_changes,
+    )
+    policy = StoragePolicy.from_config(cfg)
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'runtime-selection.db'}")
+    release = "ISSUE626_SELECTOR_IDENTITY"
+    monkeypatch.setenv("ALPHAFORGE_RELEASE_ID", release)
+    old_time = time.time() - 100
+    candidates = [{
+        "symbol": f"S{i:04d}USDT", "source_exchange": "binance",
+        "market_ts": old_time, "market_observed_at": old_time,
+        "market_data_source": "TEST_BINANCE_PUBLIC",
+        "volume_24h_usdt": 200_000_000 - i * 10_000,
+        "spread_pct": 0.0001, "expected_slippage_pct": 0.0002,
+        "volatility_pct": 0.03, "funding_rate_pct": 0.0,
+        "funding_status": "MEASURED", "trend_strength": 0.8,
+        "chop_score": 0.1, "liquidity_score": 0.7,
+    } for i in range(20)]
+
+    async def scanner():
+        return candidates
+
+    async def process(_self, _selection):
+        pass
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    monkeypatch.setattr(RuntimeOrchestrator, "_allocate_selected_candidates", lambda *args, **kwargs: True)
+    try:
+        with engine.begin() as conn:
+            campaign = create_campaign(
+                conn, release_id=release, duration_days=1, symbols=[], intervals=["1h"],
+                runtime_config=cfg, dynamic_universe=True,
+            )
+            run_id = start_or_resume_campaign(conn, campaign.campaign_id)["burnin_run_id"]
+        runtime = RuntimeOrchestrator(
+            config=cfg, ai_brain=None, market_scanner=scanner, persistence_engine=engine,
+        )
+        runtime._attach_phase8_campaign(campaign.campaign_id)
+        with monkeypatch.context() as clock:
+            clock.setattr(time, "time", lambda: old_time + runtime.metrics.scans)
+            for _ in range(3):
+                asyncio.run(runtime._scan_once())
+        save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+            mode="PAPER", requested_mode="PAPER", actual_mode="PAPER",
+            runtime_status="OPERATING", instance_id=runtime.runtime_instance_id,
+            campaign_id=campaign.campaign_id, burnin_run_id=run_id,
+            active_position_count=0, pending_order_count=0, recovery_action_required=False,
+            unknown_exchange_state=False, reconciliation_status="CLEAN",
+        ))
+        with engine.connect() as conn:
+            cycles = conn.exec_driver_sql("SELECT strategy_config_hash FROM universe_selection_cycles").scalars().all()
+        assert len(cycles) == 3
+        assert set(cycles) == {campaign.strategy_config_hash}
+        runtime._generate_burnin_snapshot(reason="shutdown")
+        result = compact_stats_only_universe_batch(engine, policy)
+        assert result["cycles_compacted"] > 0, result
+        assert "CYCLE_CAMPAIGN_IDENTITY_MISMATCH" not in result.get("blockers", [])
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("SELECT COUNT(*) FROM burnin_qualification_snapshots").scalar_one() == 0
+    finally:
+        engine.dispose()
+
+
+def test_stats_only_compaction_still_protects_genuine_strategy_drift(tmp_path):
+    engine, policy, _ = build_db(tmp_path, candidates=20)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("UPDATE burnin_campaigns SET strategy_config_hash='different-strategy'")
+            conn.exec_driver_sql("UPDATE burnin_runs SET strategy_config_hash='different-strategy'")
+            before = conn.exec_driver_sql("SELECT COUNT(*) FROM universe_selection_candidates").scalar_one()
+        result = compact_stats_only_universe_batch(engine, policy)
+        assert result["cycles_compacted"] == 0
+        assert "CYCLE_CAMPAIGN_IDENTITY_MISMATCH" in result.get("blockers", [])
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("SELECT COUNT(*) FROM universe_selection_candidates").scalar_one() == before
     finally:
         engine.dispose()
 
