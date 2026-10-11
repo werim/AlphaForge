@@ -2962,14 +2962,9 @@ class RuntimeOrchestrator:
             "universe_excluded_symbols": self.config.universe_excluded_symbols,
             "universe_max_evidence_age_sec": self.config.universe_max_evidence_age_sec,
         })
-        strategy_config_hash = burnin_config_hash({
-            "min_signal_score": self.config.min_signal_score,
-            "min_effective_rr": self.config.min_effective_rr,
-            "min_rr": self.config.min_rr,
-            "regime_direction_threshold": self.config.regime_direction_threshold,
-            "setup_direction_threshold": self.config.setup_direction_threshold,
-            "execution_direction_threshold": self.config.execution_direction_threshold,
-        })
+        # Selector cycles must use the same strategy identity as campaign
+        # creation/attachment, including guided/state/shadow configuration.
+        strategy_config_hash = self._phase8_runtime_hashes()["strategy_config_hash"]
         universe_selection = build_selected_universe(
             candidates,
             universe_constraints,
