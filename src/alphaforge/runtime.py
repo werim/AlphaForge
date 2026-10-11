@@ -1873,6 +1873,15 @@ class RuntimeOrchestrator:
             self._burnin_evidence_incomplete = True
             return
         try:
+            # Continuations inherit the campaign's persisted retention contract.
+            # A runtime snapshot would become qualification authority and pin all
+            # stats-only cycles, including on pause/shutdown before compaction.
+            from alphaforge.burnin_campaign import campaign_uses_stats_only_retention
+            with engine.connect() as conn:
+                run = conn.execute(text("SELECT source_provenance_json FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": self._burnin_run_id}).mappings().first()
+            if run and campaign_uses_stats_only_retention(run):
+                self._last_burnin_snapshot_ts = time.time()
+                return
             snap = BurnInQualificationEngine(engine).evaluate(self._burnin_run_id)
             self.metrics.burnin_snapshots += 1
             self._last_burnin_snapshot_ts = time.time()
