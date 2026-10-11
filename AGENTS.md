@@ -620,3 +620,34 @@ Distinguish clearly between:
 These are not interchangeable.
 
 Execution-aware honesty is mandatory.
+
+---
+
+# Codex Remote Engineering Efficiency (three-task baseline)
+
+Optimize verified engineering value per total consumed resource, subject to every safety, evidence, testing, qualification and operator gate above. This is workflow measurement only; it must not change production behavior, add a service, or trigger extra tests/CI.
+
+For the next three **real AlphaForge development tasks after this standardization change**, keep the current model and reasoning effort fixed when the environment permits. Do not count this documentation change as a baseline task. Before implementation, record the issue/PR, bounded acceptance outcomes, and complexity (low/medium/high with a brief reason) in the task's existing issue or PR. One verified work unit (VWU) is one predeclared acceptance outcome satisfied by the implementation and its required evidence; do not inflate units after the fact or use complexity as an uncalibrated multiplier. Partial, failing and unverified outcomes are not completed VWU. Mark pending CI separately; merging alone does not verify an outcome. Keep one standard record per task in its existing PR description (or issue comment if no PR), updating that record as evidence matures. Label the baseline tasks 1/3, 2/3 and 3/3 there. Preserve the initial scope and note any justified scope changes.
+
+Record measured model credits/usage and reasoning effort, available CI billed compute minutes or actual monetary cost, failed attempts, rework and causes, and redundant reads/tests with reasons. Use native telemetry and exact-head CI evidence; never estimate missing usage or run extra CI merely to measure it. Distinguish repeated work required by changed code or a failed gate from avoidable repetition. Use current context, targeted reads, focused tests, and broader tests proportional to risk; do not weaken tests, CI gates or acceptance thresholds for efficiency.
+
+Canonical metric: **Efficiency = verified VWU / total normalized cost (TNC)**. Compute TNC only if model consumption, CI consumption and rework can be valued in one documented, reliable monetary unit; include rework consumption without double counting it against already counted model/CI consumption. Otherwise report model credits and CI compute minutes/cost separately and mark TNC and combined efficiency **N/A**. If usage coverage is incomplete, mark the affected ratio N/A and state the missing portion; never substitute zero. Secondary indicators, where measurable, are VWU/model credits, VWU/CI compute minutes, first-pass CI success, rework rate, avoidable repeat read/test rate, and total task cost. A pending or failed task has no completed efficiency score; report its costs and status separately.
+
+Use this compact task record (N/A with coverage note when unavailable):
+
+| Field | Value |
+| --- | --- |
+| Baseline task / Issue / PR / exact SHA | |
+| Model / effort; predeclared complexity and acceptance outcomes | |
+| Verified VWU; pending/unverified outcomes | |
+| Model credits / usage and coverage | |
+| CI billed compute minutes / monetary cost and coverage | |
+| Repeated reads/tests; avoidable count and cause | |
+| Rework attempts, cause and included consumption | |
+| Focused tests; exact-head CI result / first pass | |
+| TNC (unit, conversion source, coverage) | |
+| Efficiency (VWU/TNC or N/A); separate ratios where valid | |
+
+After task 3/3, report aggregate verified VWU, model usage, CI cost, comparable per-task efficiency, the three largest evidenced avoidable cost sources and optimizations with expected benefit, risk and verification method. Do not sum incompatible units or claim a model winner from three heterogeneous tasks. Retain the model; recommend a controlled alternative test only after comparable tasks show at least 20% lower measured TNC without worse CI success, safety or production quality. Never change model automatically.
+
+Respect the current SOAK and merge restrictions. Wait for the user's CI green/fail result; do not automatically poll CI. Pending CI is pending evidence, and the task record remains open until verification is available.
