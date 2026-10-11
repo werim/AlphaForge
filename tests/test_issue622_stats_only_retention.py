@@ -317,6 +317,87 @@ def test_stats_only_without_rollups_never_looks_qualification_eligible(tmp_path)
         engine.dispose()
 
 
+@pytest.mark.parametrize("reason", ["periodic", "shutdown"])
+@pytest.mark.parametrize("resumed", [False, True])
+def test_stats_only_runtime_snapshot_keeps_compaction_eligible(tmp_path, reason, resumed):
+    from alphaforge.burnin_campaign import pause_campaign, start_or_resume_campaign
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+
+    engine, policy, _ = build_db(tmp_path, candidates=20)
+    try:
+        run_id = RUN
+        if resumed:
+            with engine.begin() as conn:
+                pause_campaign(conn, CID)
+                run_id = start_or_resume_campaign(conn, CID, resume=True)["burnin_run_id"]
+        runtime = RuntimeOrchestrator(
+            config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+            ai_brain=None, market_scanner=lambda: None, persistence_engine=engine,
+        )
+        # A fresh runtime uses the persisted continuation contract even when its
+        # config defaults do not opt in to stats-only retention.
+        runtime._burnin_run_id = run_id
+        runtime._generate_burnin_snapshot(reason=reason)
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("SELECT COUNT(*) FROM burnin_qualification_snapshots").scalar_one() == 0
+            assert conn.exec_driver_sql("SELECT COUNT(*) FROM burnin_execution_metrics WHERE burnin_run_id=?", (run_id,)).scalar_one() == 1
+        assert runtime.metrics.burnin_snapshots == 0
+        assert runtime._last_burnin_snapshot_ts > 0
+        assert runtime._burnin_evidence_incomplete is False
+        assert runtime._fail_closed_reason is None
+        result = compact_stats_only_universe_batch(engine, policy)
+        assert result["cycles_compacted"] > 0, result
+        assert "QUALIFICATION_AUTHORITY_PROTECTED" not in result.get("blockers", [])
+    finally:
+        engine.dispose()
+
+
+def test_full_replay_runtime_still_creates_qualification_snapshot(tmp_path):
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+
+    engine, _, _ = build_db(tmp_path, candidates=20, stats_only=False)
+    try:
+        runtime = RuntimeOrchestrator(
+            config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, storage_stats_only_enabled=True),
+            ai_brain=None, market_scanner=lambda: None, persistence_engine=engine,
+        )
+        runtime._burnin_run_id = RUN
+        runtime._generate_burnin_snapshot(reason="shutdown")
+        with engine.connect() as conn:
+            snapshots = conn.exec_driver_sql("SELECT qualification_id FROM burnin_qualification_snapshots").all()
+        assert len(snapshots) == 1
+        assert runtime.metrics.burnin_snapshots == 1
+        assert runtime._burnin_evidence_incomplete is False
+    finally:
+        engine.dispose()
+
+
+def test_stats_only_runtime_preserves_historical_qualification_protection(tmp_path):
+    from alphaforge.burnin_qualification import BurnInQualificationEngine
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+
+    engine, policy, _ = build_db(tmp_path, candidates=20)
+    try:
+        # Reproduce the old runtime's snapshot. The fix must not delete or
+        # reinterpret existing qualification authority to enable compaction.
+        BurnInQualificationEngine(engine).evaluate(RUN)
+        with engine.connect() as conn:
+            snapshots = conn.exec_driver_sql("SELECT * FROM burnin_qualification_snapshots").all()
+        runtime = RuntimeOrchestrator(
+            config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+            ai_brain=None, market_scanner=lambda: None, persistence_engine=engine,
+        )
+        runtime._burnin_run_id = RUN
+        runtime._generate_burnin_snapshot(reason="shutdown")
+        result = compact_stats_only_universe_batch(engine, policy)
+        assert result["rows_removed"] == 0
+        assert "QUALIFICATION_AUTHORITY_PROTECTED" in result.get("blockers", [])
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("SELECT * FROM burnin_qualification_snapshots").all() == snapshots
+    finally:
+        engine.dispose()
+
+
 def test_small_maintenance_budget_with_large_cycles_is_attributable(tmp_path):
     engine, policy, selections = build_db(
         tmp_path, cycles=8, candidates=525,
