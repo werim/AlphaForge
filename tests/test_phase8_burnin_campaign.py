@@ -1057,6 +1057,53 @@ def test_unexpected_normal_runtime_exit_fails_campaign_and_stops_siblings(tmp_pa
     engine.dispose()
 
 
+@pytest.mark.parametrize("proof_case", ['valid', 'missing', 'wrong_run', 'report_unblocked'])
+def test_storage_pressure_exit_requires_scoped_persisted_recovery_proof(tmp_path, monkeypatch, proof_case):
+    from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
+    from alphaforge.burnin_campaign import get_terminal_cause
+    db=tmp_path/'pressure.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-pressure',duration_days=1,symbols=[],intervals=[])
+    run=start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close(); engine=_engine(db)
+
+    class PressureRuntime(_FakeRuntime):
+        runtime_instance_id = 'rt-pressure'
+        startup_id = 'startup-pressure'
+
+        async def start(self):
+            if proof_case == 'missing':
+                return
+            save_runtime_state_snapshot(self.persistence_engine, RuntimeStateSnapshot(
+                mode='PAPER', requested_mode='PAPER', actual_mode='PAPER',
+                runtime_status='RECOVERY_REQUIRED', instance_id=self.runtime_instance_id,
+                startup_id=self.startup_id, campaign_id=self.attached,
+                burnin_run_id=run['burnin_run_id'] if proof_case != 'wrong_run' else 'other-run', active_position_count=0,
+                pending_order_count=0, unknown_exchange_state=False,
+                reconciliation_status='CLEAN', recovery_action_required=True,
+                fail_closed_reason='STORAGE_PRESSURE_RECOVERY_REQUIRED',
+                diagnostics_json={'storage_policy': {'blocked': proof_case != 'report_unblocked',
+                                                     'status': 'STORAGE_DISK_PRESSURE',
+                                                     'reason': 'MAINTENANCE_TIME_BUDGET_EXHAUSTED',
+                                                     'blockers': ['UNRESOLVED_OUTCOME_WINDOW_PROTECTED']}},
+            ))
+
+    runtime=PressureRuntime(); runner=BurnInCampaignRunner(engine,camp.campaign_id,lambda *_: [],runtime_factory=lambda: runtime)
+    async def sibling(): await asyncio.Event().wait()
+    monkeypatch.setattr(runner,'_resolver_loop',sibling)
+    monkeypatch.setattr(runner,'_maintenance_loop',sibling)
+    valid_proof = proof_case == 'valid'
+    expected='STORAGE_PRESSURE_RECOVERY_REQUIRED' if valid_proof else 'RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING'
+    with pytest.raises(RuntimeError, match=expected):
+        asyncio.run(runner.run_foreground())
+    with engine.connect() as sql:
+        campaign=get_campaign(sql,camp.campaign_id)
+        cause=get_terminal_cause(sql,camp.campaign_id,run['burnin_run_id'])
+    assert campaign['campaign_status'] == ('RECOVERY_REQUIRED' if valid_proof else 'FAILED')
+    assert cause['terminal_cause'] == ('STORAGE_PRESSURE_RECOVERY_REQUIRED' if valid_proof else 'RUNTIME_SUPERVISION_FAILED')
+    if valid_proof:
+        assert json.loads(cause['details_json'])['storage_report']['blockers'] == ['UNRESOLVED_OUTCOME_WINDOW_PROTECTED']
+    engine.dispose()
+
+
 def test_campaign_runtime_database_identity_mismatch_remains_fail_closed(tmp_path):
     campaign_db=tmp_path/'canonical.db'; wrong_db=tmp_path/'wrong.db'
     conn=sqlite3.connect(campaign_db); conn.row_factory=sqlite3.Row

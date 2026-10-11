@@ -301,6 +301,63 @@ def test_old_campaign_without_policy_identity_is_never_compacted(tmp_path):
         engine.dispose()
 
 
+def test_stats_only_without_rollups_never_looks_qualification_eligible(tmp_path):
+    engine, _, _ = build_db(tmp_path, cycles=2, candidates=20)
+    try:
+        with readonly(Path(engine.url.database)) as conn:
+            summary = stats_only_campaign_summary(conn, CID)
+        assert summary["status"] == "NO_STATS_ONLY_COMPACTION"
+        assert summary["qualification_eligible"] is False
+        assert summary["full_universe_replay_available"] is False
+        with engine.connect() as conn:
+            aggregate = aggregate_campaign(conn, CID)["metrics"]
+        assert aggregate["qualification_eligible"] is False
+        assert aggregate["universe_retention"] == summary
+    finally:
+        engine.dispose()
+
+
+def test_small_maintenance_budget_with_large_cycles_is_attributable(tmp_path):
+    engine, policy, selections = build_db(
+        tmp_path, cycles=8, candidates=525,
+        policy_changes={"batch_rows": 527, "batch_seconds": 0.2},
+    )
+    try:
+        result = compact_stats_only_universe_batch(engine, policy)
+        assert result["cycles_compacted"] == 1, result
+        assert result["rows_removed"] == 527
+        with readonly(Path(engine.url.database)) as conn:
+            assert stats_only_campaign_summary(conn, CID)["compacted_cycle_count"] == 1
+            assert conn.execute("SELECT cycle_id FROM universe_selection_cycles WHERE cycle_id=?",
+                                (selections[0].cycle_id,)).fetchone() is None
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
+
+
+def test_controller_preserves_zero_progress_blocker_and_attempt_counts(tmp_path):
+    engine, policy, _ = build_db(
+        tmp_path, cycles=4, candidates=525,
+        policy_changes={"high_bytes": 50 * 1024 ** 2,
+                        "low_bytes": 64 * 1024,
+                        "stats_only_start_bytes": 128 * 1024,
+                        "stats_only_target_bytes": 96 * 1024,
+                        "batch_rows": 500, "batch_seconds": 0.2},
+    )
+    try:
+        report = StorageController(engine, policy).check(force=True)
+        maintenance = report["stats_only_maintenance"]
+        assert report["cycles_compacted"] == 0
+        assert maintenance["scanned_cycles"] >= 1
+        assert maintenance["eligible_cycles"] == 0
+        assert maintenance["planned_rows"] == 0
+        assert maintenance["reason"] == "CYCLE_EXCEEDS_MAINTENANCE_ROW_BUDGET"
+        assert report["blockers"] == ["CYCLE_EXCEEDS_MAINTENANCE_ROW_BUDGET"]
+        assert report["status"] == "STATS_ONLY_TARGET_NOT_REACHABLE_PROTECTED_DATA"
+    finally:
+        engine.dispose()
+
+
 def test_unresolved_outcome_window_and_recent_cycle_are_pinned(tmp_path):
     engine, policy, selections = build_db(tmp_path, cycles=5, candidates=20)
     try:
