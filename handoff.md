@@ -1,3 +1,8 @@
+> Historical handoff (September 2026), without a validated current branch/HEAD.
+> Do not use its NEXT items or operating states as current instructions. The active
+> task handoff belongs in its PR/issue record under the
+> [AGENTS.md session workflow](AGENTS.md#persistent-context-and-session-handoff).
+
 ## MERGED
 
 - PR #366 — state-direction shadow evaluation — MERGED

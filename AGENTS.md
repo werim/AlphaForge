@@ -66,6 +66,73 @@ Do not assume an issue is still open, a PR still exists, a threshold still has t
 
 ---
 
+# Persistent Context and Session Handoff
+
+This file is the canonical project entrypoint. Load only the relevant sections of
+the [repository map](README.md#repository-navigation) and
+[dependency pipeline](README.md#decision-pipeline), then follow the
+[verification workflow](docs/TEST_PROTOCOL.md#development-verification-routing).
+These are navigation aids; current code, canonical config and exact-head evidence
+retain the authority order above. Update existing entries when ownership changes;
+do not create a second architecture map or repeat verified analysis without drift.
+
+Before investigation in a new session:
+1. Read this file and the active task's single handoff in its PR description (or
+   issue comment before a PR exists). Use the task link supplied by the session;
+   if absent, find the PR for the current branch before investigating code.
+2. Run `pwd`, `git rev-parse --show-toplevel`, `git branch --show-current`,
+   `git rev-parse HEAD`, and `git status --short`. Do not change a dirty checkout
+   or switch branches over unrelated work.
+3. Compare repository, branch and full HEAD with the handoff. Missing identity or
+   mismatch means UNVERIFIED/STALE, never PASS. If an exact base was required,
+   stop on mismatch and report `BASE_REVISION_MISMATCH`. Otherwise inspect only
+   `git diff --name-status <recorded-sha> HEAD` and affected paths to revalidate
+   relevant findings. If the recorded commit is unavailable, retrieve that
+   commit or mark its findings unverified; do not guess or rebuild all context.
+4. Reuse verified decisions and test evidence only for their recorded SHA,
+   config/profile and scope. A matching SHA does not make mutable runtime,
+   reconciliation or campaign evidence current; check its freshness read-only
+   when relevant. Uncommitted relevant changes invalidate affected test evidence.
+5. Inspect changed/relevant files only. Reinvestigate stale or conflicting facts,
+   then perform the recorded next action through the existing router.
+
+Keep one compact handoff per active task, updating it at meaningful checkpoints
+and before session exit. Move the record into the PR description once opened;
+leave a pointer in the issue rather than maintaining parallel records. Do not
+commit a per-task handoff file or a self-referential HEAD SHA. The legacy
+[handoff.md](handoff.md) is historical context, not the active task queue.
+
+Use this block in the existing PR/issue record:
+
+```text
+TASK: issue URL; PR URL (or pending); objective/acceptance outcomes
+IDENTITY: repository; branch; full HEAD SHA; config/profile if applicable
+COMPLETED: verified work; evidence links and their SHA/scope
+PENDING: implementation, tests, CI, review, qualification (separate states)
+FILES: relevant paths and canonical contracts
+DECISIONS / INVARIANTS: authority, rationale, safety and operational boundaries
+VALIDATION: commands/results; exact evidence SHA; CI URL/status or PENDING
+BLOCKERS: missing evidence/access; stale findings; required user input
+NEXT: one exact command/action and its prerequisites
+EFFICIENCY: existing baseline record URL; repeated reads/tests and reasons;
+  avoidable context rebuilds; usage/cost coverage or N/A
+```
+
+Count repeated file/range reads, repeated test command executions and context
+rebuilds within the observed session; distinguish necessary changed-code/failure
+revalidation from avoidable repetition. Record the observation window and missing
+coverage rather than implying a global rate. Add these counts to the existing
+efficiency record, not a second measurement system. This workflow standardization
+does not consume a baseline task or add VWU; preserve the existing task numbering,
+predeclared outcomes and incomplete evidence. Apply the cost/N/A rules below.
+
+Current task/operator restrictions take precedence over autonomous defaults:
+do not poll/rerun CI automatically, interrupt protected PAPER/SOAK, or merge
+without explicit authorization when restricted. Pending CI stays pending until
+the user's green/fail result; then validate the exact evidence SHA once.
+
+---
+
 # Autonomous Engineering Mode
 
 Autonomous execution is the default.
