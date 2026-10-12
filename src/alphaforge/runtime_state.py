@@ -464,6 +464,9 @@ def persist_verified_paper_recovery(engine: Engine, *, probe: Mapping[str, Any],
     ))
 
 
+CAMPAIGN_RECONCILIATION_MAX_AGE_SECONDS = 120.0
+
+
 def persist_campaign_linked_zero_exposure_reconciliation_evidence(
     engine: Engine, *, probe: Mapping[str, Any], prior_snapshot: Mapping[str, Any] | None,
     campaign_id: str, burnin_run_id: str, release_id: str,
@@ -474,6 +477,13 @@ def persist_campaign_linked_zero_exposure_reconciliation_evidence(
             or str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")
             or probe.get("orders") or probe.get("positions")):
         raise RuntimeError("campaign_linked_evidence_requires_authenticated_complete_zero_exposure_probe")
+    try:
+        retrieved_at = datetime.fromisoformat(str(probe.get("retrieved_at") or "").replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - retrieved_at).total_seconds()
+        if retrieved_at.tzinfo is None or not 0 <= age <= CAMPAIGN_RECONCILIATION_MAX_AGE_SECONDS:
+            raise ValueError("stale or future reconciliation")
+    except (TypeError, ValueError):
+        raise RuntimeError("campaign_linked_evidence_requires_fresh_reconciliation_probe") from None
     instance_id = f"terminalization:{uuid.uuid4().hex}"
     startup_id = f"terminalization:{uuid.uuid4().hex}"
     diagnostics = {

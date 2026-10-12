@@ -5,6 +5,8 @@ payload, unlinks a WAL, or vacuums an actively written database.
 """
 from __future__ import annotations
 
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL
+
 import argparse
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -587,7 +589,7 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
         "burnin_campaign_runs": {"campaign_id", "burnin_run_id"},
         "burnin_runs": {"burnin_run_id", "execution_mode", "git_commit", "config_hash"},
         "burnin_pending_reject_labels": {
-            "campaign_id", "burnin_run_id", "decision_timestamp", "status",
+            "campaign_id", "burnin_run_id", "decision_timestamp", "status", "evidence_complete",
         },
         "burnin_pending_position_outcomes": {
             "campaign_id", "burnin_run_id", "decision_time", "entry_time", "status",
@@ -719,10 +721,10 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
 
         unresolved_times: list[float] = []
         try:
-            for value, in conn.execute("""
+            for value, in conn.execute(f"""
                 SELECT decision_timestamp FROM burnin_pending_reject_labels
                 WHERE campaign_id=? AND burnin_run_id=?
-                  AND (status IS NULL OR UPPER(status)<>'RESOLVED')
+                  AND {UNRESOLVED_REJECT_SQL}
             """, (row["campaign_id"], row["burnin_run_id"])):
                 unresolved_times.append(_timestamp(value))
             for decision_time, entry_time in conn.execute("""
