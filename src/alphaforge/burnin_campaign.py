@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL
+
 import argparse, asyncio, contextlib, csv, hashlib, json, math, os, re, sqlite3, subprocess, sys, threading, time, uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, field
@@ -1228,7 +1230,7 @@ def check_campaign_completion(conn: Any, campaign_id: str) -> dict[str, Any]:
         raise KeyError("campaign not found")
     agg = aggregate_campaign(conn, campaign_id)
     metrics = agg.get("metrics", {}) if agg.get("status") == "OK" else {}
-    pending_rejects = int((_exec(conn, "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY')", {"cid": campaign_id}).fetchone()[0]) or 0)
+    pending_rejects = int((_exec(conn, f"SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND {UNRESOLVED_REJECT_SQL}", {"cid": campaign_id}).fetchone()[0]) or 0)
     pending_positions = int((_exec(conn, "SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'", {"cid": campaign_id}).fetchone()[0]) or 0)
     blockers: list[str] = []
     if c.get("expected_duration_seconds") is not None and float(c.get("observed_duration_seconds") or 0) < float(c["expected_duration_seconds"]): blockers.append("DURATION_INCOMPLETE")
@@ -1347,16 +1349,25 @@ class BurnInCampaignRunner:
             event(conn, self.campaign_id, "RESOLVER_BATCH_FAILED", details=details)
 
     def resolver_tick(self) -> dict[str, Any]:
-        from alphaforge.burnin_resolver import resolve_campaign_batch, resolve_campaign_positions
+        from alphaforge.burnin_resolver import due_reject_labels, resolve_campaign_batch, resolve_campaign_positions
         try:
             with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
-                due = _exec(conn, "SELECT symbol, timeframe, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol,timeframe", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
+                reject_resolution_time = utc_now()
+                labels = due_reject_labels(conn, self.campaign_id, now=reject_resolution_time)
+                windows: dict[tuple[str, str], dict[str, Any]] = {}
+                for label in labels:
+                    key = (label["symbol"], label["timeframe"])
+                    window = windows.setdefault(key, {"symbol": key[0], "timeframe": key[1],
+                                                     "start_ts": label["decision_timestamp"], "end_ts": label["due_at"]})
+                    window["start_ts"] = min(window["start_ts"], label["decision_timestamp"])
+                    window["end_ts"] = max(window["end_ts"], label["due_at"])
+                due = list(windows.values())
                 positions = _exec(conn, "SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
                 shadow_campaign = get_campaign(conn, self.campaign_id) if self.position_management_shadow_provider is not None else None
             candles: dict[str, Any] = {}
             for row in due:
-                r = _row_dict(row)
+                r = row
                 try: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"], r.get("timeframe"))
                 except TypeError: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
             resolution_time = utc_now()
@@ -1423,7 +1434,7 @@ class BurnInCampaignRunner:
                     shadow_proposals.extend(rows)
             def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int], dict[str, int] | None]:
                 self._persist_pending_failure_events(conn)
-                counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
+                counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=reject_resolution_time)
                 shadow_counts = None
                 if shadow_proposals:
                     shadow_counts = persist_position_management_shadow_proposals(conn, shadow_proposals)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL
+
 import argparse, asyncio, contextlib, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
 from pathlib import Path, PureWindowsPath
 from urllib.parse import quote
@@ -26,7 +28,7 @@ from alphaforge.config_registry import managed_config_value
 from alphaforge.config_audit import audit_config
 from alphaforge.env_contract import bootstrap_environment, dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
-from alphaforge.runtime_state import build_readonly_reconciliation_probe
+from alphaforge.runtime_state import build_readonly_reconciliation_probe, CAMPAIGN_RECONCILIATION_MAX_AGE_SECONDS
 from alphaforge.persistence import init_db
 from alphaforge.database_defaults import resolve_runtime_database_url, sqlite_path_from_url
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
@@ -170,7 +172,7 @@ def database_diagnosis(db: str, *, max_heartbeat_age: float = 120.0) -> dict[str
             position_columns = ["pending_position_id", "trade_id", "burnin_run_id", "symbol", "side", "status", "entry_time"]
             positions_ok, open_positions = safe_rows("campaign_open_positions", "burnin_pending_position_outcomes", position_columns, where="campaign_id=? AND status='OPEN'", params=(cid,))
             reject_columns = ["pending_label_id", "reject_decision_id", "burnin_run_id", "symbol", "status", "due_at", "reject_reason"]
-            rejects_ok, pending_rejects = safe_rows("pending_reject_labels", "burnin_pending_reject_labels", reject_columns, where="campaign_id=? AND status IN ('PENDING','READY')", params=(cid,))
+            rejects_ok, pending_rejects = safe_rows("pending_reject_labels", "burnin_pending_reject_labels", reject_columns, where=f"campaign_id=? AND {UNRESOLVED_REJECT_SQL}", params=(cid,))
             runtime_columns = ["id", "campaign_id", "burnin_run_id", "release_id", "active_position_count", "active_positions", "pending_order_count", "pending_orders", "orphan_position_count", "orphan_order_count", "unknown_exchange_state", "recovery_action_required", "reconciliation_status", "exchange_read_only_status", "diagnostics_json", "timestamp"]
             runtime_ok, runtime_rows = safe_rows("runtime_snapshot", "runtime_state_snapshots", runtime_columns, where="campaign_id=?", params=(cid,), order="id DESC")
             latest_runtime = runtime_rows[0] if runtime_ok and runtime_rows else None
@@ -1011,7 +1013,7 @@ def _counts(conn: sqlite3.Connection, campaign_id: str) -> dict[str, int]:
         and float(item["transient_elapsed_seconds"]) < float(item.get("grace_seconds") or 0)
         for item in active_failures))
     return {
-        "pending_reject_labels": cnt("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY')", (campaign_id,)),
+        "pending_reject_labels": cnt(f"SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND {UNRESOLVED_REJECT_SQL}", (campaign_id,)),
         "open_positions": cnt("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN'", (campaign_id,)),
         "resolver_failures": len(active_failures),
         "provider_failures": len(provider_failures),
@@ -1034,7 +1036,7 @@ def _recovery_campaign_exposure(conn: sqlite3.Connection, campaign_id: str) -> d
             return 0
 
     return {
-        "pending_reject_labels": cnt("pending_reject_labels", "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY')"),
+        "pending_reject_labels": cnt("pending_reject_labels", f"SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND {UNRESOLVED_REJECT_SQL}"),
         "open_positions": cnt("campaign_open_positions", "SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN'"),
         "query_errors": errors,
         "availability": availability,
@@ -1443,7 +1445,7 @@ def _authoritative_recovery_exposure(db: str, campaign_id: str) -> dict[str, Any
         engine.dispose()
 
 
-TERMINALIZATION_EVIDENCE_MAX_AGE_SECONDS = 120.0
+TERMINALIZATION_EVIDENCE_MAX_AGE_SECONDS = CAMPAIGN_RECONCILIATION_MAX_AGE_SECONDS
 TERMINALIZATION_RUNTIME_IDENTITY_FIELDS = ("id", "timestamp", "instance_id", "startup_id", "campaign_id", "burnin_run_id", "release_id", "process_id", "mode", "reconciliation_status", "exchange_read_only_status", "unknown_exchange_state", "recovery_action_required", "active_position_count", "pending_order_count", "orphan_position_count", "orphan_order_count")
 
 
@@ -1463,6 +1465,55 @@ def _runtime_evidence_identity(runtime: Mapping[str, Any], campaign_id: str, run
     return {"snapshot_id": latest.get("id"), "observed_at": observed_at, "age_seconds": age, "snapshot_hash": canonical_hash(snapshot), "snapshot": snapshot, "checks": checks}
 
 
+def _controlled_storage_worker_evidence(conn: sqlite3.Connection, campaign: Mapping[str, Any], run_id: str | None):
+    """Recover worker identity from the supervisor's durable controlled-stop proof.
+
+    This identifies a predecessor only; it never authorizes execution or replaces
+    fresh reconciliation and transaction-time exposure/liveness checks.
+    """
+    if (campaign.get("campaign_status") != "RECOVERY_REQUIRED"
+            or campaign.get("last_error") != "STORAGE_PRESSURE_RECOVERY_REQUIRED"
+            or not run_id or campaign.get("active_run_id") != run_id):
+        return None, {}
+    row = conn.execute("""SELECT event_id,event_type,event_time,details_json
+        FROM burnin_campaign_events WHERE campaign_id=? AND burnin_run_id=?
+          AND event_type='STORAGE_PRESSURE_RECOVERY_REQUIRED' ORDER BY id DESC LIMIT 1""",
+        (campaign["campaign_id"], run_id)).fetchone()
+    if row is None:
+        return None, {}
+    try:
+        details = json.loads(row["details_json"] or "{}")
+        snapshot = conn.execute("SELECT * FROM runtime_state_snapshots WHERE id=?",
+                                (details.get("recovery_snapshot_id"),)).fetchone()
+        if snapshot is None:
+            return None, {}
+        snapshot = dict(snapshot)
+        report = details.get("storage_report") or {}
+        stored_report = json.loads(snapshot.get("diagnostics_json") or "{}").get("storage_policy")
+        if (snapshot.get("campaign_id") != campaign["campaign_id"]
+                or snapshot.get("burnin_run_id") != run_id
+                or snapshot.get("release_id") != campaign.get("release_id")
+                or snapshot.get("mode") != "PAPER"
+                or snapshot.get("runtime_status") != "RECOVERY_REQUIRED"
+                or snapshot.get("fail_closed_reason") != "STORAGE_PRESSURE_RECOVERY_REQUIRED"
+                or snapshot.get("recovery_action_required") != 1
+                or snapshot.get("reconciliation_status") != "CLEAN"
+                or any(snapshot.get(key) != 0 for key in (
+                    "active_position_count", "pending_order_count", "unknown_exchange_state"))
+                or not details.get("runtime_instance_id") or not details.get("startup_id")
+                or snapshot.get("instance_id") != details["runtime_instance_id"]
+                or snapshot.get("startup_id") != details["startup_id"]
+                or not isinstance(stored_report, dict) or stored_report.get("blocked") is not True
+                or not isinstance(report, dict) or report != {**stored_report, "recovery_state_persisted": True}
+                or not isinstance(snapshot.get("process_id"), int) or snapshot["process_id"] <= 0):
+            return None, {}
+    except (TypeError, ValueError, AttributeError):
+        return None, {}
+    worker = dict(row)
+    worker["snapshot_identity_hash"] = canonical_hash(snapshot)
+    return worker, {**details, "worker_pid": snapshot["process_id"]}
+
+
 def _local_terminalization_snapshot(conn: sqlite3.Connection, campaign_id: str, run_id: str | None) -> dict[str, Any]:
     campaign_row = conn.execute("SELECT * FROM burnin_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()
     campaign = dict(campaign_row) if campaign_row else None
@@ -1480,9 +1531,11 @@ def _local_terminalization_snapshot(conn: sqlite3.Connection, campaign_id: str, 
         local.setdefault("query_errors", []).append(f"pending_orders:{exc.__class__.__name__}:{exc}")
     runtime_row = conn.execute("SELECT * FROM runtime_state_snapshots ORDER BY id DESC LIMIT 1").fetchone()
     runtime_link = dict(runtime_row) if runtime_row else None
-    worker_row = conn.execute("SELECT event_id,event_type,event_time,details_json FROM burnin_campaign_events WHERE campaign_id=? AND event_type IN ('PHASE9_DEAD_WORKER_RECOVERY_REQUIRED','PHASE9_STALE_CONTINUATION_RECOVERED') ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
+    worker_row = conn.execute("SELECT event_id,event_type,event_time,details_json FROM burnin_campaign_events WHERE campaign_id=? AND burnin_run_id=? AND event_type IN ('PHASE9_DEAD_WORKER_RECOVERY_REQUIRED','PHASE9_STALE_CONTINUATION_RECOVERED') ORDER BY id DESC LIMIT 1", (campaign_id, run_id)).fetchone()
     worker = dict(worker_row) if worker_row else None
     worker_details = json.loads(worker["details_json"] or "{}") if worker else {}
+    if worker is None and campaign:
+        worker, worker_details = _controlled_storage_worker_evidence(conn, campaign, run_id)
     campaign_identity = {key: campaign.get(key) if campaign else None for key in ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "git_commit", "execution_cost_config_hash", "active_run_id", "worker_pid", "worker_started_at")}
     continuation_identity = {key: (mapping or {}).get(key) for key in ("campaign_id", "burnin_run_id", "continuation_sequence", "status", "started_at", "ended_at")}
     run_identity = {key: (run or {}).get(key) for key in ("burnin_run_id", "release_id", "execution_mode", "status", "git_commit", "config_hash", "strategy_config_hash", "universe_hash", "continuation_sequence")}
@@ -1545,7 +1598,7 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         return {"status": "FAIL_CLOSED", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "failure_reasons": preliminary_failures}
     runtime = _authoritative_recovery_exposure(db, campaign_id)
     runtime_identity = _runtime_evidence_identity(runtime, campaign_id, expected_run_id)
-    if not all(runtime_identity["checks"].values()):
+    if not all(runtime_identity["checks"].values()) or runtime.get("blocked"):
         availability = dict(runtime.get("availability") or {})
         counts = dict(runtime.get("current_exposure_check") or {})
         probe = runtime.get("reconciliation_probe")
@@ -1569,6 +1622,10 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
                     engine, probe=probe, prior_snapshot=runtime.get("latest"), campaign_id=campaign_id,
                     burnin_run_id=expected_run_id, release_id=str(initial_campaign.get("release_id") or ""),
                 )
+            except RuntimeError as exc:
+                return {"status": "FAIL_CLOSED", "campaign_id": campaign_id,
+                        "burnin_run_id": expected_run_id,
+                        "failure_reasons": [str(exc)]}
             finally:
                 engine.dispose()
             runtime = {**runtime, "latest": persisted, "reconciliation_status": "CLEAN", "blocked": False}
@@ -1694,7 +1751,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         if previous_resume.get("burnin_run_id") == campaign.get("active_run_id"):
             return {"drill_id": previous["drill_id"], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "PASS", "checks": {**json.loads(previous["checks_json"] or "{}"), "idempotent_replay": True}, "before": json.loads(previous["before_json"] or "{}"), "after": {**previous_after, "idempotent_replay": True}}
     source_before = {rid: _source_row_ids_and_hash(conn, rid) for rid in _run_source_ids(conn, campaign_id)}
-    pending_ids_before = [r[0] for r in conn.execute("SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY') ORDER BY pending_label_id", (campaign_id,)).fetchall()]
+    pending_ids_before = [r[0] for r in conn.execute(f"SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND {UNRESOLVED_REJECT_SQL} ORDER BY pending_label_id", (campaign_id,)).fetchall()]
     position_ids_before = [r[0] for r in conn.execute("SELECT pending_position_id FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN' ORDER BY pending_position_id", (campaign_id,)).fetchall()]
     managed_positions_before = _managed_position_recovery_snapshot(conn, campaign_id)
     old_run = campaign.get("active_run_id")
@@ -1962,7 +2019,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         "new_worker_started": bool(proc.pid and _pid_alive(proc.pid)),
         "new_attach_event": attach.get("status") == "ATTACHED",
         "exactly_one_new_continuation": len(runs_after) == len(runs_before) + 1,
-        "pending_reject_ids_preserved_exactly": pending_ids_before == [r[0] for r in conn.execute("SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY') ORDER BY pending_label_id", (campaign_id,)).fetchall()],
+        "pending_reject_ids_preserved_exactly": pending_ids_before == [r[0] for r in conn.execute(f"SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND {UNRESOLVED_REJECT_SQL} ORDER BY pending_label_id", (campaign_id,)).fetchall()],
         "open_position_ids_preserved_exactly": position_ids_before == [r[0] for r in conn.execute("SELECT pending_position_id FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN' ORDER BY pending_position_id", (campaign_id,)).fetchall()],
         "managed_position_state_preserved_exactly": managed_positions_before["position_state_hash"] == managed_positions_after["position_state_hash"],
         "management_ledger_preserved_exactly": managed_positions_before["management_ledger_hash"] == managed_positions_after["management_ledger_hash"],

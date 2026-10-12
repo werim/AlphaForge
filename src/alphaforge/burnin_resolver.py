@@ -5,6 +5,7 @@ from typing import Any, Mapping, Sequence
 from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, persist_burnin_reject_outcome, persist_burnin_trade_outcome, persist_burnin_observation, utc_now, CRITICAL_COST_FIELDS
 from alphaforge.burnin_campaign import CAMPAIGN_SCHEMA_VERSION, bootstrap_campaign_schema, _exec
 from alphaforge.expectancy_evidence import record_expectancy_evidence
+from alphaforge.reject_lifecycle import RECLAIMABLE_REJECT_SQL
 
 
 def _dt(v): return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
@@ -243,12 +244,23 @@ def _sync_review(conn,r,outcome):
         if "no such table" not in str(exc).lower() and "no such column" not in str(exc).lower(): raise
 
 
+def due_reject_labels(conn: Any, campaign_id: str | None, *, now: str,
+                      claim_timeout_seconds: float = 300) -> list[dict[str, Any]]:
+    """Select due labels using the same ownership rule as claim persistence."""
+    stale = (_dt(now) - timedelta(seconds=claim_timeout_seconds)).isoformat()
+    scope = "campaign_id=:cid AND " if campaign_id is not None else ""
+    rows = _exec(conn, f"SELECT * FROM burnin_pending_reject_labels WHERE {scope}"
+                 f"due_at<=:now AND {RECLAIMABLE_REJECT_SQL} ORDER BY decision_timestamp,id",
+                 {"cid": campaign_id, "now": now, "stale": stale}).fetchall()
+    return [dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping) for row in rows]
+
+
 def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping[str,Sequence[Mapping[str,Any]]]|Sequence[Mapping[str,Any]],*,now: str|None=None,claim_timeout_seconds:float=300) -> dict[str,int]:
-    bootstrap_campaign_schema(conn); now=now or utc_now(); stale=(_dt(now)-timedelta(seconds=claim_timeout_seconds)).isoformat()
-    rows=_exec(conn,"SELECT * FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND due_at<=:now AND (status IN ('PENDING','READY') OR (status='RESOLVING' AND claimed_at<:stale)) ORDER BY decision_timestamp,id",{"cid":campaign_id,"now":now,"stale":stale}).fetchall()
+    bootstrap_campaign_schema(conn); now=now or utc_now()
+    rows=due_reject_labels(conn,campaign_id,now=now,claim_timeout_seconds=claim_timeout_seconds)
     counts={"resolved":0,"pending":0,"ambiguous":0,"failed":0,"claimed_elsewhere":0,"canonical":0}
     for row in rows:
-        r=dict(row) if isinstance(row,sqlite3.Row) else dict(row._mapping); token=uuid.uuid4().hex; old=r["status"]
+        r=row; token=uuid.uuid4().hex; old=r["status"]
         identity_error = _canonical_reject_identity_error(
             conn, campaign_id, r["burnin_run_id"], r.get("reject_decision_id"))
         if identity_error:
@@ -1190,10 +1202,11 @@ def resolve_campaign_positions(
 def resolve_pending_rejects(conn: Any, candles_by_symbol: Mapping[str, Sequence[Mapping[str,Any]]] | Sequence[Mapping[str,Any]], *, now: str|None=None) -> dict[str,int]:
     # Backward-compatible manual resolver across all campaigns. Campaign workers should call resolve_campaign_batch.
     bootstrap_campaign_schema(conn)
-    row = _exec(conn, "SELECT campaign_id FROM burnin_pending_reject_labels WHERE status IN ('PENDING','READY') ORDER BY due_at LIMIT 1").fetchone()
-    if not row:
+    now = now or utc_now()
+    rows = due_reject_labels(conn, None, now=now)
+    if not rows:
         return {"resolved":0,"pending":0,"ambiguous":0,"failed":0}
-    cid = row[0] if isinstance(row, sqlite3.Row) else row[0]
+    cid = rows[0]["campaign_id"]
     return resolve_campaign_batch(conn, cid, candles_by_symbol, now=now)
 def evaluate_forward_outcome(*, side: str, entry: Any, stop: Any, target: Any,
                              decision_timestamp: str, due_at: str,

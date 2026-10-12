@@ -179,6 +179,34 @@ Reports distinguish threshold, logical target, disk reserve,
 rows/batches, verified archives, checkpoint backlog, protected scope and next
 action. PAPER/FAST/SOAK acceptance remains a separate gated workflow.
 
+## Storage-pressure recovery and offline outcomes (#631)
+
+`burnin_cli worker --once` runs the canonical market-data-backed outcome resolver
+without starting the execution runtime. Elapsed horizons alone never resolve a
+label. Candle collection and persistence share the due/claim predicate: expired
+`RESOLVING` claims are retried; fresh claims and claims without an attributable
+timestamp retain ownership. Missing/gapped market windows remain pending.
+Recovery, completion and stats-only compaction regard every label other than
+`RESOLVED` with `evidence_complete=1` as outstanding protected evidence.
+
+The explicit `burnin_ops recover-runtime --terminalize-zero-exposure` path also accepts
+the supervisor's durable controlled storage-stop event as predecessor identity
+when its exact campaign/run/release/runtime/startup and referenced PAPER recovery
+snapshot match. A cleared campaign worker PID alone is not death evidence.
+The predecessor must be dead, all execution/exposure checks must pass, and fresh
+authenticated read-only reconciliation must be available. Missing, malformed,
+cross-scoped or unsafe proof fails closed. The existing atomic transition ends
+the campaign/run as `FAILED`; it neither starts a new run nor resumes trading.
+The immutable stop snapshot is retained and fresh reconciliation is appended.
+Compaction still independently verifies eligibility and hash-chain integrity.
+
+Preserve original forensic campaign databases. Validate recovery changes on a
+WAL-aware laboratory backup first. Allocated-live reclamation is distinct from
+physical main+WAL reduction; attaining a live-page target does not prove the
+physical hard cap or authorize continuation. Stats-only remains non-replayable
+and non-qualification-eligible. No automatic restart, manual flag reset, threshold
+change or generic production VACUUM is part of this recovery path.
+
 ## Deterministic storage evidence
 
 The terminal three-cycle fixture removed nine source rows after verified replay.
