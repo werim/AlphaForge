@@ -202,6 +202,12 @@ evidence bound to the exact final `dev` SHA.
 
 ## Repository Navigation
 
+Enter through [AGENTS.md](AGENTS.md#persistent-context-and-session-handoff) for
+session identity, handoff and safety rules. The [Decision Pipeline](#decision-pipeline)
+above describes subsystem dependencies; the map below locates their authorities.
+Use [development verification routing](docs/TEST_PROTOCOL.md#development-verification-routing)
+for the existing risk/invariant test map rather than maintaining a competing test list.
+
 | Area | Canonical entry points |
 |---|---|
 | Runtime orchestration | [`src/alphaforge/runtime.py`](src/alphaforge/runtime.py) |
@@ -213,6 +219,11 @@ evidence bound to the exact final `dev` SHA.
 | Qualification/readiness | [`src/alphaforge/burnin_qualification.py`](src/alphaforge/burnin_qualification.py), [`src/alphaforge/live_readiness.py`](src/alphaforge/live_readiness.py) |
 | Recovery/reconciliation | [`src/alphaforge/runtime_state.py`](src/alphaforge/runtime_state.py), [`src/alphaforge/reconciliation.py`](src/alphaforge/reconciliation.py) |
 | Typed config source of truth | [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py) |
+| Market data / MTF / scoring | [`src/alphaforge/exchange_market_scanner.py`](src/alphaforge/exchange_market_scanner.py), [`src/alphaforge/multi_timeframe.py`](src/alphaforge/multi_timeframe.py), [`src/alphaforge/ai_brain.py`](src/alphaforge/ai_brain.py) |
+| Decision/evidence persistence | [`src/alphaforge/persistence.py`](src/alphaforge/persistence.py), [lifecycle contract](docs/decision_lifecycle_contract.md) |
+| Universe identity / storage retention | [universe selection](docs/universe_selection.md), [universe storage contract](docs/universe_storage_contract.md), [`src/alphaforge/storage_policy.py`](src/alphaforge/storage_policy.py) |
+| Verification risk / invariants / test locations | [`src/alphaforge/system_verification.py`](src/alphaforge/system_verification.py) (`assess_path`, `_TESTS_BY_INVARIANT`); [`tests/test_issue437_system_verification_router.py`](tests/test_issue437_system_verification_router.py) |
+| CI routing / exact-SHA dedupe protection | [Tests workflow](.github/workflows/test.yml), [`tests/test_ci_branch_contract.py`](tests/test_ci_branch_contract.py) |
 | BACKTEST CLI | [`backtest_order.py`](backtest_order.py) |
 | Canonical SQL/operator queries | [`docs/SQLcheat.md`](docs/SQLcheat.md) |
 | Lifecycle contract | [`docs/decision_lifecycle_contract.md`](docs/decision_lifecycle_contract.md) |
