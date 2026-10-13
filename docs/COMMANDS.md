@@ -3135,6 +3135,34 @@ python -m alphaforge.burnin_ops \
 
 Bu seçenek normal campaign stop komutu değildir.
 
+Kalıcı intrabar `AMBIGUOUS` outcome için ayrı **PAPER bakım** sözleşmesi:
+
+```bash
+python -m alphaforge.burnin_ops --db "$LAB_DB" --json recover-runtime \
+  --campaign-id "$CID" --terminalize-preserving-ambiguity
+```
+
+Bu explicit seçenek yalnız kimlik/hash bağlı kanonik reject ve outcome kaydı,
+complete market window, eksiksiz maliyetler ve public market-data provenance
+kanıtlandığında kullanılabilir. Ambiguity kaydı, null ekonomik sonuçlar,
+`evidence_complete=0` ve karar/outcome kaynakları aynen korunur. Normal
+completion, reject attribution ve qualification kuralları değişmez.
+
+Mevcut dead-worker, sıfır execution/exposure ve güncel authenticated
+reconciliation kontrolleri transaction içinde yeniden doğrulanır. Kampanya/run
+`FAILED` olur; kalıcı `PAPER_PRESERVED_AMBIGUITY_MAINTENANCE` olayı aynı
+kampanyada **start ve resume'u engeller**. Bu, continuation izni değildir.
+Stats-only compaction yalnız bu authorization ile birebir eşleşen korunmuş
+ambiguity kayıtlarının pencere korumasını kaldırabilir; diğer outstanding
+kayıtlar korunur. Hash değişikliği veya reconciliation kanıtının kanonik
+120 saniyelik freshness süresinin dolması maintenance'i tekrar bloke eder.
+Başarılı terminalization fiziksel DB+WAL kapasitesi veya compaction hedefi
+PASS anlamına gelmez; expired authorization otomatik yenilenmez. Aynı explicit
+komut tekrar çağrıldığında idempotent kanıt eşleşmesi kontrol edilir; yalnız
+expired bakım yetkisi için yeni authenticated reconciliation ve transaction-time
+sıfır exposure/identity kontrolü ile yetki yenilenebilir. Run oluşturulmaz.
+
+
 ### A.5 Config / reconciliation hızlı kontrolleri
 
 ```bash

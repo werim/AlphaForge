@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL, AMBIGUITY_MAINTENANCE_EVENT, preserved_ambiguity_evidence, authorized_ambiguity_ids
 
 import argparse, asyncio, contextlib, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
 from pathlib import Path, PureWindowsPath
@@ -1427,7 +1427,7 @@ def _stop_worker(pid: Any, timeout: float = 10.0) -> bool:
     return not _pid_alive(pid)
 
 
-def _authoritative_recovery_exposure(db: str, campaign_id: str) -> dict[str, Any]:
+def _authoritative_recovery_exposure(db: str, campaign_id: str, *, force_reconciliation_probe: bool = False) -> dict[str, Any]:
     """Read the execution-owned recovery gate before advancing a continuation.
 
     Campaign tables own forward-label and PAPER-position outcomes only.  Orders,
@@ -1438,7 +1438,7 @@ def _authoritative_recovery_exposure(db: str, campaign_id: str) -> dict[str, Any
     try:
         cfg = load_config_from_env()
         return evaluate_runtime_recovery(
-            engine, mode="PAPER", campaign_id=campaign_id,
+            engine, mode="PAPER", campaign_id=campaign_id, force_reconciliation_probe=force_reconciliation_probe,
             reconciliation_probe=build_readonly_reconciliation_probe(_readonly_reconciliation_provider(cfg)),
         )
     finally:
@@ -1553,7 +1553,7 @@ def _terminalization_pre_begin_hook() -> None:
     """Test seam for deterministic precheck/transaction race coverage."""
 
 
-def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: str, *, preserve_ambiguity: bool = False) -> dict[str, Any]:
     """Atomically terminalize a fully evidenced zero-execution PAPER recovery."""
     db = conn.execute("PRAGMA database_list").fetchone()[2]
     initial_campaign = get_campaign(conn, campaign_id)
@@ -1564,6 +1564,8 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
     # Strict replay is tied to the exact campaign/run and recorded identities.
     prior = conn.execute("SELECT event_id,details_json FROM burnin_campaign_events WHERE campaign_id=? AND burnin_run_id IS ? AND event_type='PHASE9_MANUAL_ZERO_EXPOSURE_TERMINALIZED' ORDER BY id DESC LIMIT 1", (campaign_id, expected_run_id)).fetchone()
     if initial_campaign.get("campaign_status") == "FAILED":
+        if preserve_ambiguity:
+            prior = conn.execute("SELECT event_id,details_json FROM burnin_campaign_events WHERE campaign_id=? AND burnin_run_id=? AND event_type=? ORDER BY id DESC LIMIT 1", (campaign_id, expected_run_id, AMBIGUITY_MAINTENANCE_EVENT)).fetchone() or prior
         if not prior:
             raise RuntimeError("FAILED_CAMPAIGN_HAS_NO_MATCHING_TERMINALIZATION_AUDIT")
         details = json.loads(prior["details_json"] or "{}")
@@ -1572,12 +1574,24 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         current_link = _local_terminalization_snapshot(conn, campaign_id, expected_run_id)
         if not current_run or not current_mapping or current_run[0] != "FAILED" or current_mapping[0] != "FAILED" or details.get("idempotency_identity") is None or details.get("source_hash") != current_link["source_hash"] or details.get("runtime_evidence", {}).get("snapshot_hash") != current_link["runtime_link_hash"]:
             raise RuntimeError("TERMINALIZATION_REPLAY_IDENTITY_MISMATCH")
+        if details.get("preserved_ambiguity"):
+            if preserved_ambiguity_evidence(conn, campaign_id, expected_run_id) != details["preserved_ambiguity"]:
+                raise RuntimeError("TERMINALIZATION_REPLAY_AMBIGUITY_MISMATCH")
+            if preserve_ambiguity and not authorized_ambiguity_ids(conn, campaign_id, expected_run_id):
+                return _refresh_ambiguity_maintenance(conn, campaign_id, expected_run_id, details)
         return {"status": "PASS", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "terminal_status": "FAILED", "idempotent_replay": True, "event_id": prior["event_id"], "idempotency_identity": details["idempotency_identity"]}
     initial_status = initial_campaign.get("campaign_status")
     if initial_status not in {"STARTING", "RECOVERY_REQUIRED"}:
         raise RuntimeError("MANUAL_TERMINALIZATION_REQUIRES_STARTING_OR_RECOVERY_REQUIRED")
 
     precheck = _local_terminalization_snapshot(conn, campaign_id, expected_run_id)
+    ambiguity = None
+    if preserve_ambiguity:
+        try:
+            ambiguity = preserved_ambiguity_evidence(conn, campaign_id, expected_run_id)
+        except (ValueError, TypeError, KeyError, AttributeError, sqlite3.Error) as exc:
+            return {"status": "FAIL_CLOSED", "failure_reasons": [str(exc)]}
+    preserved_count = ambiguity["preserved_count"] if ambiguity else 0
     preliminary_failures: list[str] = []
     preliminary_run = precheck.get("run") or {}
     preliminary_local = precheck.get("local") or {}
@@ -1592,7 +1606,7 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         preliminary_failures.append("WORKER_BECAME_ALIVE")
     if not all(bool(v) for v in (preliminary_local.get("availability") or {}).values()) or preliminary_local.get("query_errors"):
         preliminary_failures.append("LOCAL_EXPOSURE_UNAVAILABLE")
-    if preliminary_local.get("open_positions") != 0 or preliminary_local.get("pending_reject_labels") != 0:
+    if preliminary_local.get("open_positions") != 0 or preliminary_local.get("pending_reject_labels") != preserved_count:
         preliminary_failures.append("LOCAL_EXPOSURE_NONZERO")
     if preliminary_failures:
         return {"status": "FAIL_CLOSED", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "failure_reasons": preliminary_failures}
@@ -1660,7 +1674,12 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         require(all(bool(v) for v in (local.get("availability") or {}).values()) and not local.get("query_errors"), "LOCAL_EXPOSURE_UNAVAILABLE")
         require(local.get("open_positions") == 0, "OPEN_POSITIONS_NONZERO")
         require(final["pending_orders_available"] and final["pending_orders"] == 0, "PENDING_ORDERS_NONZERO_OR_UNAVAILABLE")
-        require(local.get("pending_reject_labels") == 0, "PENDING_REJECTS_NONZERO")
+        require(local.get("pending_reject_labels") == preserved_count, "PENDING_REJECTS_NONZERO")
+        if ambiguity:
+            try:
+                require(preserved_ambiguity_evidence(conn, campaign_id, expected_run_id) == ambiguity, "PRESERVED_AMBIGUITY_CHANGED")
+            except (ValueError, TypeError, KeyError, AttributeError, sqlite3.Error):
+                require(False, "PRESERVED_AMBIGUITY_CHANGED")
         require(execution.get("available") is True and execution.get("executions") == 0, "EXECUTIONS_NONZERO_OR_UNAVAILABLE")
         require(execution.get("lifecycle_executions") == 0, "LIFECYCLE_EXECUTIONS_NONZERO")
         availability = dict(runtime.get("availability") or {}); counts = dict(runtime.get("current_exposure_check") or {})
@@ -1674,6 +1693,12 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         observed = runtime_identity["observed_at"]
         replay_identity = "term_" + canonical_hash({"campaign_id": campaign_id, "run_id": expected_run_id, "source_hash": final["source_hash"], "runtime_evidence": runtime_identity})[:24]
         details = {"campaign_id": campaign_id, "run_id": expected_run_id, "previous_campaign_status": campaign["campaign_status"], "previous_continuation_status": mapping["status"], "terminal_status": "FAILED", "operator_action": "--terminalize-zero-exposure", "local_exposure": {"open_positions": local["open_positions"], "pending_orders": final["pending_orders"]}, "execution_count": execution["executions"], "lifecycle_execution_count": execution["lifecycle_executions"], "pending_reject_count": local["pending_reject_labels"], "reconciliation_status": runtime["reconciliation_status"], "runtime_evidence": runtime_identity, "source_hash": final["source_hash"], "campaign_identity_hash": final["campaign_identity_hash"], "continuation_identity_hash": final["continuation_identity_hash"], "worker_evidence_id": (final["worker_evidence"] or {}).get("event_id"), "worker_evidence_time": (final["worker_evidence"] or {}).get("event_time"), "worker_pid": worker_pid, "idempotency_identity": replay_identity, "evidence_observed_at": observed}
+        if ambiguity:
+            details["preserved_ambiguity"] = ambiguity
+            details["maintenance_run_identity"] = {key: run.get(key) for key in ("release_id", "execution_mode", "git_commit", "config_hash", "strategy_config_hash", "universe_hash", "continuation_sequence")}
+            details["maintenance_sequence"] = mapping.get("continuation_sequence")
+            details["operator_action"] = "--terminalize-preserving-ambiguity"
+            event(conn, campaign_id, AMBIGUITY_MAINTENANCE_EVENT, burnin_run_id=expected_run_id, details=details)
         now = utc_now()
         updates = [
             conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status=? AND release_id=? AND git_commit=? AND config_hash IS ? AND strategy_config_hash IS ? AND universe_hash IS ?", (now, expected_run_id, initial_status, run.get("release_id"), run.get("git_commit"), run.get("config_hash"), run.get("strategy_config_hash"), run.get("universe_hash"))),
@@ -1699,6 +1724,65 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         conn.rollback()
         raise
     return {"status": "PASS", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "terminal_status": "FAILED", "idempotent_replay": False, "idempotency_identity": replay_identity, "runtime_evidence": runtime_identity, "source_evidence_hash": final["source_hash"]}
+
+
+def _refresh_ambiguity_maintenance(conn, campaign_id, run_id, prior):
+    """Renew expired maintenance with new read-only reconciliation, never a run."""
+    db = conn.execute("PRAGMA database_list").fetchone()[2]
+    runtime = _authoritative_recovery_exposure(db, campaign_id, force_reconciliation_probe=True)
+    probe = runtime.get("reconciliation_probe")
+    availability = runtime.get("availability") or {}
+    counts = runtime.get("current_exposure_check") or {}
+    latest = runtime.get("latest") or {}
+    if (not isinstance(probe, Mapping) or runtime.get("reconciliation_probe_clean") is not True
+            or runtime.get("query_errors") or runtime.get("kill_switch_active") is not False
+            or runtime.get("previous_process_alive") is not False
+            or latest.get("campaign_id") != campaign_id or latest.get("burnin_run_id") != run_id
+            or not all(availability.get(k) for k in ("active_positions_available", "pending_orders_available", "orphan_evidence_available", "kill_switch_available"))
+            or any(counts.get(k) != 0 for k in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions"))
+            or _pid_alive(prior.get("worker_pid"))):
+        return {"status": "FAIL_CLOSED", "failure_reasons": ["MAINTENANCE_RECONCILIATION_OR_EXPOSURE_UNAVAILABLE"]}
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    try:
+        snapshot = persist_campaign_linked_zero_exposure_reconciliation_evidence(
+            engine, probe=probe, prior_snapshot=latest, campaign_id=campaign_id,
+            burnin_run_id=run_id, release_id=latest.get("release_id"),
+        )
+    except RuntimeError as exc:
+        return {"status": "FAIL_CLOSED", "failure_reasons": [str(exc)]}
+    finally:
+        engine.dispose()
+    identity = _runtime_evidence_identity({"latest": snapshot}, campaign_id, run_id)
+    _terminalization_pre_begin_hook()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        final = _local_terminalization_snapshot(conn, campaign_id, run_id)
+        local, execution = final["local"], final["execution"]
+        evidence = preserved_ambiguity_evidence(conn, campaign_id, run_id)
+        if (any((final.get(k) or {}).get(field) != "FAILED" for k,field in (("campaign","campaign_status"),("mapping","status"),("run","status")))
+                or final["campaign"].get("active_run_id") != run_id
+                or final["campaign_identity_hash"] != prior["campaign_identity_hash"]
+                or any(final["run"].get(key) != value for key,value in prior["maintenance_run_identity"].items())
+                or final["mapping"].get("continuation_sequence") != prior["maintenance_sequence"]
+                or evidence != prior["preserved_ambiguity"] or final["source_hash"] != prior["source_hash"]
+                or final["runtime_link_hash"] != identity["snapshot_hash"] or not all(identity["checks"].values())
+                or _age(identity["observed_at"]) is None or not 0 <= _age(identity["observed_at"]) <= TERMINALIZATION_EVIDENCE_MAX_AGE_SECONDS
+                or final["campaign"].get("worker_pid") or _pid_alive(prior.get("worker_pid"))
+                or not all(local.get("availability",{}).values()) or local.get("query_errors")
+                or local.get("open_positions") != 0 or local.get("pending_reject_labels") != evidence["preserved_count"]
+                or not final["pending_orders_available"] or final["pending_orders"] != 0
+                or execution.get("available") is not True or execution.get("executions") != 0 or execution.get("lifecycle_executions") != 0):
+            conn.rollback()
+            return {"status": "FAIL_CLOSED", "failure_reasons": ["MAINTENANCE_EVIDENCE_CHANGED"]}
+        details = {**prior, "runtime_evidence": identity, "evidence_observed_at": identity["observed_at"]}
+        event(conn, campaign_id, AMBIGUITY_MAINTENANCE_EVENT, burnin_run_id=run_id, details=details)
+        conn.commit()
+        return {"status": "PASS", "campaign_id": campaign_id, "burnin_run_id": run_id,
+                "terminal_status": "FAILED", "maintenance_only": True, "renewed": True,
+                "continuation_allowed": False, "runtime_evidence": identity}
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _managed_position_recovery_snapshot(
@@ -2300,7 +2384,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
     l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
     for name in ("health", "watch", "recovery-drill", "audit", "pause", "resume", "status"):
         s = sub.add_parser(name); s.add_argument("--campaign-id", required=True)
-    rr = sub.add_parser("recover-runtime"); rr.add_argument("--campaign-id"); rr.add_argument("--terminalize-zero-exposure", action="store_true", help="explicitly terminalize a dead RECOVERY_REQUIRED PAPER continuation only after complete zero-exposure verification")
+    rr = sub.add_parser("recover-runtime")
+    rr.add_argument("--campaign-id")
+    terminal = rr.add_mutually_exclusive_group()
+    terminal.add_argument("--terminalize-preserving-ambiguity", action="store_true", help="PAPER maintenance only: preserve verified ambiguous outcomes, permanently deny continuation")
+    terminal.add_argument("--terminalize-zero-exposure", action="store_true", help="explicitly terminalize a dead RECOVERY_REQUIRED PAPER continuation only after complete zero-exposure verification")
     r = sub.add_parser("report"); r.add_argument("--campaign-id", required=True); r.add_argument("--output-dir", required=True)
     f = sub.add_parser("finalize"); f.add_argument("--campaign-id", required=True); f.add_argument("--output-dir", required=True)
     d = sub.add_parser("diagnose-db", help="read-only campaign state diagnosis and safe cleanup plan"); d.add_argument("--max-heartbeat-age", type=float, default=120.0)
@@ -2382,7 +2470,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 else:
                     cid = row[0]
             if cid:
-                out = terminalize_zero_exposure_recovery(conn, cid) if args.terminalize_zero_exposure else recovery_drill(conn, cid)
+                out = terminalize_zero_exposure_recovery(conn, cid, preserve_ambiguity=args.terminalize_preserving_ambiguity) if (args.terminalize_zero_exposure or args.terminalize_preserving_ambiguity) else recovery_drill(conn, cid)
                 code = 0 if out["status"] == "PASS" else 1
         elif args.cmd == "audit":
             out = audit_payload(conn, args.campaign_id); _write_json_csv(Path(f"artifacts/burnin/{args.campaign_id}"), "burnin_integrity_audit", out); code = 0 if out["status"] == "PASS" else 1

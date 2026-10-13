@@ -179,7 +179,7 @@ def latest_runtime_state_snapshot(engine: Engine) -> dict[str, Any] | None:
 def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | None = None,
                               burnin_run_id: str | None = None, release_id: str | None = None,
                               instance_id: str | None = None, startup_id: str | None = None,
-                              reconciliation_probe: Any | None = None) -> dict[str, Any]:
+                              reconciliation_probe: Any | None = None, force_reconciliation_probe: bool = False) -> dict[str, Any]:
     """Evaluate recovery from authoritative current state, not snapshot counters.
 
     PAPER may isolate a dead, terminal, unrelated campaign only when SQL exposure
@@ -280,7 +280,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     same_campaign = bool(campaign_id and prior_campaign and campaign_id == prior_campaign)
     same_lineage = bool(latest and instance_id and startup_id and latest.get("instance_id") == instance_id and latest.get("startup_id") == startup_id)
     probe_clean = False
-    if reconciliation_probe is not None and prior_unclean:
+    if reconciliation_probe is not None and (prior_unclean or force_reconciliation_probe):
         try:
             probe = dict(reconciliation_probe() or {})
             probe_clean = (str(probe.get("evidence_status") or "").upper() == "COMPLETE"

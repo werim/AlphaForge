@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL, AMBIGUITY_MAINTENANCE_EVENT
 
 import argparse, asyncio, contextlib, csv, hashlib, json, math, os, re, sqlite3, subprocess, sys, threading, time, uuid
 from datetime import datetime, timedelta, timezone
@@ -567,6 +567,8 @@ def require_operational_campaign_evidence(conn: Any, campaign_id: str) -> None:
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")
+    if _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND event_type=:kind LIMIT 1", {"cid": campaign_id, "kind": AMBIGUITY_MAINTENANCE_EVENT}).fetchone():
+        raise RuntimeError("PRESERVED_AMBIGUITY_MAINTENANCE_ONLY_NO_CONTINUATION")
     require_operational_campaign_evidence(conn, campaign_id)
     require_valid_release_id(str(c.get("release_id") or ""), conn)
     pid = c.get("worker_pid")

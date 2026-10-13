@@ -5,7 +5,7 @@ payload, unlinks a WAL, or vacuums an actively written database.
 """
 from __future__ import annotations
 
-from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL, authorized_ambiguity_ids
 
 import argparse
 from contextlib import contextmanager
@@ -589,7 +589,7 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
         "burnin_campaign_runs": {"campaign_id", "burnin_run_id"},
         "burnin_runs": {"burnin_run_id", "execution_mode", "git_commit", "config_hash"},
         "burnin_pending_reject_labels": {
-            "campaign_id", "burnin_run_id", "decision_timestamp", "status", "evidence_complete",
+            "campaign_id", "burnin_run_id", "decision_timestamp", "status", "evidence_complete", "pending_label_id",
         },
         "burnin_pending_position_outcomes": {
             "campaign_id", "burnin_run_id", "decision_time", "entry_time", "status",
@@ -631,6 +631,7 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
         ).fetchone():
             return {"cycles": [], "reason": "OUTSTANDING_OR_UNKNOWN_SAFETY_STATE"}
 
+    ambiguity_cache = {}
     cutoff = float(time.time() if now is None else now) - policy.stats_only_min_age_sec
     # Scan oldest candidates through the time index. A window rank over every
     # campaign/cycle materializes the whole universe before LIMIT or the budget
@@ -721,12 +722,17 @@ def plan_stats_only_universe(conn, policy: StoragePolicy, *, now: float | None =
 
         unresolved_times: list[float] = []
         try:
-            for value, in conn.execute(f"""
-                SELECT decision_timestamp FROM burnin_pending_reject_labels
+            key = (row["campaign_id"], row["burnin_run_id"])
+            if key not in ambiguity_cache:
+                ambiguity_cache[key] = authorized_ambiguity_ids(conn, *key)
+            preserved_ids = ambiguity_cache[key]
+            for label_id, value in conn.execute(f"""
+                SELECT pending_label_id,decision_timestamp FROM burnin_pending_reject_labels
                 WHERE campaign_id=? AND burnin_run_id=?
                   AND {UNRESOLVED_REJECT_SQL}
             """, (row["campaign_id"], row["burnin_run_id"])):
-                unresolved_times.append(_timestamp(value))
+                if label_id not in preserved_ids:
+                    unresolved_times.append(_timestamp(value))
             for decision_time, entry_time in conn.execute("""
                 SELECT decision_time,entry_time FROM burnin_pending_position_outcomes
                 WHERE campaign_id=? AND burnin_run_id=?
