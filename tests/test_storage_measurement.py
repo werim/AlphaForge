@@ -496,3 +496,30 @@ def test_control_fsync_failure_invalidates_favorable_slot(tmp_path,monkeypatch):
     with pytest.raises(OSError):control.put(1,{'status':'MEASURED'})
     with pytest.raises(ValueError):control.get(1)
     control.close()
+
+
+def test_approved_digest_and_validated_plan_are_the_same_bytes(tmp_path,monkeypatch):
+    import hashlib,io
+    path=tmp_path/'plan.json'
+    selected=b'{"selected":"not approved"}'
+    approved=b'{"selected":"approved"}'
+    path.write_bytes(selected)
+    original=Path.open;reads=0
+    def swap_on_read(p,*args,**kwargs):
+        nonlocal reads
+        if p==path:
+            reads+=1
+            return io.BytesIO(selected if reads==1 else approved)
+        return original(p,*args,**kwargs)
+    monkeypatch.setattr(Path,'open',swap_on_read)
+    monkeypatch.setattr(m,'validate_plan',lambda p:pytest.fail('unapproved selected bytes must not reach admission'))
+    with pytest.raises(ValueError,match='PLAN_DIGEST'):m.run(path,hashlib.sha256(approved).hexdigest())
+    assert not (tmp_path/'.af-real-calibration.control').exists()
+
+
+def test_runtime_redaction_covers_signed_urls_and_json_auth_fields():
+    from alphaforge.storage_calibration import redact
+    value='GET /?signature=private-hmac&timestamp=123 X-MBX-APIKEY: private-api {"signature": "json-hmac"}'
+    result=redact(value)
+    assert all(secret not in result for secret in ('private-hmac','private-api','json-hmac'))
+    assert 'timestamp=123' in result

@@ -9,6 +9,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 import json
+import hashlib
 import importlib.metadata
 import math
 import os
@@ -387,9 +388,11 @@ def guardian(plan, control_path: Path):
 
 def run(plan_path: Path, digest: str):
     os.environ['GIT_OPTIONAL_LOCKS']='0'
-    plan = read_json(plan_path)
-    if file_hash(plan_path) != digest:
+    with plan_path.open('rb') as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != digest:
         raise ValueError('PLAN_DIGEST_MISMATCH')
+    plan = json.loads(raw)
     cfg = validate_plan(plan)
     mount = Path(plan['backend']['mount'])
     if (mount / 'experiment').exists():

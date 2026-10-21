@@ -204,7 +204,7 @@ def redact(value: str, secrets: tuple[str, ...] = ()) -> str:
                 if value.endswith(secret[:length]):
                     value = value[:-length] + "[REDACTED_TRUNCATED]"
                     break
-    return re.sub(r"(?i)((?:secret|token|password|api[_-]?key|authorization)\s*[:=]\s*)[^\s,;]+",
+    return re.sub(r"(?i)((?:secret|token|password|api[_-]?key|authorization|signature|x-mbx-apikey)[\"']?\s*[:=]\s*[\"']?)[^\s,;}&\"']+",
                   r"\1[REDACTED]", value)
 
 
