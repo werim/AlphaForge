@@ -291,8 +291,16 @@ def test_future_candle_never_leaks_into_mfe_or_favorable_proposal():
     assert all(row["mae_r"] == pytest.approx(0.2) for row in proposals)
 
 
-def test_terminal_and_post_terminal_candles_never_rewrite_persisted_preterminal_proposal():
-    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=300.0)
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+@pytest.mark.parametrize("terminal_reason", ["TP_HIT", "SL_HIT"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_terminal_and_post_terminal_candles_never_rewrite_persisted_preterminal_proposal(
+    side, terminal_reason, stale
+):
+    provider = PaperPositionManagementShadowProvider(
+        max_evidence_age_seconds=0.0 if stale else 300.0
+    )
+    position = _position(trailing_allowed=True, trailing_distance=0.75)
     preterminal_candles = [
         {
             "timestamp": "2026-10-06T12:01:00Z",
@@ -322,14 +330,24 @@ def test_terminal_and_post_terminal_candles_never_rewrite_persisted_preterminal_
             "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
         },
     ]
+    if terminal_reason == "SL_HIT":
+        terminal_and_post_terminal_candles[0].update(high=105.0, low=89.0, close=99.0)
+    if side == "SHORT":
+        position.update(side="SHORT", stop=110.0, current_stop=110.0,
+                        target=80.0, current_target=80.0)
+        for candle in preterminal_candles + terminal_and_post_terminal_candles:
+            candle.update(high=200.0 - candle["low"], low=200.0 - candle["high"],
+                          close=200.0 - candle["close"])
+        # Keep the adversarial post-terminal candle geometrically valid.
+        terminal_and_post_terminal_candles[-1].update(high=999.0, low=1.0, close=500.0)
     original = provider(
-        _position(trailing_allowed=True, trailing_distance=0.75),
+        position,
         preterminal_candles,
         "2026-10-06T12:02:30Z",
         _campaign(),
     )["proposals"]
     replay = provider(
-        _position(trailing_allowed=True, trailing_distance=0.75),
+        position,
         preterminal_candles + terminal_and_post_terminal_candles,
         "2026-10-06T12:04:30Z",
         _campaign(),
@@ -350,10 +368,12 @@ def test_terminal_and_post_terminal_candles_never_rewrite_persisted_preterminal_
     }
 
     trailing = next(row for row in replay if row["proposed_action"] == "WOULD_ENABLE_TRAILING")
-    assert trailing["eligibility_status"] == "ELIGIBLE"
+    assert trailing["eligibility_status"] == ("DENIED" if stale else "ELIGIBLE")
+    if stale:
+        assert all(row["reason"] == "STALE_MARKET_EVIDENCE" for row in replay)
     assert trailing["closed_candle_time"] == "2026-10-06T12:02:00Z"
     assert trailing["proposal_time"] == "2026-10-06T12:02:00Z"
-    assert trailing["observed_price"] == pytest.approx(104.0)
+    assert trailing["observed_price"] == pytest.approx(104.0 if side == "LONG" else 96.0)
     assert trailing["mfe_r"] == pytest.approx(0.5)
     assert trailing["mae_r"] == pytest.approx(0.2)
     assert trailing["market_evidence"]["first_terminal_candle_open_time"] is None
@@ -645,6 +665,81 @@ def test_runner_shadow_is_immutable_and_restart_replay_does_not_duplicate(tmp_pa
             "WHERE campaign_id=? AND event_type='RESOLVER_BATCH_FAILED'",
             (campaign_id,),
         ).scalar_one() == 0
+    engine.dispose()
+
+
+def test_runner_real_shadow_conflict_preserves_evidence_and_pauses_before_resolution(tmp_path):
+    path, campaign_id = _runner_setup(tmp_path)
+    phase = {"conflict": False}
+    original = []
+    provider = PaperPositionManagementShadowProvider(max_evidence_age_seconds=1_000_000_000.0)
+
+    def candle_provider(symbol, start, end, timeframe="1m"):
+        candles = _candles()
+        if phase["conflict"]:
+            candles.append({
+                "timestamp": "2026-10-06T12:03:00Z",
+                "high": 121.0, "low": 103.0, "close": 119.0,
+                "source_provenance": {"provider": "BINANCE_READ_ONLY_KLINES", "interval": "1m"},
+            })
+        return candles
+
+    def shadow_provider(position, candles, now, campaign):
+        # Model a genuinely different position snapshot under the same causal
+        # identity. Use the production provider to compute both hashes.
+        if phase["conflict"]:
+            position = {**position, "current_stop": position["current_stop"] + 1.0}
+        result = provider(position, candles, now, campaign)
+        if phase["conflict"]:
+            for previous, candidate in zip(original, result["proposals"], strict=True):
+                assert previous["proposal_id"] == candidate["proposal_id"]
+                assert {key for key in previous if previous[key] != candidate[key]} == {
+                    "current_stop", "proposal_hash"
+                }
+        else:
+            original.extend(result["proposals"])
+        return result
+
+    engine = create_engine(f"sqlite+pysqlite:///{path}", future=True)
+    runner = BurnInCampaignRunner(
+        engine, campaign_id, candle_provider,
+        position_management_shadow_provider=shadow_provider,
+    )
+    runner._qualify_if_due = lambda: None
+    assert runner.resolver_tick()["position_management_shadow"] == {"inserted": 4, "idempotent": 0}
+    with engine.connect() as db:
+        before = dict(db.exec_driver_sql("SELECT * FROM burnin_pending_position_outcomes").mappings().one())
+        persisted = db.exec_driver_sql(
+            "SELECT proposal_id,proposal_hash,payload_json FROM burnin_position_management_shadow_proposals ORDER BY id"
+        ).all()
+
+    phase["conflict"] = True
+    for count, status in enumerate(["FAILED", "FAILED", "PAUSED"], start=1):
+        result = runner.resolver_tick()
+        assert result["status"] == status
+        assert result["failure_count"] == count
+        assert result["error"] == "POSITION_MANAGEMENT_SHADOW_PROPOSAL_ID_CONFLICT"
+        assert result["failure_class"] == "UNKNOWN"
+        with engine.connect() as db:
+            # Even though TP candles are available, failure cannot commit a
+            # canonical close, overwrite evidence, or authorize management.
+            assert dict(db.exec_driver_sql(
+                "SELECT * FROM burnin_pending_position_outcomes"
+            ).mappings().one()) == before
+            assert db.exec_driver_sql(
+                "SELECT proposal_id,proposal_hash,payload_json FROM burnin_position_management_shadow_proposals ORDER BY id"
+            ).all() == persisted
+            assert db.exec_driver_sql("SELECT COUNT(*) FROM burnin_position_management_events").scalar_one() == 0
+
+    with engine.connect() as db:
+        assert db.exec_driver_sql(
+            "SELECT campaign_status,last_error FROM burnin_campaigns"
+        ).one() == ("PAUSED", "RESOLVER_FAILURE_THRESHOLD")
+        failures = [json.loads(row[0]) for row in db.exec_driver_sql(
+            "SELECT details_json FROM burnin_campaign_events WHERE event_type='RESOLVER_BATCH_FAILED' ORDER BY id"
+        )]
+        assert [row["failure_count"] for row in failures] == [1, 2, 3]
+        assert all(row["error"] == "POSITION_MANAGEMENT_SHADOW_PROPOSAL_ID_CONFLICT" for row in failures)
     engine.dispose()
 
 
