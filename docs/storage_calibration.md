@@ -14,6 +14,11 @@ load. Consequently this implementation does not invent that authority or solve
 an unmeasured budget by writing a favorable number. Representative empirical
 coverage and an independently justified conservative bound remain necessary.
 
+The [storage admission and first-measurement contract](storage_admission_contract.md)
+records the normal-launch bootstrap dependency, the evidence still missing and
+the separate bounded real-runtime contract. That proposed runtime entrypoint is
+not implemented; the replay command below cannot stand in for it.
+
 ## Workload and production semantics
 
 A versioned JSON plan binds full clean code SHA/tree and module hashes, canonical
@@ -89,7 +94,10 @@ peaks and bounded recent reports.
 A fresh real parent directory, atomic `0600 O_EXCL` attempt reservation and fresh
 `0700` child output directory isolate the laboratory. The reservation is fsynced
 **before** DB/archive/output preparation. It is never deleted on error/timeout.
-A second worker reservation prevents direct worker re-entry. The worker receives
+A second worker reservation prevents direct worker re-entry. A child-side parent
+liveness watchdog exits an orphaned worker after supervisor loss and attempts a
+durable SUPERVISOR_LOST note; a missing parent result stays INCOMPLETE. This is
+not an OS-enforced death signal, physical quota or hard real-time deadline. The worker receives
 no credentials/process config, only the selected plan and minimal environment;
 its DB paths are hardcoded below its output. Outgoing socket connects are refused
 at the application boundary. This is not an OS network-policy attestation.
