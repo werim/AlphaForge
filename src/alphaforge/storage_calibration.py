@@ -304,7 +304,8 @@ def parent_watchdog(parent_pid: int, output: Path, *, interval_seconds: float = 
                     os._exit(74)
             stopped.wait(interval_seconds)
 
-    threading.Thread(target=watch, name="storage-calibration-parent-watch", daemon=True).start()
+    stopped.worker_thread = threading.Thread(target=watch, name="storage-calibration-parent-watch", daemon=True)
+    stopped.worker_thread.start()
     return stopped
 
 

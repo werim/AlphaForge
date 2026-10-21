@@ -1,6 +1,8 @@
 """Evidence boundaries: complete replay is not real-runtime capacity proof."""
 from copy import deepcopy
 from dataclasses import replace
+import os
+from pathlib import Path
 
 import pytest
 
@@ -94,7 +96,8 @@ finally:
         p.kill()
 '''
     proc = subprocess.Popen([sys.executable, "-c", parent, str(tmp_path), worker],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, "PYTHONPATH": str(Path(cal.__file__).resolve().parents[1])})
     child_pid = None
     try:
         deadline = time.monotonic() + 5
@@ -152,6 +155,7 @@ time.sleep(10)
 raise SystemExit(99)
 '''
     result = subprocess.run([sys.executable, "-c", script, str(blocked)],
-                            capture_output=True, timeout=5)
+                            capture_output=True, timeout=5,
+                            env={**os.environ, "PYTHONPATH": str(Path(cal.__file__).resolve().parents[1])})
     assert result.returncode == 74
     assert blocked.read_text() == "fixture"
