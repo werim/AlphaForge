@@ -276,3 +276,16 @@ def test_interpreter_and_filesystem_mismatch_are_not_relabelled(monkeypatch, tmp
 def test_redaction_covers_known_secret_truncated_at_capture_boundary():
     assert "super-" not in cal.redact("prefix super-", ("super-private-token",))
     assert "[REDACTED_TRUNCATED]" in cal.redact("prefix super-", ("super-private-token",))
+
+
+def test_generated_workload_exercises_every_adapter_without_future_evidence(tmp_path):
+    env = {"ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED": "true",
+           "ALPHAFORGE_REJECT_FORWARD_HORIZON_BARS": "1", "ALPHAFORGE_SCAN_INTERVAL_SEC": "60"}
+    p = cal.example(env, source()["sha"], duration=210, candidate_count=1)
+    p["environment_scope"]["filesystem"] = cal.filesystem_identity(tmp_path)
+    shadow = next(e for e in p["workload"]["events"] if e["kind"] == "shadow")
+    assert len(shadow["data"]["candles"]) == 1
+    result = cal.replay(p, tmp_path, source())
+    assert result["missing_surfaces"] == []
+    assert not result["complete"] and not result["admission_eligible"]
+    assert result["recommended_growth_budget_bytes_per_sec"] is None

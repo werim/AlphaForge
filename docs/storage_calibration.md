@@ -57,8 +57,10 @@ fabricated. Canonical archive tests cover successful eligible archival separatel
 An empty archive directory in the Mini target policy stays empty.
 
 The example generator uses the configured scan cadence, a declared synthetic
-candidate count and a six-hour **logical** window. It writes universe/heartbeat
-inputs only and explicitly reports other missing surfaces. Candidate cardinality,
+candidate count and a six-hour **logical** window. It also supplies one explicit
+synthetic observation/reject/position/snapshot/shadow/resolver lifecycle when the
+window contains the configured reject horizon. Short examples report missing
+surfaces rather than consuming future candles. Candidate cardinality,
 payload sizes, eligibility, decisions, accepted/rejected mix, lifecycle costs,
 shadow actions, 240-bar unresolved windows and concurrency must be covered by a
 reviewed recorded/full workload before claiming representativeness. The harness
@@ -152,10 +154,11 @@ filesystem budget. These are diagnostic resource limits, not measured capacity
 or relaxed production watermarks. The Mini full-replay policy stays 1 GiB/700 MiB
 and R=0; no future rate/limit is preselected.
 
-`example` deliberately lacks lifecycle coverage, so its replay exits nonzero
-with an incomplete diagnostic report. Supply a fully reviewed workload using the
-same schema/adapters for a complete diagnostic; its admission flag still stays
-false. No actual six-hour measurement or workload generation was performed in
+`example` is illustrative: one lifecycle and a fixed candidate cardinality do
+not represent all live payload distributions or concurrency. Short, failed or
+partial coverage exits nonzero; a structurally complete diagnostic may exit zero
+but its admission flag still stays false. A reviewed recorded workload may use
+the same schema/adapters, without gaining automatic admission authority. No actual six-hour measurement or workload generation was performed in
 this development task. Tests use only tiny temporary fixtures.
 
 Abort on source/config/environment/input drift, reservation/path collisions,

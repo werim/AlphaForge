@@ -28,7 +28,7 @@ from alphaforge.burnin_campaign import build_phase8_campaign_identity
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import CONFIG_REGISTRY
 from alphaforge.storage_policy import StoragePolicy, full_replay_duration_budget, disk_budget
-from alphaforge.storage_workload import ACTIONS, Workload
+from alphaforge.storage_workload import ACTIONS, Workload, iso
 
 VERSION = "storage-calibration.v1"
 MAX_PLAN_BYTES = 256 * 1024**2
@@ -431,10 +431,49 @@ def example(env: dict, sha: str, duration: int = 21600, candidate_count: int = 3
                        "market_data_source": "SYNTHETIC_OFFLINE_FIXTURE"} for i in range(candidate_count)]
         events.extend([{"id": f"universe-{at}", "kind": "universe", "at": at, "data": {"candidates": candidates}},
                        {"id": f"heartbeat-{at}", "kind": "heartbeat", "at": at, "data": {"calibration": True}}])
+    # A declared synthetic lifecycle, not invented historical market evidence.
+    # Small windows remain intentionally partial instead of leaking future bars.
+    resolve_at = max(180, cfg.runtime.reject_forward_horizon_bars * 60 + 60)
+    if duration >= resolve_at:
+        costs = {name: 0.0 for name in ("spread_penalty", "slippage_penalty", "fee_penalty",
+                 "funding_penalty", "latency_penalty", "volatility_penalty", "liquidity_penalty")}
+        candles = [{"timestamp": iso(start + minute), "high": 105.0, "low": 98.0, "close": 104.0,
+                    "source_provenance": {"provider": "SYNTHETIC_OFFLINE_FIXTURE", "interval": "1m"}}
+                   for minute in range(60, resolve_at + 1, 60)]
+        candles[1].update(high=121.0, low=103.0, close=119.0)
+        events.extend([
+            {"id": "lab-observation", "kind": "observation", "at": 0,
+             "data": {"symbol": "BTCUSDT", "decision": "REJECTED", "metrics": {"reject_decision_id": "example-reject"}}},
+            {"id": "lab-position", "kind": "position", "at": 0, "data": {
+                "trade_id": "example-position", "signal_id": "example-signal", "source_decision_id": "example-decision",
+                "decision_time": iso(start), "entry_time": iso(start), "symbol": "BTCUSDT", "side": "LONG",
+                "setup_type": "PULLBACK", "regime": "TRENDING", "planned_entry": 100.0, "simulated_fill": 100.0,
+                "stop": 90.0, "target": 120.0, "quantity": 1.0, "notional": 100.0,
+                "entry_spread": 0.0, "entry_slippage": 0.0, "entry_fee": 0.0,
+                "source_provenance": {"source": "SYNTHETIC_OFFLINE_FIXTURE", "execution_cost_unit": "USD",
+                    "execution_cost_model_unit": "USD", "execution_cost_model": costs,
+                    "target_policy": {"trailing_allowed": False}},
+             }},
+            {"id": "lab-reject", "kind": "reject", "at": 0, "data": {
+                "reject_decision_id": "example-reject", "signal_id": "example-reject-signal", "symbol": "BTCUSDT",
+                "side": "LONG", "decision_timestamp": iso(start), "entry": 100.0, "stop": 90.0, "target": 120.0,
+                "horizon_bars": cfg.runtime.reject_forward_horizon_bars, "timeframe": "1m",
+                "execution_cost_assumptions": {name: 0.0 for name in ("spread_cost", "entry_slippage_cost",
+                    "exit_slippage_cost", "fee_cost", "funding_cost", "latency_cost")},
+                "regime": "TRENDING", "reject_reason": "SYNTHETIC_ONLY",
+                "source_provenance": {"source": "SYNTHETIC_OFFLINE_FIXTURE"},
+            }},
+            {"id": "lab-snapshot", "kind": "snapshot", "at": 0, "data": {"synthetic": True}},
+            {"id": "lab-shadow", "kind": "shadow", "at": 150,
+             "data": {"trade_id": "example-position", "candles": candles[:1]}},
+            {"id": "lab-resolve", "kind": "resolve", "at": resolve_at,
+             "data": {"candles_by_symbol": {"BTCUSDT": candles}}},
+        ])
+        events.sort(key=lambda e: e["at"])
     workload = {"provenance": {"kind": "SYNTHETIC", "source": "explicit illustrative fixture; not captured market evidence"},
                 "intervals": ["1h", "15m", "1m"], "start_timestamp": start,
                 "duration_seconds": duration, "events": events,
-                "representativeness": "Universe/heartbeat example only. Supply other ACTIONS for lifecycle coverage; never admission."}
+                "representativeness": "Synthetic cadence/candidate load plus one explicit lifecycle. No market, concurrency or workload upper-bound authority."}
     return {"version": VERSION, "code_sha": sha, "config_env": env,
             "environment_scope": environment_identity(Path(__file__).resolve().parent),
             "config_hashes": {k: ident[k] for k in ("config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")},

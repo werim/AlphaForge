@@ -60,7 +60,8 @@ class Workload:
                 conn, release_id=f"CALIBRATION_LAB_{tag}", duration_days=0.25,
                 symbols=[], intervals=["1h", "15m", "1m"], dynamic_universe=True,
                 runtime_config=cfg.runtime,
-                source_provenance={"provider": "BINANCE_READ_ONLY_KLINES", "mode": "PAPER",
+                source_provenance={"provider": "OFFLINE_CALIBRATION", "exchange": "binance", "mode": "PAPER",
+                                   "input_source": "OFFLINE_REPLAY_FIXTURE", "authenticated": False,
                                    "calibration_only": True, "execution_authority": False},
             )
             # Canonical synthetic DB lineage only: no execution worker or
