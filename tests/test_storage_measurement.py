@@ -569,3 +569,75 @@ def test_probe_reserves_headroom_for_entire_next_write(tmp_path, monkeypatch):
     assert result['aggregate_enospc'] is False
     assert result['reason'] == 'ValueError'
     assert not list(tmp_path.glob('.af-fill-*'))
+
+
+def test_new_physical_attempt_preserves_failed_claim_and_is_consumed(tmp_path, monkeypatch):
+    identity, failed = physical_fixture(tmp_path, monkeypatch)
+    failed.update(status='FAILED', aggregate_enospc=False, reason='TimeoutError')
+    old = tmp_path / '.af-capacity-proof.control'
+    c = v.ControlFile(old); c.put(1, failed); c.close()
+    before = old.read_bytes()
+    monkeypatch.setattr(v, 'container_free', lambda _: 10**12)
+    def deny(command, **kw):
+        Path(command[-2]).touch()
+        return SimpleNamespace(returncode=1, stdout=b'', stderr=b'fixture denied')
+    monkeypatch.setattr(v.subprocess, 'run', deny)
+    written = 0
+    def write(fd, data):
+        nonlocal written
+        if written + len(data) > 8_000_000:
+            raise OSError(errno.ENOSPC, 'fixture aggregate cap')
+        written += len(data)
+        return len(data)
+    monkeypatch.setattr(v.os, 'write', write)
+    result = v.probe(tmp_path, 10_000_000, 'b'*40, 100, attempt_id='second')
+    assert result['status'] == 'PHYSICALLY_VERIFIED'
+    assert old.read_bytes() == before
+    assert result['attempt_id'] == 'second'
+    assert v.verify(tmp_path, 10_000_000, canonical_hash(result), 'b'*40)['host'] == 'host'
+    with pytest.raises(ValueError, match='PHYSICAL_BACKEND'):
+        v.verify(tmp_path, 10_000_000, canonical_hash(result), 'a'*40)
+    with pytest.raises(FileExistsError):
+        v.probe(tmp_path, 10_000_000, 'b'*40, 100, attempt_id='second')
+    assert old.read_bytes() == before
+    # A later change even to unused bytes of prior evidence breaks the chain.
+    with old.open('r+b') as f:
+        f.seek(-1, 2); f.write(b'x')
+    with pytest.raises(ValueError, match='HISTORY'):
+        v.verify(tmp_path, 10_000_000, canonical_hash(result), 'b'*40)
+
+
+@pytest.mark.parametrize('attempt_id', ['', '../escape', 'bad/name', 'a'*65])
+def test_physical_attempt_id_cannot_select_another_path(tmp_path, attempt_id):
+    with pytest.raises(ValueError, match='ATTEMPT_ID'):
+        v.probe(tmp_path, 10_000_000, 'a'*40, 100, attempt_id=attempt_id)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_successor_probe_serializes_without_modifying_original_inode(tmp_path, monkeypatch):
+    physical_fixture(tmp_path, monkeypatch)
+    path = tmp_path / '.af-capacity-proof.control'
+    before = path.read_bytes()
+    c = v.ControlFile(path)
+    try:
+        v.fcntl.flock(c.fd, v.fcntl.LOCK_EX | v.fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError):
+            v.probe(tmp_path, 10_000_000, 'b'*40, 100, attempt_id='racing')
+    finally:
+        c.close()
+    assert path.read_bytes() == before
+    assert not (tmp_path / '.af-capacity-proof.racing.control').exists()
+
+
+@pytest.mark.parametrize('unowned', ['file', 'incomplete', 'symlink'])
+def test_new_probe_does_not_hide_unknown_or_incomplete_evidence(tmp_path, monkeypatch, unowned):
+    physical_fixture(tmp_path, monkeypatch)
+    if unowned == 'file':
+        (tmp_path / 'unowned.data').touch()
+    elif unowned == 'incomplete':
+        c = v.ControlFile(tmp_path / '.af-capacity-proof.unfinished.control', {'identity': {}}); c.close()
+    else:
+        (tmp_path / '.af-capacity-proof.link.control').symlink_to(tmp_path / '.af-capacity-proof.control')
+    with pytest.raises(ValueError):
+        v.probe(tmp_path, 10_000_000, 'b'*40, 100, attempt_id='not-started')
+    assert not (tmp_path / '.af-capacity-proof.not-started.control').exists()

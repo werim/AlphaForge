@@ -568,7 +568,9 @@ def main(argv=None):
     sub=parser.add_subparsers(dest='cmd',required=True)
     for command in ('inspect','probe','prepare'):
         p=sub.add_parser(command);p.add_argument('--mount',type=Path,required=True);p.add_argument('--cap-bytes',type=int,required=True)
-        if command=='probe': p.add_argument('--host-reserve-bytes',type=int,required=True)
+        if command=='probe':
+            p.add_argument('--host-reserve-bytes',type=int,required=True)
+            p.add_argument('--attempt-id',help='Explicitly authorized successor; preserves and locks original evidence')
         if command=='prepare':
             p.add_argument('--proof-hash',required=True);p.add_argument('--config-input',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p=sub.add_parser('run');p.add_argument('--plan',type=Path,required=True);p.add_argument('--plan-sha256',required=True)
@@ -581,7 +583,7 @@ def main(argv=None):
     elif args.cmd=='probe':
         source=source_identity()
         if source['dirty']: raise ValueError('DIRTY_SOURCE')
-        result=volume.probe(args.mount,args.cap_bytes,source['sha'],args.host_reserve_bytes)
+        result=volume.probe(args.mount,args.cap_bytes,source['sha'],args.host_reserve_bytes,attempt_id=args.attempt_id)
     elif args.cmd=='prepare':
         env=read_json(args.config_input);env=env.get('env',env)
         result=prepare(env,args.mount,args.cap_bytes,args.proof_hash)

@@ -6,12 +6,14 @@ physical ENOSPC/sandbox proof required by verify(). All outputs stay on volume.
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import struct
 import subprocess
 import time
@@ -158,13 +160,41 @@ class ControlFile:
         os.close(self.fd)
 
 
-def verify(mount: Path, cap: int, proof_hash: str, source_sha: str) -> dict:
-    identity = inspect_volume(mount, cap)
-    control = ControlFile(mount / ".af-capacity-proof.control")
+def _proof_paths(mount: Path):
+    legacy = mount / ".af-capacity-proof.control"
+    paths = ([legacy] if os.path.lexists(legacy) else []) + sorted(mount.glob(".af-capacity-proof.*.control"))
+    for path in paths:
+        if (path.is_symlink() or not path.is_file() or (path != legacy and
+                not re.fullmatch(r"\.af-capacity-proof\.[A-Za-z0-9_-]{1,64}\.control", path.name))):
+            raise ValueError("PHYSICAL_PROOF_PATH_INVALID")
+    return paths
+
+
+def _read_proof(path: Path):
+    control = ControlFile(path)
     try:
-        claim, result = control.get(0), control.get(1)
+        return control.get(0), control.get(1)
     finally:
         control.close()
+
+
+def verify(mount: Path, cap: int, proof_hash: str, source_sha: str) -> dict:
+    identity = inspect_volume(mount, cap)
+    paths = _proof_paths(mount)
+    if not paths:
+        raise FileNotFoundError("PHYSICAL_BACKEND_PROOF_MISSING")
+    matches = [(path, claim, result) for path in paths for claim, result in [_read_proof(path)]
+               if canonical_hash(result) == proof_hash]
+    if len(matches) != 1:
+        raise ValueError("PHYSICAL_BACKEND_PROOF_MISSING_STALE_OR_CROSS_SCOPED")
+    path, claim, result = matches[0]
+    expected_path = (mount / f".af-capacity-proof.{claim['attempt_id']}.control"
+                     if claim.get('attempt_id') else mount / '.af-capacity-proof.control')
+    if (path != expected_path or claim.get('attempt_id') != result.get('attempt_id')
+            or claim.get('prior_proofs', {}) != result.get('prior_proofs', {})
+            or any(name not in {p.name for p in paths} or file_hash(mount / name) != digest
+                   for name, digest in claim.get('prior_proofs', {}).items())):
+        raise ValueError("PHYSICAL_BACKEND_PROOF_HISTORY_MISMATCH")
     if (canonical_hash(result) != proof_hash or claim.get("identity") != identity
             or claim.get("source_sha") != source_sha or result.get("identity") != identity
             or result.get("status") != "PHYSICALLY_VERIFIED"
@@ -178,7 +208,22 @@ def verify(mount: Path, cap: int, proof_hash: str, source_sha: str) -> dict:
     return {**identity, "proof_expires_at": result["completed_at"] + MAX_PROOF_AGE}
 
 
-def probe(mount: Path, cap: int, source_sha: str, host_reserve: int) -> dict:
+def probe(mount: Path, cap: int, source_sha: str, host_reserve: int, *, attempt_id: str | None = None) -> dict:
+    if attempt_id is None:
+        return _probe(mount, cap, source_sha, host_reserve)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", attempt_id):
+        raise ValueError("PHYSICAL_ATTEMPT_ID_INVALID")
+    # All explicitly authorized successor attempts serialize on the unchanged
+    # original evidence inode. flock changes no bytes and dies with the owner.
+    prior = ControlFile(mount / ".af-capacity-proof.control")
+    try:
+        fcntl.flock(prior.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _probe(mount, cap, source_sha, host_reserve, attempt_id=attempt_id)
+    finally:
+        prior.close()
+
+
+def _probe(mount: Path, cap: int, source_sha: str, host_reserve: int, *, attempt_id: str | None = None) -> dict:
     """Explicit future physical test, never called by inspect/run or on CI.
 
     Writes ONLY fresh synthetic fill files, verifies aggregate ENOSPC and sandbox
@@ -187,16 +232,28 @@ def probe(mount: Path, cap: int, source_sha: str, host_reserve: int) -> dict:
     """
     identity = inspect_volume(mount, cap)
     system_entries = {".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems"}
-    if any(p.name not in system_entries for p in mount.iterdir()):
+    prior_proofs = {}
+    allowed = set(system_entries)
+    if attempt_id is not None:
+        for path in _proof_paths(mount):
+            claim, result = _read_proof(path)
+            if (claim.get("identity") != identity or result.get("identity") != identity
+                    or result.get("status") not in ("FAILED", "PHYSICALLY_VERIFIED")):
+                raise ValueError("PRIOR_PHYSICAL_ATTEMPT_INCOMPLETE_OR_CROSS_SCOPED")
+            allowed.add(path.name)
+            prior_proofs[path.name] = file_hash(path)
+    if any(p.name not in allowed for p in mount.iterdir()):
         raise ValueError("EMPTY_DEDICATED_VOLUME_REQUIRED")
     if container_free(identity) < cap + host_reserve:
         raise ValueError("BACKING_HOST_RESERVE_INSUFFICIENT")
-    control = ControlFile(mount / ".af-capacity-proof.control", {"identity": identity,
-                          "source_sha": source_sha, "host_reserve_bytes": host_reserve, "started_at": time.time()})
+    path = mount / (f".af-capacity-proof.{attempt_id}.control" if attempt_id else ".af-capacity-proof.control")
+    extra = {"attempt_id": attempt_id, "prior_proofs": prior_proofs} if attempt_id else {}
+    control = ControlFile(path, {"identity": identity,
+                          "source_sha": source_sha, "host_reserve_bytes": host_reserve, "started_at": time.time(), **extra})
     files, total, enospc = [], 0, False
     started = time.monotonic()
     result = {"status": "FAILED", "identity": identity, "aggregate_enospc": False,
-              "sandbox_denial": False, "files_written": 0, "observed_capacity_bytes": 0}
+              "sandbox_denial": False, "files_written": 0, "observed_capacity_bytes": 0, **extra}
     try:
         profile = sandbox_profile(mount)
         # No outside file is created: attempt writing a random absent path in the
@@ -254,6 +311,7 @@ def probe(mount: Path, cap: int, source_sha: str, host_reserve: int) -> dict:
     except Exception as exc:
         result["reason"] = type(exc).__name__  # no raw command/secret output
     finally:
+        result.update(files_written=len(files), observed_capacity_bytes=total)
         for path in files:
             path.unlink()  # own disposable fill bytes only; never image/evidence
         fsync_directory(mount)

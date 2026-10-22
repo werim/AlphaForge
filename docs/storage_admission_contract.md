@@ -53,7 +53,14 @@ with the backing container still above reserve. EFBIG, one-file exhaustion,
 insufficient observed aggregate capacity, unknown state or other errors fail.
 It removes only its own disposable fill bytes; claim/result and redacted tool
 outputs remain. It never deletes evidence, an image or a volume. A used proof
-attempt cannot automatically repeat. This destructive-to-free-space test needs
+attempt cannot automatically repeat. An explicitly authorized successor uses
+`probe --attempt-id <new-id>`: the original terminal control remains at its exact
+path/inode, is locked without content changes to serialize volume probes, and
+its byte hash is bound into the new O_EXCL control/result. Named proof selection
+uses the exact result hash; no mutable “latest” pointer overwrites old evidence.
+Unknown files, symlinks, incomplete/cross-volume proof and ID reuse fail closed.
+The first legacy attempt remains the required lock anchor. No automatic retry
+is added. This destructive-to-free-space test needs
 separate operational authorization; mocked tests do not count as a physical run.
 
 `prepare` and `run` refuse absent, failed, stale, hash-mismatched or cross-scoped
