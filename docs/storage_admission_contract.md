@@ -52,7 +52,7 @@ insufficient observed aggregate capacity, unknown state or other errors fail.
 It removes only its own disposable fill bytes; claim/result and redacted tool
 outputs remain. It never deletes evidence, an image or a volume. A used proof
 attempt cannot automatically repeat. This destructive-to-free-space test needs
-separate operational authorization and has **not been run in this task**.
+separate operational authorization; mocked tests do not count as a physical run.
 
 `prepare` and `run` refuse absent, failed, stale, hash-mismatched or cross-scoped
 physical proof. Proof lifetime is at most 24 hours; a new experiment must have
@@ -61,11 +61,11 @@ are rechecked. Native CapacityInUse accounts for volume metadata/background use;
 CapacityFree of the actual APFS container, not an image's virtual free space,
 is monitored. Quota/filesystem drift aborts.
 
-**Current status: backend integration implemented; Mini physical backend
-UNVERIFIED; measurement path NOT_READY.** Mini SSH was unavailable in this task.
-A tiny local write-sandbox fixture succeeded, but no APFS quota was provisioned,
-filled or verified. Mocked ENOSPC tests are not physical proof. No real measurement
-command is supplied until the required host/backend proof is available.
+**Readiness is evidence-derived.** Implementation, geometry inspection and
+sandbox/ENOSPC fixtures never imply a VERIFIED physical backend. Until fresh
+actual capacity/sandbox proof exists on the target host, measurement is NOT_READY
+and no operational measurement command should be supplied. Mutable host-access
+and readiness observations belong in the active PR handoff, not this contract.
 
 ## Every mutable experiment output is quota-local
 
@@ -170,11 +170,11 @@ evidence, not G6/G7 qualification, LIVE readiness or launch authorization.
 CLI stages are inspect -> separately authorized physical probe -> prepare ->
 separately authorized real run -> independent review -> normal admission with
 storage-evidence. Each stage preserves its own irreversible attempt evidence.
-Inspect is read-only and reports UNVERIFIED without a proof. This development task
-runs only offline/temporary fixtures, not these operational stages.
+Inspect is read-only and reports UNVERIFIED without a proof. Offline/temporary fixtures never constitute these operational stages.
 
-Missing now: access to Mini and an actual preprovisioned dedicated quota volume
-with successful physical capacity/sandbox proof for the final code/environment.
-No executable measurement command is offered while that mandatory prerequisite
-is unverified. Old Issue631 approval, launcher, image failures and stats-only
+Operational prerequisite: an actual preprovisioned dedicated quota volume with
+successful physical capacity/sandbox proof for the intended code/environment.
+If no such volume exists, provisioning needs separate authorization; the
+measurement entrypoint will not create one. Do not supply an execution command
+while that mandatory prerequisite is unverified. Old Issue631 approval, launcher, image failures and stats-only
 measurements cannot supply it; the historical hdiutil failure remains INCONCLUSIVE.
