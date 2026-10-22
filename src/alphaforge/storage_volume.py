@@ -32,6 +32,33 @@ def plist(command):
     return plistlib.loads(result.stdout)
 
 
+def host_identity() -> str:
+    """SHA-256 of the exact IOPlatformUUID string, as in the legacy plist path.
+
+    ioreg -a opens /dev/stdout via CFWriteStream, incompatible with our write
+    sandbox. Text mode writes to the inherited pipe directly. Only one complete
+    IORegistry object with one UUID string is accepted; there is no fallback or
+    case/UUID normalization. Both parent and sandboxed worker use this authority.
+    """
+    result = subprocess.run(["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice", "-w0"],
+                            capture_output=True, check=True, timeout=15)
+    try:
+        text = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("HOST_HARDWARE_ID_UNAVAILABLE") from None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if (len(lines) < 4 or not lines[0].startswith("+-o ") or "<class " not in lines[0]
+            or not lines[0].endswith(">") or lines[1] != "{" or lines[-1] != "}"
+            or sum(line.startswith("+-o ") for line in lines) != 1 or "\x00" in text):
+        raise ValueError("HOST_HARDWARE_ID_UNAVAILABLE")
+    properties = [line for line in lines[2:-1] if line.startswith('"IOPlatformUUID"')]
+    match = (re.fullmatch(r'"IOPlatformUUID"[ \t]*=[ \t]*"([0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12})"',
+                          properties[0]) if len(properties) == 1 else None)
+    if match is None:
+        raise ValueError("HOST_HARDWARE_ID_UNAVAILABLE")
+    return hashlib.sha256(match[1].encode("utf-8")).hexdigest()
+
+
 def inspect_volume(mount: Path, cap: int) -> dict:
     mount = mount.resolve(strict=True)
     if platform.system() != "Darwin" or not mount.is_mount():
@@ -52,14 +79,11 @@ def inspect_volume(mount: Path, cap: int) -> dict:
         raise ValueError("DEDICATED_WRITABLE_APFS_QUOTA_UNVERIFIED")
     if any(p.is_mount() for p in mount.iterdir() if p.is_dir()):
         raise ValueError("NESTED_MOUNT_FORBIDDEN")
-    hardware = plist(["/usr/sbin/ioreg", "-a", "-rd1", "-c", "IOPlatformExpertDevice"])
-    if not isinstance(hardware,list) or not hardware or not hardware[0].get("IOPlatformUUID"):
-        raise ValueError("HOST_HARDWARE_ID_UNAVAILABLE")
     return {"backend": BACKEND, "mount": str(mount), "cap_bytes": cap,
             "volume_uuid": volume["VolumeUUID"], "device": volume["DeviceIdentifier"],
             "container_uuid": container["APFSContainerUUID"],
             "filesystem": filesystem_identity(mount),
-            "host": hashlib.sha256(hardware[0]["IOPlatformUUID"].encode()).hexdigest(),
+            "host": host_identity(),
             "sandbox_binary": file_hash(Path("/usr/bin/sandbox-exec")), "platform":platform.platform()}
 
 

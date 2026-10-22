@@ -76,6 +76,32 @@ actual capacity/sandbox proof exists on the target host, measurement is NOT_READ
 and no operational measurement command should be supplied. Mutable host-access
 and readiness observations belong in the active PR handoff, not this contract.
 
+## Canonical host identity and compatibility
+
+`storage_volume.host_identity()` is the single authority used by volume inspection
+and therefore by both the fixture and real guardian/worker plan validation. It
+runs `ioreg -rd1 -c IOPlatformExpertDevice -w0`, accepts one complete root object
+and exactly one string-valued, canonical-shape `IOPlatformUUID`, and hashes that
+exact string as UTF-8 with SHA-256. It does not trim the UUID value, change case,
+reformat it or hash the surrounding serialization. Property order and external
+spacing do not enter identity. Missing/duplicate/empty/malformed/truncated output,
+command failure or the 15-second timeout fails closed, without fallback.
+
+The old archive command used `ioreg -a`. [Apple's implementation](https://github.com/apple-oss-distributions/IOKitTools/blob/main/ioreg.tproj/ioreg.c)
+opens `/dev/stdout` with CFWriteStream in archive mode; ordinary text output uses
+the inherited stdout stream. This removes the archive file-open dependency while
+leaving the existing write sandbox unchanged. A successful comparison on one host
+alone is not proof that arbitrary text and plist output are equivalent: tests
+cover the supported single UUID-string domain, case preservation, field order,
+serialization and refusal cases. Unsupported shapes are rejected.
+
+For valid legacy UUID strings the `host` field and its hash definition are
+unchanged; no backend/schema version changes. Invalid legacy values are not
+coerced into valid identities. No stored proof, plan or claim is rewritten.
+Changed code still requires fresh exact-SHA physical proof and a new plan under
+the existing source contract; old ENOSPC evidence is not new-code end-to-end PASS.
+Read-only serialization fixtures, even on Mini, are not physical verification.
+
 ## Every mutable experiment output is quota-local
 
 The worker and independent guardian inherit a macOS write sandbox: writes outside

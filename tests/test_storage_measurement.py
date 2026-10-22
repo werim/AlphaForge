@@ -89,9 +89,11 @@ def test_quota_metadata_requires_exact_dedicated_volume(tmp_path,monkeypatch):
             'VolumeUUID':'uuid','DeviceIdentifier':'disk99s1'}
     entry={'APFSVolumeUUID':'uuid','DeviceIdentifier':'disk99s1','CapacityQuota':10000000,'Roles':[]}
     container={'APFSContainerUUID':'container','Volumes':[entry]}
-    monkeypatch.setattr(v,'plist',lambda argv:([{'IOPlatformUUID':'fixture-hardware'}] if 'ioreg' in argv[0] else (volume if 'info' in argv else {'Containers':[container]})))
+    monkeypatch.setattr(v,'plist',lambda argv: volume if 'info' in argv else {'Containers':[container]})
+    monkeypatch.setattr(v,'host_identity',lambda: 'canonical-host-hash')
     observed=v.inspect_volume(tmp_path,10000000)
     assert observed['backend']==v.BACKEND and observed['cap_bytes']==10000000
+    assert observed['host']=='canonical-host-hash'
     for field,value in [('CapacityQuota',0),('CapacityQuota',999),('Roles',['Data']),('DeviceIdentifier','wrong')]:
         before=deepcopy(entry);entry[field]=value
         with pytest.raises(ValueError):v.inspect_volume(tmp_path,10000000)
