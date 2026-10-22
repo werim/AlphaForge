@@ -218,7 +218,10 @@ def probe(mount: Path, cap: int, source_sha: str, host_reserve: int) -> dict:
         if outside.exists():
             outside.unlink()  # only this probe's fresh zero-byte negative-test file
         # At least two files: no single-file RLIMIT can impersonate aggregate cap.
-        chunk = os.urandom(min(1024 * 1024, max(4096, identity["cap_bytes"] // 64)))
+        # Native APFS inventory is a subprocess per write. A 1 MiB ceiling
+        # can spend the 600s window polling before a multi-GiB quota fills.
+        # Keep writes bounded, and reserve headroom for the whole next write.
+        chunk = os.urandom(min(8 * 1024 * 1024, max(4096, identity["cap_bytes"] // 64)))
         file_limit = max(len(chunk), identity["cap_bytes"] // 4)
         while total <= cap:
             path = mount / f".af-fill-{len(files):06d}"
@@ -229,7 +232,7 @@ def probe(mount: Path, cap: int, source_sha: str, host_reserve: int) -> dict:
                 while written < file_limit:
                     if time.monotonic() - started > 600:
                         raise TimeoutError("PHYSICAL_PROBE_DEADLINE")
-                    if container_free(identity) < host_reserve:
+                    if container_free(identity) < host_reserve + len(chunk):
                         raise ValueError("HOST_RESERVE_VIOLATION")
                     n = os.write(fd, chunk)
                     if n <= 0: raise OSError(errno.EIO,"PHYSICAL_PROBE_SHORT_WRITE")

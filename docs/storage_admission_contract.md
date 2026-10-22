@@ -45,7 +45,9 @@ Read-only geometry inspection is **not physical verification**. The separate
 explicit `probe` entrypoint requires an otherwise unused dedicated volume (only
 standard macOS metadata directories may exist). It reserves a durable attempt,
 then checks both successful sandbox-local writing and denied outside writing.
-It writes several own bounded temporary fill files until native ENOSPC/EDQUOT
+It writes several own bounded temporary fill files, with writes at most 8 MiB
+and a native free-space check reserving the entire next write above host reserve,
+until native ENOSPC/EDQUOT
 within a 600-second checked probe deadline (not a hard real-time syscall bound),
 with the backing container still above reserve. EFBIG, one-file exhaustion,
 insufficient observed aggregate capacity, unknown state or other errors fail.

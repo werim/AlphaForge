@@ -523,3 +523,49 @@ def test_runtime_redaction_covers_signed_urls_and_json_auth_fields():
     result=redact(value)
     assert all(secret not in result for secret in ('private-hmac','private-api','json-hmac'))
     assert 'timestamp=123' in result
+
+
+def test_four_gib_probe_reaches_native_capacity_with_bounded_inventory_latency(tmp_path,monkeypatch):
+    # Simulated Mini inventory latency, NOT physical quota/admission evidence.
+    cap=4*1024**3
+    identity={'mount':str(tmp_path),'cap_bytes':cap,'backend':v.BACKEND}
+    clock=[0.0];written=[0]
+    monkeypatch.setattr(v,'inspect_volume',lambda *a:identity)
+    def free(_):
+        clock[0]+=.16
+        return 100*1024**3
+    monkeypatch.setattr(v,'container_free',free)
+    monkeypatch.setattr(v.time,'monotonic',lambda:clock[0])
+    def deny(command,**kw):
+        Path(command[-2]).touch()
+        return SimpleNamespace(returncode=1,stdout=b'',stderr=b'fixture denied')
+    monkeypatch.setattr(v.subprocess,'run',deny)
+    def write(fd,data):
+        if written[0]+len(data)>cap-8*1024**2:
+            raise OSError(errno.ENOSPC,'fixture aggregate quota')
+        written[0]+=len(data)
+        return len(data)
+    monkeypatch.setattr(v.os,'write',write)
+    result=v.probe(tmp_path,cap,'a'*40,608174080)
+    assert result['status']=='PHYSICALLY_VERIFIED',result
+    assert result['aggregate_enospc'] and result['files_written']>=2
+    assert result['wall_seconds']<600
+
+
+def test_probe_reserves_headroom_for_entire_next_write(tmp_path, monkeypatch):
+    # A below-reserve result must not be caused by the probe's own next write.
+    cap, reserve = 4 * 1024**3, 608174080
+    identity = {'mount': str(tmp_path), 'cap_bytes': cap, 'backend': v.BACKEND}
+    monkeypatch.setattr(v, 'inspect_volume', lambda *a: identity)
+    reads = iter([cap + reserve, reserve + 1])
+    monkeypatch.setattr(v, 'container_free', lambda _: next(reads))
+    def deny(command, **kw):
+        Path(command[-2]).touch()
+        return SimpleNamespace(returncode=1, stdout=b'', stderr=b'fixture denied')
+    monkeypatch.setattr(v.subprocess, 'run', deny)
+    monkeypatch.setattr(v.os, 'write', lambda *a: pytest.fail('reserve must be checked before writing'))
+    result = v.probe(tmp_path, cap, 'a' * 40, reserve)
+    assert result['status'] == 'FAILED'
+    assert result['aggregate_enospc'] is False
+    assert result['reason'] == 'ValueError'
+    assert not list(tmp_path.glob('.af-fill-*'))
