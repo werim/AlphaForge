@@ -438,7 +438,7 @@ def _recent_stats():
     }
 
 
-def _production_backtest_lifecycle(timestamp_ms):
+def _production_backtest_lifecycle(timestamp_ms, *, with_realized_costs=True):
     market = {
         "symbol": "BTCUSDT",
         "entry": 100.0,
@@ -470,6 +470,13 @@ def _production_backtest_lifecycle(timestamp_ms):
         "orderbook_status": "ESTIMATED_BACKTEST",
         "volatility_status": "ESTIMATED_BACKTEST",
     }
+    if with_realized_costs:
+        market.update(
+            realized_cost_source="TEST_FULL_CLOSURE_CASH_OBSERVATIONS",
+            realized_costs_usd=dict(entry_spread=.0001, entry_slippage=0, entry_fee=.001,
+                exit_spread=.0001, exit_slippage=.0001, exit_fee=.001, funding=.0001,
+                latency_impact_penalty=0),
+        )
     market["execution_ctx"] = build_execution_context(market)
     decision = evaluate_signal_decision(
         market,
@@ -566,3 +573,13 @@ def test_production_backtest_persistence_export_feeds_walk_forward_adapter(tmp_p
     assert report["universe"]["identity"] == contract.universe.identity
     assert report["promotion_evidence"]["future_paper"] == "REQUIRED_NOT_PROVIDED"
     assert report["promotion_evidence"]["live_authorized"] is False
+
+
+def test_production_backtest_missing_cash_cannot_be_walk_forward_evidence(tmp_path):
+    timestamp_ms = int(datetime(2026, 1, 15, tzinfo=timezone.utc).timestamp()*1000)
+    lifecycle = _production_backtest_lifecycle(timestamp_ms, with_realized_costs=False)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'missing-cash.sqlite'}"
+    bo._persist_lifecycle_rows(lifecycle, database_url=database_url, run_id="missing-cash")
+    rows = bo._decision_evidence_rows(database_url, run_id="missing-cash")
+    with pytest.raises(ValueError, match="missing net_pnl_pct"):
+        historical_rows_from_backtest_decisions(rows)

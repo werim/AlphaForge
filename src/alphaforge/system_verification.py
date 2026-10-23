@@ -121,6 +121,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
     ),
     "RESOLVER_INTEGRITY": (
         "tests/test_issue646_legacy_realized_accounting.py",
+        "tests/test_issue506_walk_forward.py",
         "tests/test_issue421_position_window_integrity.py",
         "tests/test_issue421_full_chain_replay.py",
     ),
