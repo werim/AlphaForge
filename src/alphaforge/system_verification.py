@@ -82,6 +82,9 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue438_market_data_supervision.py",
     ),
     "NO_LOOKAHEAD": ("tests/test_multi_timeframe.py",),
+    # Diagnostic provenance, sampled resource evidence and supervisor loss are
+    # distinct from retention and must not broaden unrelated authority routes.
+    "STORAGE_CALIBRATION_INTEGRITY": ("tests/test_storage_calibration.py",),
     "STORAGE_RETENTION": (
         "tests/test_issue620_storage_policy.py",
         "tests/test_issue622_stats_only_retention.py",
@@ -254,6 +257,8 @@ def assess_path(raw_path: str) -> PathAssessment:
             (("decision_invariant.py",), ("DECISION_PARITY",), "cross-mode decision invariant changed"),
             (("portfolio_risk",), ("PORTFOLIO_RISK",), "portfolio-risk authority changed"),
             (("burnin_resolver.py",), ("RESOLVER_INTEGRITY", "TIME_INTEGRITY"), "resolver authority changed"),
+            (("storage_calibration.py",), ("STORAGE_CALIBRATION_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "offline storage evidence and supervisor authority changed"),
+            (("storage_workload.py",), ("STORAGE_CALIBRATION_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY", "RESOLVER_INTEGRITY"), "canonical storage workload adapter changed"),
             (("storage_policy.py",), ("STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "storage lifecycle authority changed"),
             (("persistence.py",), ("PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "authoritative persistence changed"),
             (("runtime_state.py",), ("RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "runtime/reconciliation state changed"),
