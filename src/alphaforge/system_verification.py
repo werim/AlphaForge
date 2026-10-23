@@ -120,6 +120,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_runtime_live_authorization.py",
     ),
     "RESOLVER_INTEGRITY": (
+        "tests/test_quality_gate_accounting_integrity.py",
         "tests/test_issue646_legacy_realized_accounting.py",
         "tests/test_issue506_walk_forward.py",
         "tests/test_issue421_position_window_integrity.py",

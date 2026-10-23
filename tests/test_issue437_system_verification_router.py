@@ -419,3 +419,9 @@ def test_realized_accounting_source_only_selects_sql_cash_regressions(source):
     assert plan.risk_level == RiskLevel.HIGH
     assert plan.required_tiers == ("T0", "T1", "T2", "T3")
     assert "tests/test_issue646_legacy_realized_accounting.py" in plan.selected_tests
+
+
+def test_quality_gate_source_only_selects_unit_and_authority_contract():
+    plan = _plan("backtest_order.py")
+    assert plan.risk_level == RiskLevel.HIGH
+    assert "tests/test_quality_gate_accounting_integrity.py" in plan.selected_tests

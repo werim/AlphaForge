@@ -152,6 +152,18 @@ def mutations() -> list[Mutation]:
         Mutation("historical_cash_provenance_is_required", "src/alphaforge/historical_validation.py",
                  'or proof.get("realized_accounting_version") != "CASH_LEDGER_V1"', 'or False',
                  "tests/test_issue506_walk_forward.py::test_numeric_legacy_return_cannot_inherit_cost_complete_provenance"),
+        Mutation("quality_r_is_not_cash", "backtest_order.py",
+                 '"baseline_plus_quality_gate_net_pnl": None,',
+                 '"baseline_plus_quality_gate_net_pnl": sum_cash([baseline_cash, sized_expected]),',
+                 "tests/test_quality_gate_accounting_integrity.py::test_two_r_cannot_be_added_to_one_hundred_usdt"),
+        Mutation("quality_baseline_missing_is_not_zero", "backtest_order.py",
+                 "baseline_cash = finite_cash(baseline_net_pnl)",
+                 "baseline_cash = finite_cash(baseline_net_pnl) or 0.0",
+                 "tests/test_quality_gate_accounting_integrity.py::test_missing_baseline_never_becomes_zero"),
+        Mutation("quality_future_outcomes_cannot_promote", "backtest_order.py",
+                 '"quality_gate_promotion_eligible": False,',
+                 '"quality_gate_promotion_eligible": True,',
+                 "tests/test_quality_gate_accounting_integrity.py::test_signed_realized_cash_is_invariant_and_diagnostic_only"),
     ])
     return cases
 

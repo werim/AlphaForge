@@ -1548,7 +1548,10 @@ def test_short_breakdown_breakout_normal_stop_gate_counts_enabled_backtest_only(
     assert summary["quality_gate_accepted_count"] == 1
     assert summary["quality_gate_would_tp_count"] == 1
     assert summary["quality_gate_reason_breakdown"] == {"LOW_SCORE": 1}
-    assert summary["baseline_plus_quality_gate_net_pnl"] > 4.0
+    assert summary["baseline_plus_quality_gate_net_pnl"] is None
+    assert summary["quality_gate_baseline_realized_net_pnl_usdt"] == 4.0
+    assert summary["quality_gate_counterfactual_scaled_total_r"] == pytest.approx(.3)
+    assert summary["quality_gate_authority"] == "DIAGNOSTIC_ONLY"
 
 
 def test_short_breakdown_breakout_normal_stop_gate_live_and_paper_disabled():
