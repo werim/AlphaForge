@@ -116,6 +116,35 @@ def test_burnin_source_only_union_is_deduplicated_and_order_independent():
     assert first.selected_tests.count("tests/test_issue631_reject_recovery.py") == 1
 
 
+def test_qualification_source_only_selects_evidence_and_promotion_regressions():
+    root = Path(__file__).resolve().parents[1]
+    source = "src/alphaforge/burnin_qualification.py"
+    plan = _plan(source)
+    assert plan.changed_files == (source,)
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ("T0", "T1", "T2", "T3")
+    assert set(plan.affected_invariants) == {"READINESS_EVIDENCE", "FAIL_CLOSED_PROMOTION"}
+    assert set(plan.selected_tests) == {
+        "tests/test_burnin_qualification_evidence_integrity.py",
+        "tests/test_issue547_qualification_evidence.py",
+        "tests/test_issue344_qualification_writer_lifetime.py",
+        "tests/test_phase7_qualification.py",
+        "tests/test_live_readiness.py",
+    }
+    assert all((root / path).is_file() for path in plan.selected_tests)
+
+
+def test_qualification_combines_existing_source_routes_without_order_or_duplicates():
+    paths = ("src/alphaforge/burnin_qualification.py", "src/alphaforge/burnin_campaign.py",
+             "src/alphaforge/burnin_ops.py", "src/alphaforge/storage_policy.py")
+    plan = _plan(*paths)
+    assert plan == _plan(*reversed(paths), paths[0])
+    assert plan.plan_id == _plan(*reversed(paths)).plan_id
+    expected = {test for source in paths for test in _plan(source).selected_tests}
+    assert plan.selected_tests == tuple(sorted(expected))
+    assert plan.selected_tests.count("tests/test_live_readiness.py") == 1
+
+
 @pytest.mark.parametrize(("source", "risk", "invariants", "suites"), [
     ("storage_policy.py", RiskLevel.HIGH,
      {"STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"},
@@ -139,7 +168,9 @@ def test_storage_mapping_preserves_existing_authority_routes(source, risk, invar
     assert {Path(path).name for path in plan.selected_tests} == suites
 
 
-@pytest.mark.parametrize("module", ["storage_calibration", "burnin_ops", "burnin_campaign"])
+@pytest.mark.parametrize("module", [
+    "storage_calibration", "burnin_ops", "burnin_campaign", "burnin_qualification",
+])
 @pytest.mark.parametrize(("result", "reason"), [
     ("FAIL", "STORAGE_ADMISSION_EVIDENCE_REJECTED"),
     ("ERROR", "MEASUREMENT_EVIDENCE_MISSING"),
@@ -160,26 +191,32 @@ def test_routing_cannot_promote_absent_failed_or_unverified_evidence(module, res
     assert "admission_eligible" not in manifest
 
 
+def _routed_ci_script():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/test.yml").read_text()
+    step = workflow.split("      - name: Routed PR verification\n", 1)[1].split("      - name:", 1)[0]
+    script = textwrap.dedent(step.split("python - <<'PY'\n", 1)[1].split("          PY", 1)[0])
+    return compile(script, ".github/workflows/test.yml:Routed PR verification", "exec")
+
+
 @pytest.mark.parametrize("sources", [
     ("storage_calibration", "storage_workload"),
     ("burnin_ops",),
     ("burnin_campaign",),
     ("burnin_ops", "burnin_campaign"),
+    ("burnin_qualification",),
 ])
 def test_real_ci_step_consumes_source_only_selection(tmp_path, monkeypatch, sources):
     # Execute the actual workflow's embedded Python, intercepting only pytest
     # invocation. No second CI command/test mapping is maintained here.
-    root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/test.yml").read_text()
-    step = workflow.split("      - name: Routed PR verification\n", 1)[1].split("      - name:", 1)[0]
-    script = textwrap.dedent(step.split("python - <<'PY'\n", 1)[1].split("          PY", 1)[0])
+    script = _routed_ci_script()
     plan = _plan(*(f"src/alphaforge/{module}.py" for module in sources))
     (tmp_path / "artifacts").mkdir()
     (tmp_path / "artifacts/system-verification-plan.json").write_text(json.dumps(plan.to_dict()))
     commands = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: commands.append((argv, kwargs)))
-    exec(compile(script, ".github/workflows/test.yml:Routed PR verification", "exec"), {})
+    exec(script, {})
     assert len(commands) == 1
     argv, kwargs = commands[0]
     assert argv[:4] == [sys.executable, "-m", "pytest", "-q"]
@@ -188,6 +225,31 @@ def test_real_ci_step_consumes_source_only_selection(tmp_path, monkeypatch, sour
                       "tests/test_issue498_cross_component_mutations.py"}
     assert argv[4:] == [path for path in plan.selected_tests if path not in always_covered]
     assert kwargs == {"check": True}
+
+
+def test_real_ci_missing_selected_test_path_fails_instead_of_passing(tmp_path, monkeypatch):
+    script = _routed_ci_script()
+    payload = _plan("src/alphaforge/burnin_qualification.py").to_dict()
+    payload["selected_tests"] = ["tests/missing_qualification_evidence.py"]
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts/system-verification-plan.json").write_text(json.dumps(payload))
+    monkeypatch.chdir(tmp_path)
+    # Exercise actual pytest and workflow check=True, not a mocked exit status.
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        exec(script, {})
+    assert error.value.returncode == 4  # pytest usage error: selected file not found
+
+
+@pytest.mark.parametrize("result", [None, "", "UNKNOWN", "SKIPPED"])
+def test_qualification_missing_or_skipped_verification_cannot_be_pass(result):
+    plan = _plan("src/alphaforge/burnin_qualification.py")
+    with pytest.raises(ValueError, match="deterministic_result"):
+        build_verification_manifest(plan, deterministic_result=result,
+            tests_executed=0, invariants_passed=0, invariants_total=len(plan.affected_invariants))
+    route = route_failure({"deterministic_result": result, "risk_level": plan.risk_level})
+    assert route.deterministic_result != "PASS"
+    assert route.recommended_model != ModelAlias.NO_LLM
+    assert route.llm_authoritative is route.may_relax_safety is route.may_authorize_live is False
 
 
 def test_live_order_boundary_is_critical_and_requires_release_tier() -> None:

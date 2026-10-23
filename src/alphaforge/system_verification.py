@@ -107,7 +107,13 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue496_portfolio_risk_authority.py",
         "tests/test_portfolio_risk_engine.py",
     ),
-    "READINESS_EVIDENCE": ("tests/test_live_readiness.py",),
+    "READINESS_EVIDENCE": (
+        "tests/test_live_readiness.py",
+        "tests/test_phase7_qualification.py",
+        "tests/test_burnin_qualification_evidence_integrity.py",
+        "tests/test_issue547_qualification_evidence.py",
+        "tests/test_issue344_qualification_writer_lifetime.py",
+    ),
     "RECONCILIATION_INTEGRITY": (
         "tests/test_reconciliation_sqlite_contention.py",
         "tests/test_runtime_live_authorization.py",
