@@ -16,6 +16,7 @@ UNAVAILABLE_STATUSES = {"", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST", "N
 REQUIRED_EXECUTION_FIELDS = (
     "spread_pct",
     "expected_slippage_pct",
+    "fee_pct",
     "latency_ms",
     "liquidity_score",
     "funding_rate_pct",

@@ -76,7 +76,7 @@ def test_missing_costs_do_not_authorize_shared_backtest_decision(missing):
     decision = evaluate_signal_decision(market, runtime._canonical_filter_config(mode="BACKTEST"),
         {}, market["execution_ctx"], "BACKTEST")
     assert decision.decision == "REJECT"
-    assert build_execution_cost_model(market["execution_ctx"]).completeness != "COMPLETE"
+    assert build_execution_cost_model(market["execution_ctx"]).completeness == "UNAVAILABLE_BLOCKING"
 
 
 @pytest.mark.parametrize("side", ["LONG", "SHORT"])
@@ -212,3 +212,4 @@ def test_absent_fee_key_is_missing_not_a_zero_fee_schedule():
     context = dict(market["execution_ctx"])
     del context["fee_pct"]
     assert "fee_pct" in build_execution_cost_model(context).missing_fields
+    assert build_execution_cost_model(context).completeness == "UNAVAILABLE_BLOCKING"
