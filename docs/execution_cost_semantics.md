@@ -115,6 +115,28 @@ value.
 
 ## Fees and other costs
 
+The shared `evaluate_signal_decision()` boundary gates on
+`build_decision_rr_metrics()` before quality/execution decisions, using expected
+executable entry and the residual cost penalty. Entry slippage already represented
+by expected fill is credited once; it must not be charged a second time. The
+protected BACKTEST projection reads that actual decision stage. Legacy simulator
+rows without this stage retain their explicit legacy provenance and are not
+equivalent realized-PnL or three-mode parity evidence.
+
+Fee and funding values are critical cost evidence in the pre-submit safety
+contract. Missing fees are recorded in the cost model's missing fields rather
+than silently becoming a zero-fee assumption. The existing
+`REJECT_UNKNOWN_EXECUTION_CONTEXT` policy controls rejection of missing evidence;
+its default remains fail-closed. A fee schedule may be `CONFIGURED` even when
+market microstructure must be measured. Unknown funding is not a zero rate.
+`UNAVAILABLE_BLOCKING` and `INVALID_FAKE_ZERO` cannot prove the protected parity
+contract even when all compared surfaces contain the same invalid status.
+
+Equal economic numbers do not erase provenance: PAPER expected-fill evidence is
+`MODELLED`, whereas estimated BACKTEST/LIVE_PRECHECK expectations are `ESTIMATED`.
+The existing strict parity checker continues to expose that difference; this
+change does not convert it into a three-mode PASS or a LIVE authorization.
+
 The pre-submit `evaluate_execution_safety()` contract rejects supplied non-finite,
 malformed or boolean spread, slippage, latency, liquidity, funding, fee and orderbook
 numbers as `EXECUTION_CONTEXT_UNAVAILABLE`. Their names appear in `missing_fields`

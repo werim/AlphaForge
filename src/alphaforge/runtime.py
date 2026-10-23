@@ -2110,8 +2110,8 @@ class RuntimeOrchestrator:
             )
 
         if mode_enum is ExecutionMode.BACKTEST:
-            # BACKTEST currently persists planned-entry RR semantics. Preserve
-            # that truth here rather than manufacturing expected-fill parity.
+            # Project the stage actually used by the shared production decision;
+            # legacy simulator rows are not equivalent pre-submit evidence.
             backtest_market = {
                 **dict(market_ctx),
                 "execution_ctx": execution_ctx,
@@ -2129,6 +2129,7 @@ class RuntimeOrchestrator:
                 TradingMode.BACKTEST,
             )
             diagnostics = dict(decision.diagnostics or {})
+            rr_stage = dict(diagnostics.get("canonical_rr_stage") or {})
             risk_scale = diagnostics.get("risk_scale")
             require_scale = bool(diagnostics.get("stop_too_wide_softened"))
             sizing = scale_candidate_exposure(
@@ -2204,14 +2205,11 @@ class RuntimeOrchestrator:
                 "all_failed_gates": failed_gates,
                 "score": decision.score,
                 "candidate_rr": decision.raw_rr,
-                # #529 deliberately marks persisted BACKTEST execution-stage
-                # RR as legacy/non-authoritative. Missing is safer than an
-                # invented executable value.
-                "executable_raw_rr": None,
-                "remaining_execution_penalty": None,
+                "executable_raw_rr": rr_stage.get("executable_raw_rr"),
+                "remaining_execution_penalty": rr_stage.get("remaining_execution_penalty"),
                 "effective_rr": decision.effective_rr,
-                "rr_basis": "PLANNED_ENTRY_LEGACY_BACKTEST",
-                "execution_cost_semantics": "PLANNED_ENTRY_LEGACY_BACKTEST",
+                "rr_basis": rr_stage.get("rr_basis", "UNAVAILABLE"),
+                "execution_cost_semantics": rr_stage.get("execution_cost_semantics"),
                 "threshold_provenance": threshold_provenance,
                 "execution_evidence_status": execution_safety.get(
                     "execution_evidence_status"

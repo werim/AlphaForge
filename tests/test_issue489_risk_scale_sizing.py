@@ -91,6 +91,9 @@ def _runtime(mode: ExecutionMode) -> RuntimeOrchestrator:
 
 def _wide_softenable_market() -> dict:
     return {
+        "fee_pct": 0.0004,
+        "fee_status": "CONFIGURED",
+        "fee_source": "TEST_FEE_SCHEDULE",
         "signal_id": "risk-scale-489",
         "entry": 100.0,
         "sl": 98.0,
