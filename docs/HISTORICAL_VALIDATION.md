@@ -53,14 +53,37 @@ Reports retain row-level evidence and separate aggregates by:
 - role and symbol;
 - role and regime.
 
-Any negative OOS or untouched-test segment makes `historical_validation=FAIL`,
-regardless of a positive calibration aggregate. Empty declared segments and
-noncanonical economic evidence fail closed.
+Reports use `walk_forward_validation_v2`. Each row retains
+`position_net_return_pct` (net cash / filled notional × 100), `net_r` (net cash /
+initial executable dollar risk), and `net_pnl_usdt`. These units are distinct.
+The adapter reconciles persisted fill, stop, quantity, exit, cost components and
+risk using the shared `realized_accounting` authority; it does not replace that
+ledger. Aggregates sum only validated realized USDT cash. Percentages and R are
+never summed or averaged as portfolio performance. The old aggregate
+`net_return` field is explicitly null, rather than silently acquiring new units.
+
+Any negative realized-cash OOS or untouched-test segment makes
+`historical_validation=FAIL`, regardless of calibration profits. Positive or
+zero cash is `INCOMPLETE`: existing exports do not establish attributable
+window opening capital, complete capital flows, concurrent/open-position marked
+equity, complete closure population, or matching run/release/config snapshots.
+A frozen segment declaration and a CSV digest do not supply that missing runtime
+provenance. `capital_return_pct`, `equity_curve` and `max_drawdown_pct` remain
+null for every group/window. No balance literal, position notional, initial risk,
+manifest claim or common denominator is substituted. This deliberately removes
+the former positive historical PASS until an attributable capital authority is
+available. Different windows cannot inherit one another's capital.
+
+Legacy percentage-only rows expose unknown cash, not zero. Empty segments,
+nonfinite/inconsistent economics, missing required costs, mixed run/profile/cost
+source identities, duplicate position realization and holdings crossing frozen
+segment boundaries fail closed. Search-selection inadmissibility retains
+precedence. Historical reports and campaign outcomes are not rewritten.
 
 Promotion evidence remains explicitly distinct:
 
 - historical calibration: present only as historical research evidence;
-- historical OOS: pass/fail from the separated holdout results;
+- historical OOS: FAIL, INCOMPLETE, or INADMISSIBLE_REUSED_OOS from separated evidence;
 - future PAPER: `REQUIRED_NOT_PROVIDED`;
 - OOS replaces fresh PAPER: `false`;
 - LIVE authorized: `false`.
@@ -93,3 +116,12 @@ The manifest schema is `walk_forward_backtest_adapter_v1`. Artifact paths are
 resolved relative to the manifest, and the CSV content must match the declared
 SHA256. This command does not run a backtest, tune parameters, start PAPER, or
 authorize LIVE.
+
+
+The input manifest remains `walk_forward_backtest_adapter_v1` for compatibility;
+reading it produces a version-2 report and never upgrades old evidence. Current
+SQL exports already carry the required cash/cost/size facts in typed fields and
+`diagnostics_json`; no database schema or trading behavior changes are required.
+Closure timestamps are persisted epoch milliseconds; row timestamps are normalized
+to UTC. Holding duration must be nonnegative and cannot reach into another frozen
+segment. Partial/mixed lifecycle evidence is not qualified through this adapter.

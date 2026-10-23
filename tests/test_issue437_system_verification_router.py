@@ -413,7 +413,8 @@ def test_plan_is_json_serializable() -> None:
 
 @pytest.mark.parametrize("source", ["backtest_order.py", "src/alphaforge/realized_accounting.py",
     "src/alphaforge/burnin_resolver.py", "src/alphaforge/portfolio_risk.py",
-    "src/alphaforge/dashboard/backtest_control.py", "src/alphaforge/historical_validation.py"])
+    "src/alphaforge/dashboard/backtest_control.py", "src/alphaforge/historical_validation.py",
+    "src/alphaforge/walk_forward.py"])
 def test_realized_accounting_source_only_selects_sql_cash_regressions(source):
     plan = _plan(source)
     assert plan.risk_level == RiskLevel.HIGH
@@ -425,3 +426,11 @@ def test_quality_gate_source_only_selects_unit_and_authority_contract():
     plan = _plan("backtest_order.py")
     assert plan.risk_level == RiskLevel.HIGH
     assert "tests/test_quality_gate_accounting_integrity.py" in plan.selected_tests
+
+
+@pytest.mark.parametrize("source", ["src/alphaforge/historical_validation.py", "src/alphaforge/walk_forward.py"])
+def test_walk_forward_source_only_selects_cash_and_holdout_regressions(source):
+    plan = _plan(source)
+    assert plan.risk_level == RiskLevel.HIGH
+    assert "tests/test_walk_forward_cash_integrity.py" in plan.selected_tests
+    assert "tests/test_issue506_walk_forward.py" in plan.selected_tests

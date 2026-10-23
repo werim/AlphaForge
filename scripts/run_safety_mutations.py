@@ -165,6 +165,23 @@ def mutations() -> list[Mutation]:
                  '"quality_gate_promotion_eligible": True,',
                  "tests/test_quality_gate_accounting_integrity.py::test_signed_realized_cash_is_invariant_and_diagnostic_only"),
     ])
+    walk_test = "tests/test_walk_forward_cash_integrity.py"
+    cases.extend([
+        Mutation("walk_forward_cash_not_percentage_sign", "src/alphaforge/walk_forward.py",
+                 'and item["net_pnl_usdt"] is not None and item["net_pnl_usdt"] < 0',
+                 'and item["net_pnl_usdt"] is not None and item["net_pnl_usdt"] > 0',
+                 walk_test + "::test_positive_percentage_sum_cannot_hide_negative_sql_cash"),
+        Mutation("walk_forward_missing_capital_cannot_pass", "src/alphaforge/walk_forward.py",
+                 'else "FAIL" if negative_oos else "INCOMPLETE"',
+                 'else "FAIL" if negative_oos else "PASS"',
+                 walk_test + "::test_positive_cash_without_window_capital_is_incomplete"),
+        Mutation("walk_forward_duplicate_cash", "src/alphaforge/walk_forward.py",
+                 'if position in realized_positions:', 'if False:',
+                 walk_test + "::test_provenance_costs_replay_and_cross_window_guards[duplicate_position]"),
+        Mutation("walk_forward_missing_legacy_cash_is_not_zero", "src/alphaforge/walk_forward.py",
+                 'if proof is None:\n        return None', 'if proof is None:\n        return 0.0',
+                 walk_test + "::test_legacy_percent_only_rows_cannot_inherit_cash_or_capital"),
+    ])
     return cases
 
 

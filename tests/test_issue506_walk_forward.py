@@ -132,6 +132,17 @@ def _row(row_id: str, timestamp: str, net_return: float) -> HistoricalRow:
         effective_rr=canonical.effective_rr,
         rr_basis="EXPECTED_FILL_RUNTIME_PARITY",
         execution_cost_semantics=cost_semantics,
+        realized_cash_evidence={
+            "realized_accounting_version": "CASH_LEDGER_V1", "realized_evidence_status": "COMPLETE",
+            "realized_cost_source": "TEST_FROZEN_CASH_LEDGER", "run_id": "fixture-run",
+            "position_id": row_id, "side": "LONG", "fill": 100.0, "stop": 99.0,
+            "exit_price": 100.0+net_return, "filled_quantity": 1.0,
+            "gross_pnl": net_return, "initial_risk_usd": 1.0, "total_cost_usd": 0.0,
+            "net_r": net_return, "net_pnl_usdt": net_return, "hold_minutes": 0.0,
+            "closed_timestamp": timestamp,
+            "realized_costs": {key: 0.0 for key in ("entry_spread", "entry_slippage", "entry_fee",
+                "exit_spread", "exit_slippage", "exit_fee", "funding", "latency_impact_penalty")},
+        },
     )
 
 
@@ -330,7 +341,8 @@ def test_untouched_test_must_be_untouched_and_true_holdout_remains_admissible():
         ],
         min_effective_rr=1.6,
     )
-    assert report["historical_validation"] == "PASS"
+    # Fresh search lineage does not supply a measured window capital denominator.
+    assert report["historical_validation"] == "INCOMPLETE"
     assert report["inadmissible_search_segments"] == []
     assert any(
         segment["role"] == SegmentRole.UNTOUCHED_TEST
@@ -357,11 +369,12 @@ def test_existing_backtest_decision_evidence_generates_machine_readable_report(t
                 "regime": source.regime,
                 "lifecycle_state_after": "POSITION_CLOSED",
                 "net_pnl_pct": source.net_return,
-                "diagnostics_json": json.dumps({
-                    "realized_accounting_version": "CASH_LEDGER_V1",
-                    "realized_evidence_status": "COMPLETE",
-                    "realized_cost_source": "TEST_FROZEN_CASH_LEDGER",
-                }),
+                "net_pnl_usdt": source.realized_cash_evidence["net_pnl_usdt"],
+                "run_id": "fixture-run", "position_id": source.row_id, "side": "LONG",
+                "trigger_price": 100.0, "sl": 99.0, "close_price": 100.0+source.net_return,
+                "hold_minutes": 0.0,
+                "diagnostics_json": json.dumps({**source.realized_cash_evidence,
+                    "realized_costs_json": json.dumps(source.realized_cash_evidence["realized_costs"])}),
                 "candidate_raw_rr": source.candidate_rr,
                 "executable_raw_rr": source.executable_rr,
                 "remaining_execution_penalty": source.remaining_execution_penalty,
@@ -443,7 +456,8 @@ def _recent_stats():
     }
 
 
-def _production_backtest_lifecycle(timestamp_ms, *, with_realized_costs=True):
+def _production_backtest_lifecycle(timestamp_ms, *, with_realized_costs=True, risk_pct=1.0, outcome="TP", risk_scale=1.0, side="LONG", symbol="BTCUSDT",
+                                  stop_distance=1.0, cost_multiplier=1.0, duration_ms=60_000):
     market = {
         "symbol": "BTCUSDT",
         "entry": 100.0,
@@ -482,6 +496,11 @@ def _production_backtest_lifecycle(timestamp_ms, *, with_realized_costs=True):
                 exit_spread=.0001, exit_slippage=.0001, exit_fee=.001, funding=.0001,
                 latency_impact_penalty=0),
         )
+    sign = 1 if side == "LONG" else -1
+    market.update(side=side, symbol=symbol, sl=100-sign*stop_distance, tp=100+sign*3)
+    if with_realized_costs:
+        market["realized_costs_usd"] = {key: value*cost_multiplier
+                                       for key, value in market["realized_costs_usd"].items()}
     market["execution_ctx"] = build_execution_context(market)
     decision = evaluate_signal_decision(
         market,
@@ -496,16 +515,20 @@ def _production_backtest_lifecycle(timestamp_ms, *, with_realized_costs=True):
         bo.Candle(timestamp_ms, 100.0, 100.5, 99.5, 100.0, 1000.0),
         bo.Candle(timestamp_ms + 60_000, 100.0, 104.0, 99.5, 103.0, 1000.0),
     ]
+    exit_price = market["tp"] if outcome == "TP" else market["sl"]
+    candles[1] = bo.Candle(timestamp_ms + duration_ms, 100.0,
+        max(100.5, exit_price+.1), min(99.5, exit_price-.1), exit_price, 1000.0)
+    decision.diagnostics["risk_scale"] = risk_scale
     lifecycle = []
     candidate = bo.process_backtest_result(
-        "BTCUSDT",
+        symbol,
         candles[0],
         0,
         candles,
         {"status": "executed", "candidate": decision.candidate, "diagnostics": decision.diagnostics},
         market,
         1000.0,
-        1.0,
+        risk_pct,
         lifecycle,
         [],
         {},
@@ -569,7 +592,8 @@ def test_production_backtest_persistence_export_feeds_walk_forward_adapter(tmp_p
 
     report = generate_backtest_walk_forward_report(manifest_path, output_path)
 
-    assert report["historical_validation"] == "PASS"
+    # Fresh search lineage does not supply a measured window capital denominator.
+    assert report["historical_validation"] == "INCOMPLETE"
     assert report["contract_identity"] == contract.identity
     assert report["source_artifact"]["sha256"] == evidence_sha
     assert report["segments"][1]["git_sha"] == GIT_SHA
