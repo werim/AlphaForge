@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -52,6 +56,98 @@ def test_storage_authority_routes_both_retention_regressions() -> None:
     plan = _plan("src/alphaforge/storage_policy.py")
     assert "tests/test_issue620_storage_policy.py" in plan.selected_tests
     assert "tests/test_issue622_stats_only_retention.py" in plan.selected_tests
+
+
+@pytest.mark.parametrize("module", ["storage_calibration", "storage_workload"])
+def test_storage_source_only_change_selects_existing_regressions(module) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = f"src/alphaforge/{module}.py"
+    assert (root / source).is_file()
+    plan = _plan(source)
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ("T0", "T1", "T2", "T3")
+    assert "UNKNOWN_PRODUCTION_CHANGE" not in plan.affected_invariants
+    assert {"STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"} <= set(plan.affected_invariants)
+    assert "tests/test_storage_calibration.py" in plan.selected_tests
+    assert all((root / path).is_file() for path in plan.selected_tests)
+    # These tests belong to unmerged637; dev must not depend on them.
+    assert not {"tests/test_storage_measurement.py", "tests/test_storage_host_identity.py",
+                "tests/test_storage_admission_contract.py"} & set(plan.selected_tests)
+
+
+def test_storage_plan_deduplicates_source_and_explicit_test_changes() -> None:
+    paths = ["src/alphaforge/storage_workload.py", "src/alphaforge/storage_calibration.py",
+             "tests/test_storage_calibration.py", "src/alphaforge/storage_workload.py"]
+    first = _plan(*paths)
+    assert first == _plan(*reversed(paths))
+    assert first.selected_tests == tuple(sorted(set(first.selected_tests)))
+    assert first.selected_tests.count("tests/test_storage_calibration.py") == 1
+    assert first.plan_id == _plan(*sorted(set(paths))).plan_id
+
+
+@pytest.mark.parametrize(("source", "risk", "invariants", "suites"), [
+    ("storage_policy.py", RiskLevel.HIGH,
+     {"STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"},
+     {"test_issue620_storage_policy.py", "test_issue622_stats_only_retention.py",
+      "test_issue550_atomic_reject_persistence.py", "test_issue450_sqlite_concurrency.py",
+      "test_issue421_full_chain_replay.py"}),
+    ("runtime.py", RiskLevel.HIGH, {"RUNTIME_AUTHORITY", "RESTART_RECOVERY"},
+     {"test_runtime.py", "test_issue421_full_chain_replay.py"}),
+    ("execution.py", RiskLevel.HIGH, {"EXECUTION_SAFETY", "DECISION_PARITY"},
+     {"test_issue421_execution_safety.py", "test_execution_cost_semantics.py",
+      "test_issue490_protected_mode_parity.py", "test_issue421_decision_invariant.py"}),
+    ("order.py", RiskLevel.CRITICAL,
+     {"EXECUTION_SAFETY", "KILL_SWITCH_AUTHORIZATION", "LIVE_ORDER_BOUNDARY"},
+     {"test_issue421_execution_safety.py", "test_execution_cost_semantics.py",
+      "test_runtime_live_authorization.py", "test_trading_modes.py", "test_phase6_release_gates.py"}),
+])
+def test_storage_mapping_preserves_existing_authority_routes(source, risk, invariants, suites):
+    plan = _plan(f"src/alphaforge/{source}")
+    assert plan.risk_level == risk
+    assert set(plan.affected_invariants) == invariants
+    assert {Path(path).name for path in plan.selected_tests} == suites
+
+
+@pytest.mark.parametrize(("result", "reason"), [
+    ("FAIL", "STORAGE_ADMISSION_EVIDENCE_REJECTED"),
+    ("ERROR", "MEASUREMENT_EVIDENCE_MISSING"),
+    ("BLOCKED", "PHYSICAL_CAPACITY_UNVERIFIED"),
+])
+def test_storage_routing_cannot_promote_absent_failed_or_unverified_evidence(result, reason):
+    plan = _plan("src/alphaforge/storage_calibration.py")
+    manifest = build_verification_manifest(plan, deterministic_result=result,
+        tests_executed=0, invariants_passed=0, invariants_total=len(plan.affected_invariants))
+    packet = build_failure_packet({"deterministic_result": result, "risk_level": plan.risk_level,
+        "affected_invariants": plan.affected_invariants, "failed_invariant": reason})
+    assert manifest["deterministic_result"] == packet["routing"]["deterministic_result"] == result
+    assert packet["failed_invariant"] == reason
+    for authority in (manifest, packet["routing"]):
+        assert authority["llm_authoritative"] is False
+        assert authority["may_relax_safety"] is False
+        assert authority["may_authorize_live"] is False
+    assert "admission_eligible" not in manifest
+
+
+def test_real_ci_step_consumes_storage_source_only_selection(tmp_path, monkeypatch):
+    # Execute the actual workflow's embedded Python, intercepting only pytest
+    # invocation. No second CI command/test mapping is maintained here.
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/test.yml").read_text()
+    step = workflow.split("      - name: Routed PR verification\n", 1)[1].split("      - name:", 1)[0]
+    script = textwrap.dedent(step.split("python - <<'PY'\n", 1)[1].split("          PY", 1)[0])
+    plan = _plan("src/alphaforge/storage_calibration.py", "src/alphaforge/storage_workload.py")
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts/system-verification-plan.json").write_text(json.dumps(plan.to_dict()))
+    commands = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: commands.append((argv, kwargs)))
+    exec(compile(script, ".github/workflows/test.yml:Routed PR verification", "exec"), {})
+    assert len(commands) == 1
+    argv, kwargs = commands[0]
+    assert argv[:4] == [sys.executable, "-m", "pytest", "-q"]
+    assert "tests/test_storage_calibration.py" in argv[4:]
+    assert set(argv[4:]) <= set(plan.selected_tests)
+    assert kwargs == {"check": True}
 
 
 def test_live_order_boundary_is_critical_and_requires_release_tier() -> None:
