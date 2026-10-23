@@ -108,6 +108,13 @@ fresh directory is sufficient for these disposable offline fixtures: canonical
 SQLite uses a normal file DB; it has no disk-image dependency. No hdiutil command
 is invoked. The historical hdiutil create failure remains INCONCLUSIVE.
 
+The worker also watches its original supervisor identity and exits on parent
+loss, even if publishing its failure note fails. This is the same watchdog used
+by the dependent real-calibration implementation, not a quota or hard real-time
+lease. The durable consumed claim without a final result remains incomplete;
+it never authorizes retry/resume. Structured credential fields and signed-query
+secrets are redacted from diagnostics as well as plain key/value text.
+
 These are **observed aggregate bounds**, not a kernel filesystem quota. A write
 or archive burst may exceed the aggregate bound before the next sample; hidden
 peaks remain an explicit coverage limit. This implementation does not claim hard
