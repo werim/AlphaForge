@@ -123,6 +123,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_quality_gate_accounting_integrity.py",
         "tests/test_issue646_legacy_realized_accounting.py",
         "tests/test_issue506_walk_forward.py",
+        "tests/test_walk_forward_cash_integrity.py",
         "tests/test_issue421_position_window_integrity.py",
         "tests/test_issue421_full_chain_replay.py",
     ),
@@ -275,7 +276,7 @@ def assess_path(raw_path: str) -> PathAssessment:
             )
 
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
-            (("realized_accounting.py", "historical_validation.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
+            (("realized_accounting.py", "historical_validation.py", "walk_forward.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
             (("execution.py",), ("EXECUTION_SAFETY", "DECISION_PARITY"), "execution economics/safety changed"),
             (("runtime.py",), ("RUNTIME_AUTHORITY", "RESTART_RECOVERY"), "authoritative runtime changed"),
             (("burnin_ops.py",), ("BURNIN_OPERATIONS", "RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "burn-in operational supervision and recovery changed"),

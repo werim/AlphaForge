@@ -8,13 +8,14 @@ economics.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import math
 from typing import Any, Callable, Mapping, Sequence, TypeVar
 
 from .burnin import canonical_hash, config_hash, universe_hash
 from .decision_invariant import validate_pre_submit_semantics
+from .realized_accounting import finite_cash, position_cash_geometry, realized_cash_ledger, sum_cash
 from .execution import (
     EXECUTION_COST_PERCENTAGE_DENOMINATOR,
     EXECUTION_COST_REFERENCE_PRICE,
@@ -223,7 +224,7 @@ class HistoricalRow:
     row_id: str
     timestamp: str
     symbol: str
-    net_return: float
+    net_return: float  # Legacy API name: position-notional percentage, never capital return.
     candidate_rr: float
     executable_rr: float
     remaining_execution_penalty: float
@@ -231,6 +232,7 @@ class HistoricalRow:
     rr_basis: str
     execution_cost_semantics: Mapping[str, Any]
     regime: str = "UNKNOWN"
+    realized_cash_evidence: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +351,58 @@ class WalkForwardContract:
 T = TypeVar("T")
 
 
+def _validated_cash(row: HistoricalRow) -> float | None:
+    """Reconcile persisted closure facts using the existing cash authority.
+
+    A legacy percentage alone is diagnostic, never a cash or capital return.
+    No initial equity, capital-flow or marked-equity history is inferred here.
+    """
+    proof = row.realized_cash_evidence
+    if proof is None:
+        return None
+    if (proof.get("realized_accounting_version") != "CASH_LEDGER_V1"
+            or proof.get("realized_evidence_status") != "COMPLETE"
+            or str(proof.get("realized_cost_source") or "").strip().upper()
+            in {"", "UNKNOWN", "UNAVAILABLE"}
+            or any(not str(proof.get(key) or "").strip() for key in ("run_id", "position_id"))):
+        raise ValueError(f"row {row.row_id} lacks realized cash provenance")
+    raw_closed = proof.get("closed_timestamp")
+    numeric_closed = finite_cash(raw_closed)
+    closed = (datetime.fromtimestamp(numeric_closed / 1000, tz=_timestamp(row.timestamp).tzinfo)
+              if numeric_closed is not None else _timestamp(str(raw_closed or "")))
+    if closed != _timestamp(row.timestamp):
+        raise ValueError(f"row {row.row_id} has inconsistent closure timestamp")
+    numbers = {key: finite_cash(proof.get(key)) for key in (
+        "fill", "stop", "exit_price", "filled_quantity", "gross_pnl", "initial_risk_usd",
+        "total_cost_usd", "net_r", "net_pnl_usdt", "hold_minutes")}
+    if (any(value is None for value in numbers.values())
+            or any(numbers[key] <= 0 for key in ("fill", "stop", "exit_price", "filled_quantity", "initial_risk_usd"))
+            or numbers["hold_minutes"] < 0 or proof.get("side") not in {"LONG", "SHORT"}):
+        raise ValueError(f"row {row.row_id} has invalid realized cash evidence")
+    costs = proof.get("realized_costs")
+    required = {"entry_spread", "exit_spread", "entry_slippage", "exit_slippage",
+                "entry_fee", "exit_fee", "funding", "latency_impact_penalty"}
+    if (not isinstance(costs, Mapping) or not required.issubset(costs)
+            or finite_cash(costs.get("entry_slippage")) != 0):
+        raise ValueError(f"row {row.row_id} lacks complete realized costs")
+    geometry = position_cash_geometry(fill=numbers["fill"], stop=numbers["stop"],
+        quantity=numbers["filled_quantity"], exit_price=numbers["exit_price"], side=proof["side"])
+    ledger = realized_cash_ledger(gross_pnl=geometry["gross_pnl_usd"],
+        initial_risk=geometry["initial_risk_usd"],
+        costs={"funding_cost" if key == "funding" else key: value for key, value in costs.items()})
+    expected = {"gross_pnl": geometry["gross_pnl_usd"], "initial_risk_usd": geometry["initial_risk_usd"],
+                "total_cost_usd": ledger["total_cost_usd"], "net_r": ledger["net_r"],
+                "net_pnl_usdt": ledger["net_pnl_usd"]}
+    if any(value is None or not math.isclose(numbers[key], value, rel_tol=1e-9, abs_tol=1e-10)
+           for key, value in expected.items()):
+        raise ValueError(f"row {row.row_id} has inconsistent realized cash identities")
+    notional = numbers["fill"] * numbers["filled_quantity"]
+    if not math.isfinite(notional) or not math.isclose(row.net_return,
+            numbers["net_pnl_usdt"] / notional * 100, rel_tol=1e-9, abs_tol=1e-10):
+        raise ValueError(f"row {row.row_id} has inconsistent position-notional return")
+    return numbers["net_pnl_usdt"]
+
+
 def build_validation_report(
     contract: WalkForwardContract,
     rows: Sequence[HistoricalRow],
@@ -362,8 +416,27 @@ def build_validation_report(
         if not partitioned[segment.segment_id]:
             raise ValueError(f"segment {segment.segment_id} has no evidence rows")
     details: list[dict[str, Any]] = []
+    cash_scopes: set[tuple[str, ...]] = set()
+    realized_positions: set[tuple[str, str]] = set()
     for segment in contract.segments:
-        for row in partitioned[segment.segment_id]:
+        for row in sorted(partitioned[segment.segment_id], key=lambda item: (_timestamp(item.timestamp), item.row_id)):
+            if finite_cash(row.net_return) is None:
+                raise ValueError(f"row {row.row_id} has invalid position return")
+            cash = _validated_cash(row)
+            proof = row.realized_cash_evidence or {}
+            if proof:
+                opened = _timestamp(row.timestamp) - timedelta(minutes=float(proof["hold_minutes"]))
+                if opened < _timestamp(segment.start):
+                    raise ValueError("holding lifecycle crosses a frozen segment boundary")
+                scope = tuple(str(proof.get(key) or "") for key in
+                              ("run_id", "profile_id", "profile_name", "realized_cost_source"))
+                cash_scopes.add(scope)
+                position = (scope[0], str(proof["position_id"]))
+                if position in realized_positions:
+                    raise ValueError("duplicate realized position cash")
+                realized_positions.add(position)
+                if len(cash_scopes) > 1:
+                    raise ValueError("incompatible realized cash run/profile/source provenance")
             rr_values = (
                 row.candidate_rr,
                 row.executable_rr,
@@ -411,7 +484,12 @@ def build_validation_report(
                     "role": segment.role,
                     "symbol": row.symbol,
                     "regime": row.regime,
-                    "net_return": float(row.net_return),
+                    "position_net_return_pct": float(row.net_return),
+                    "net_pnl_usdt": cash,
+                    "position_notional_usdt": (finite_cash(proof["fill"]) * finite_cash(proof["filled_quantity"])) if proof else None,
+                    "initial_risk_usd": proof.get("initial_risk_usd"),
+                    "net_r": proof.get("net_r"),
+                    "realized_cash_evidence": dict(proof) if proof else None,
                     "candidate_rr": float(row.candidate_rr),
                     "executable_rr": float(row.executable_rr),
                     "remaining_execution_penalty": float(row.remaining_execution_penalty),
@@ -430,7 +508,17 @@ def build_validation_report(
             {
                 **dict(zip(keys, group_key)),
                 "row_count": len(group_rows),
-                "net_return": round(sum(row["net_return"] for row in group_rows), 10),
+                "net_pnl_usdt": finite_cash(sum_cash(row["net_pnl_usdt"] for row in group_rows)),
+                # Retired v1 field: never reinterpret position percentages as capital performance.
+                "net_return": None,
+                "capital_return_pct": None,
+                "capital_evidence_status": "INCOMPLETE",
+                "capital_evidence_gaps": ["WINDOW_OPENING_CAPITAL_UNVERIFIED",
+                    "CAPITAL_FLOWS_AND_OPEN_POSITION_EQUITY_UNVERIFIED",
+                    "RUN_RELEASE_CONFIG_BINDING_UNVERIFIED",
+                    "CLOSURE_SET_AND_CONCURRENT_EXPOSURE_UNVERIFIED"],
+                "equity_curve": None,
+                "max_drawdown_pct": None,
             }
             for group_key, group_rows in sorted(groups.items(), key=lambda item: tuple(map(str, item[0])))
         ]
@@ -453,10 +541,14 @@ def build_validation_report(
         item
         for item in segment_summary
         if item["role"] in {SegmentRole.OOS_VALIDATION, SegmentRole.UNTOUCHED_TEST}
-        and item["net_return"] < 0
+        and item["net_pnl_usdt"] is not None and item["net_pnl_usdt"] < 0
     ]
+    verdict = (
+        "INADMISSIBLE_REUSED_OOS" if inadmissible_search_segments
+        else "FAIL" if negative_oos else "INCOMPLETE"
+    )
     return {
-        "schema_version": "walk_forward_validation_v1",
+        "schema_version": "walk_forward_validation_v2",
         "contract_identity": contract.identity,
         "segments": [asdict(segment) for segment in contract.segments],
         "universe": {
@@ -472,20 +564,12 @@ def build_validation_report(
             "by_role_regime": grouped(("role", "regime")),
         },
         "rows": details,
-        "historical_validation": (
-            "INADMISSIBLE_REUSED_OOS"
-            if inadmissible_search_segments
-            else "FAIL" if negative_oos else "PASS"
-        ),
+        "historical_validation": verdict,
         "negative_oos_segments": negative_oos,
         "inadmissible_search_segments": inadmissible_search_segments,
         "promotion_evidence": {
             "historical_calibration": "PRESENT",
-            "historical_oos": (
-                "INADMISSIBLE_REUSED_OOS"
-                if inadmissible_search_segments
-                else "FAIL" if negative_oos else "PASS"
-            ),
+            "historical_oos": verdict,
             "future_paper": "REQUIRED_NOT_PROVIDED",
             "oos_replaces_fresh_paper": False,
             "live_authorized": False,
