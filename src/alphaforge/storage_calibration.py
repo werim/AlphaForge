@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import threading
 from typing import Any
 
 from alphaforge.burnin import canonical_hash
@@ -203,7 +204,7 @@ def redact(value: str, secrets: tuple[str, ...] = ()) -> str:
                 if value.endswith(secret[:length]):
                     value = value[:-length] + "[REDACTED_TRUNCATED]"
                     break
-    return re.sub(r"(?i)((?:secret|token|password|api[_-]?key|authorization)\s*[:=]\s*)[^\s,;]+",
+    return re.sub(r"(?i)((?:secret|token|password|api[_-]?key|authorization|signature|x-mbx-apikey)[\"']?\s*[:=]\s*[\"']?)[^\s,;}&\"']+",
                   r"\1[REDACTED]", value)
 
 
@@ -276,6 +277,36 @@ def supervise(command: list[str], output: Path, limits: dict, env: dict, secrets
             "wall_seconds": time.monotonic() - started, "sampled_peaks": observed_peaks,
             "minimum_observed_host_free_bytes": minimum_free,
             "resource_observation_interval_seconds": 0.05}
+
+
+def parent_watchdog(parent_pid: int, output: Path, *, interval_seconds: float = 0.1) -> threading.Event:
+    """Stop this disposable worker after supervisor loss; never continue a claim.
+
+    This child-side liveness guard is not an OS quota or a hard real-time lease.
+    The durable parent claim remains authoritative when final evidence is absent.
+    """
+    stopped = threading.Event()
+
+    def watch():
+        while not stopped.is_set():
+            if os.getppid() != parent_pid:
+                try:
+                    write_json(output / "worker-parent-loss.json", {
+                        "status": "FAILED", "reason": "SUPERVISOR_LOST",
+                        "admission_eligible": False,
+                        "recommended_growth_budget_bytes_per_sec": None,
+                        "expected_parent_pid": parent_pid,
+                    })
+                finally:
+                    # No application exception handler can resume an orphaned
+                    # workload. If disk-full prevents the note, the persistent
+                    # claim with no parent result still means INCOMPLETE.
+                    os._exit(74)
+            stopped.wait(interval_seconds)
+
+    stopped.worker_thread = threading.Thread(target=watch, name="storage-calibration-parent-watch", daemon=True)
+    stopped.worker_thread.start()
+    return stopped
 
 
 def run(plan_path: Path, output: Path, expected_digest: str) -> dict:
@@ -517,12 +548,16 @@ def main(argv=None) -> int:
         resource.setrlimit(resource.RLIMIT_FSIZE, (plan["limits"]["max_bytes"], plan["limits"]["max_bytes"]))
         fd = os.open(args.output / "worker.attempt", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
-        before = source_identity()
-        result = replay(plan, args.output, before)
-        if source_identity() != before:
-            raise ValueError("SOURCE_CHANGED_DURING_REPLAY")
-        write_json(args.output / "worker-result.json", result)
-        return 0
+        watchdog = parent_watchdog(claim["parent_pid"], args.output)
+        try:
+            before = source_identity()
+            result = replay(plan, args.output, before)
+            if source_identity() != before:
+                raise ValueError("SOURCE_CHANGED_DURING_REPLAY")
+            write_json(args.output / "worker-result.json", result)
+            return 0
+        finally:
+            watchdog.set()
     result = run(args.plan.resolve(), args.output, args.plan_sha256)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "DIAGNOSTIC_COMPLETE" else 1

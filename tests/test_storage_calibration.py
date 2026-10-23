@@ -4,9 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 import os
+import selectors
 from pathlib import Path
 import sqlite3
 import sys
+import subprocess
+import time
 
 import pytest
 
@@ -276,6 +279,82 @@ def test_interpreter_and_filesystem_mismatch_are_not_relabelled(monkeypatch, tmp
 def test_redaction_covers_known_secret_truncated_at_capture_boundary():
     assert "super-" not in cal.redact("prefix super-", ("super-private-token",))
     assert "[REDACTED_TRUNCATED]" in cal.redact("prefix super-", ("super-private-token",))
+
+
+@pytest.mark.parametrize("value", ['{"token": "hidden"}', 'signature=hidden&next=ok',
+                                   'x-mbx-apikey: hidden', "{'password': 'hidden'}"])
+def test_structured_and_signed_diagnostics_do_not_expose_credentials(value):
+    assert "hidden" not in cal.redact(value)
+    assert "[REDACTED]" in cal.redact(value)
+
+
+@pytest.mark.parametrize("note_failure", [False, True])
+def test_real_worker_stops_after_supervisor_death_without_resume(tmp_path, note_failure):
+    # Exercise the actual _worker entrypoint, with a blocked disposable replay.
+    # Inherited pipe EOF proves the orphan exited without process-list access.
+    worker = '''
+import os,sys,time
+from pathlib import Path
+from alphaforge import storage_calibration as c
+root=Path(sys.argv[1])
+c.source_identity=lambda: {}
+def replay(*args):
+    (root/'ready').write_text(str(os.getpid()))
+    time.sleep(20)
+    (root/'survived').touch()
+    return {}
+c.replay=replay
+if sys.argv[2]=='True':
+    def failed_note(*args): raise OSError('injected evidence publication failure')
+    c.write_json=failed_note
+c.main(['_worker','--plan',str(root/'plan.json'),'--output',str(root),'--claim',str(root/'claim.json')])
+'''
+    supervisor = '''
+import json,os,subprocess,sys,time
+from pathlib import Path
+from alphaforge.burnin import canonical_hash
+root=Path(sys.argv[1]);plan={'limits':{'max_bytes':16777216}}
+(root/'plan.json').write_text(json.dumps(plan))
+(root/'claim.json').write_text(json.dumps({'parent_pid':os.getpid(),'output':str(root),'content_hash':canonical_hash(plan)}))
+subprocess.Popen([sys.executable,'-c',sys.argv[2],str(root),sys.argv[3]])
+time.sleep(20)
+'''
+    env = {**os.environ, "PYTHONPATH": str(Path(cal.__file__).resolve().parents[1]),
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    proc = subprocess.Popen([sys.executable, "-c", supervisor, str(tmp_path), worker, str(note_failure)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "ready").exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert (tmp_path / "ready").exists()
+        child_pid = int((tmp_path / "ready").read_text())
+        claim = (tmp_path / "claim.json").read_bytes()
+        proc.kill(); proc.wait(timeout=3)
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            assert selector.select(timeout=3), "worker survived supervisor death"
+            assert proc.stdout.read(1) == b""
+        child_pid = None
+        assert not (tmp_path / "survived").exists()
+        assert not (tmp_path / "worker-result.json").exists()
+        assert (tmp_path / "claim.json").read_bytes() == claim
+        assert (tmp_path / "worker.attempt").exists()
+        if not note_failure:
+            note = json.loads((tmp_path / "worker-parent-loss.json").read_text())
+            assert note["reason"] == "SUPERVISOR_LOST"
+            assert note["admission_eligible"] is False
+            assert note["recommended_growth_budget_bytes_per_sec"] is None
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait(timeout=3)
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 9)
+            except ProcessLookupError:
+                pass
+        proc.stdout.close(); proc.stderr.close()
 
 
 def test_generated_workload_exercises_every_adapter_without_future_evidence(tmp_path):
