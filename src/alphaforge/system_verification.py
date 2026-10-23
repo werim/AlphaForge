@@ -56,6 +56,16 @@ _MODEL_BY_RISK = {
 
 _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
     "BUILD_DEPENDENCY_INTEGRITY": ("tests/test_ci_branch_contract.py",),
+    # Campaign attachment/supervision and operator recovery have dedicated
+    # production-path suites; keep them scoped rather than broadening runtime.
+    "BURNIN_CAMPAIGN": (
+        "tests/test_phase8_burnin_campaign.py",
+        "tests/test_issue581_burnin_dynamic_universe.py",
+    ),
+    "BURNIN_OPERATIONS": (
+        "tests/test_phase9_burnin_ops.py",
+        "tests/test_issue631_reject_recovery.py",
+    ),
     "CONFIG_AUTHORITY": (
         "tests/test_issue491_paper_candidate_notional_ssot.py",
         "tests/test_issue500_correlation_risk_config_ssot.py",
@@ -254,6 +264,8 @@ def assess_path(raw_path: str) -> PathAssessment:
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
             (("execution.py",), ("EXECUTION_SAFETY", "DECISION_PARITY"), "execution economics/safety changed"),
             (("runtime.py",), ("RUNTIME_AUTHORITY", "RESTART_RECOVERY"), "authoritative runtime changed"),
+            (("burnin_ops.py",), ("BURNIN_OPERATIONS", "RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "burn-in operational supervision and recovery changed"),
+            (("burnin_campaign.py",), ("BURNIN_CAMPAIGN", "BURNIN_OPERATIONS", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY", "RESOLVER_INTEGRITY"), "burn-in campaign lifecycle, evidence and worker supervision changed"),
             (("decision_invariant.py",), ("DECISION_PARITY",), "cross-mode decision invariant changed"),
             (("portfolio_risk",), ("PORTFOLIO_RISK",), "portfolio-risk authority changed"),
             (("burnin_resolver.py",), ("RESOLVER_INTEGRITY", "TIME_INTEGRITY"), "resolver authority changed"),
