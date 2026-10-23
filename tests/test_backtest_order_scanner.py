@@ -55,13 +55,19 @@ def test_scan_creates_virtual_candidate(monkeypatch):
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
     monkeypatch.setattr(bo, "_historical_authoritative_score", lambda *_args, **_kwargs: {"score": .9, "expectancy": .2, "expectancy_bucket": "HIGH", "accepted": True, "reject_reason": "", "diagnostics": {}})
     candles = [bo.Candle(1, 104, 104, 103.6, 104.0, 100), bo.Candle(2, 104, 104, 103.6, 104.0, 100), bo.Candle(3, 100.0, 105.5, 104.5, 105.0, 100)]
-    context = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}}
+    context = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001,
+               "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
+               "latency_ms": 10.0, "latency_status": "MODEL_ESTIMATE", "latency_source": "TEST_LATENCY_MODEL"}}
     c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, context)
     assert c is not None
     assert c.score == pytest.approx(.9)
     assert context["market_ctx"]["score"] == pytest.approx(.9)
     assert context["market_ctx"]["expectancy"] == pytest.approx(.2)
     assert context["market_ctx"]["legacy_geometry_score"] != pytest.approx(.9)
+    assert context["market_ctx"]["fee_pct"] == 0.0004
+    assert context["market_ctx"]["fee_source"] == "TEST_FEE_SCHEDULE"
+    assert context["market_ctx"]["latency_ms"] == 10.0
+    assert context["market_ctx"]["latency_source"] == "TEST_LATENCY_MODEL"
 
 
 def test_scan_with_portfolio_state_uses_shared_decision_candidate():

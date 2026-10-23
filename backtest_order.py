@@ -687,6 +687,9 @@ def _build_market_ctx(
     raw_spread = symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct)
     spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
     base = {
+        **{key: symbol_meta[key] for key in (
+            "fee_pct", "fee_status", "fee_source", "latency_ms", "latency_status", "latency_source",
+        ) if key in symbol_meta},
         "entry": entry,
         "sl": sl,
         "tp": tp,

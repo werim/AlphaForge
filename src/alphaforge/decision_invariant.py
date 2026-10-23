@@ -421,7 +421,10 @@ def incomplete_pre_submit_fields(
             missing.append(field)
     if not value.threshold_provenance:
         missing.append("threshold_provenance")
-    if value.execution_evidence_status in {"", "UNKNOWN", "UNAVAILABLE", "INCOMPLETE"}:
+    if value.execution_evidence_status in {
+        "", "UNKNOWN", "UNAVAILABLE", "INCOMPLETE",
+        "UNAVAILABLE_BLOCKING", "INVALID_FAKE_ZERO",
+    }:
         missing.append("execution_evidence_status")
     if value.portfolio_decision == "UNKNOWN":
         missing.append("portfolio_decision")
