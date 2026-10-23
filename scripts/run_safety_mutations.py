@@ -149,6 +149,9 @@ def mutations() -> list[Mutation]:
         Mutation("cash_replay_is_idempotent", "src/alphaforge/portfolio_risk.py",
                  "if position_id in self.closed_position_ids:", "if False:",
                  accounting_test + "::test_portfolio_unknown_cash_and_replay_are_fail_closed"),
+        Mutation("historical_cash_provenance_is_required", "src/alphaforge/historical_validation.py",
+                 'or proof.get("realized_accounting_version") != "CASH_LEDGER_V1"', 'or False',
+                 "tests/test_issue506_walk_forward.py::test_numeric_legacy_return_cannot_inherit_cost_complete_provenance"),
     ])
     return cases
 

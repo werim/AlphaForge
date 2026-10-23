@@ -413,7 +413,7 @@ def test_plan_is_json_serializable() -> None:
 
 @pytest.mark.parametrize("source", ["backtest_order.py", "src/alphaforge/realized_accounting.py",
     "src/alphaforge/burnin_resolver.py", "src/alphaforge/portfolio_risk.py",
-    "src/alphaforge/dashboard/backtest_control.py"])
+    "src/alphaforge/dashboard/backtest_control.py", "src/alphaforge/historical_validation.py"])
 def test_realized_accounting_source_only_selects_sql_cash_regressions(source):
     plan = _plan(source)
     assert plan.risk_level == RiskLevel.HIGH

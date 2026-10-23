@@ -357,6 +357,11 @@ def test_existing_backtest_decision_evidence_generates_machine_readable_report(t
                 "regime": source.regime,
                 "lifecycle_state_after": "POSITION_CLOSED",
                 "net_pnl_pct": source.net_return,
+                "diagnostics_json": json.dumps({
+                    "realized_accounting_version": "CASH_LEDGER_V1",
+                    "realized_evidence_status": "COMPLETE",
+                    "realized_cost_source": "TEST_FROZEN_CASH_LEDGER",
+                }),
                 "candidate_raw_rr": source.candidate_rr,
                 "executable_raw_rr": source.executable_rr,
                 "remaining_execution_penalty": source.remaining_execution_penalty,
@@ -582,4 +587,19 @@ def test_production_backtest_missing_cash_cannot_be_walk_forward_evidence(tmp_pa
     bo._persist_lifecycle_rows(lifecycle, database_url=database_url, run_id="missing-cash")
     rows = bo._decision_evidence_rows(database_url, run_id="missing-cash")
     with pytest.raises(ValueError, match="missing net_pnl_pct"):
+        historical_rows_from_backtest_decisions(rows)
+
+
+@pytest.mark.parametrize("missing", ["realized_accounting_version", "realized_evidence_status", "realized_cost_source"])
+def test_numeric_legacy_return_cannot_inherit_cost_complete_provenance(tmp_path, missing):
+    timestamp_ms = int(datetime(2026, 1, 15, tzinfo=timezone.utc).timestamp()*1000)
+    lifecycle = _production_backtest_lifecycle(timestamp_ms)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'legacy-provenance.sqlite'}"
+    bo._persist_lifecycle_rows(lifecycle, database_url=database_url, run_id="legacy-provenance")
+    rows = bo._decision_evidence_rows(database_url, run_id="legacy-provenance")
+    for row in rows:
+        proof = json.loads(row["diagnostics_json"])
+        proof.pop(missing, None)
+        row["diagnostics_json"] = json.dumps(proof)
+    with pytest.raises(ValueError, match="cost-complete realized cash provenance"):
         historical_rows_from_backtest_decisions(rows)

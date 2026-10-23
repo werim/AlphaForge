@@ -274,7 +274,7 @@ def assess_path(raw_path: str) -> PathAssessment:
             )
 
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
-            (("realized_accounting.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
+            (("realized_accounting.py", "historical_validation.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
             (("execution.py",), ("EXECUTION_SAFETY", "DECISION_PARITY"), "execution economics/safety changed"),
             (("runtime.py",), ("RUNTIME_AUTHORITY", "RESTART_RECOVERY"), "authoritative runtime changed"),
             (("burnin_ops.py",), ("BURNIN_OPERATIONS", "RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "burn-in operational supervision and recovery changed"),

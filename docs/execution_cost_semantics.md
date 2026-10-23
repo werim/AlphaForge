@@ -222,3 +222,8 @@ with unknown realized cash fails subsequent risk checks. Price-only diagnostics
 remain explicitly named `legacy_price_return_pct` and `legacy_approx_pnl_usdt`;
 they are not net profit. SQL metadata and CSV retain the accounting version and
 cost source. Existing historical rows are never rewritten or upgraded.
+
+The walk-forward BACKTEST adapter requires `CASH_LEDGER_V1`, `COMPLETE` and an
+attributable realized cost source in persisted diagnostics. Numeric historical
+price-return fields alone cannot inherit this contract; legacy artifacts remain
+unchanged and are rejected for cost-complete validation.
