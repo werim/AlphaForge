@@ -131,13 +131,19 @@ def test_mode_parity_complete_for_valid_identical_protected_surfaces(monkeypatch
     } <= set(evidence["comparison_fields"])
 
 
-def test_current_backtest_legacy_rr_stage_cannot_fake_three_mode_parity():
-    evidence = _runtime()._build_mode_parity_evidence(min_sample_count=1)
+def test_actual_executable_stage_does_not_hide_cost_provenance_difference():
+    runtime = _runtime()
+    runtime._qualification_samples[0]["score"] = 9.0
+    evidence = runtime._build_mode_parity_evidence(min_sample_count=1)
 
     assert evidence["evidence_status"] == "INCOMPLETE"
     assert evidence["modes_compared"] == ["BACKTEST", "PAPER", "LIVE_PRECHECK"]
     sample = evidence["samples"][0]
-    assert sample["backtest"]["rr_basis"] == "PLANNED_ENTRY_LEGACY_BACKTEST"
-    assert "executable_raw_rr" in sample["missing_fields"]["backtest"]
-    assert "remaining_execution_penalty" in sample["missing_fields"]["backtest"]
+    assert sample["backtest"]["rr_basis"] == "EXPECTED_FILL_RUNTIME_PARITY"
+    assert not sample["missing_fields"]["backtest"]
+    assert sample["backtest"]["executable_raw_rr"] == sample["paper"]["executable_raw_rr"]
+    assert sample["backtest"]["effective_rr"] == sample["paper"]["effective_rr"]
+    assert sample["mismatch_fields"]["paper"] == ["execution_cost_semantics"]
+    assert "ESTIMATED" in sample["backtest"]["execution_cost_semantics"]
+    assert "MODELLED" in sample["paper"]["execution_cost_semantics"]
     assert sample["parity_result"] == "FAIL"

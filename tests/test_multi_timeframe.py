@@ -533,6 +533,7 @@ class _AlwaysAcceptBrain:
 
 def _runtime_candidate():
     return {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+            "funding_rate_pct": .00005, "funding_status": "MEASURED", "funding_source": "TEST",
             "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
             "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
             "spread_pct": .0002, "market_data_latency_ms": 20.0,

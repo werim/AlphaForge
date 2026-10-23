@@ -16,6 +16,7 @@ UNAVAILABLE_STATUSES = {"", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST", "N
 REQUIRED_EXECUTION_FIELDS = (
     "spread_pct",
     "expected_slippage_pct",
+    "fee_pct",
     "latency_ms",
     "liquidity_score",
     "funding_rate_pct",
@@ -1273,7 +1274,7 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
     slippage=req_float('expected_slippage_pct')
     latency=req_float('latency_ms')
     funding=req_float('funding_rate_pct')
-    fee=req_float('fee_pct') if 'fee_pct' in execution_ctx else 0.0
+    fee=req_float('fee_pct')
     liquidity=req_float('liquidity_score')
     volatility_regime = str(execution_ctx.get('volatility_regime', '') or '').lower()
     if not volatility_regime or volatility_regime in {'unknown', 'unavailable'}:
@@ -1382,6 +1383,7 @@ def evaluate_execution_safety(
         "latency_ms": "latency_status",
         "liquidity_score": "liquidity_status",
         "funding_rate_pct": "funding_status",
+        "fee_pct": "fee_status",
         "volatility_regime": "volatility_status",
         "orderbook_imbalance": "orderbook_status",
     }
@@ -1390,9 +1392,11 @@ def evaluate_execution_safety(
         "expected_slippage_pct",
         "latency_ms",
         "liquidity_score",
+        "funding_rate_pct",
+        "fee_pct",
     ]
     if require_measured:
-        critical_fields.extend(["funding_rate_pct", "volatility_regime"])
+        critical_fields.append("volatility_regime")
     if orderbook_required:
         critical_fields.append("orderbook_imbalance")
 
@@ -1404,7 +1408,8 @@ def evaluate_execution_safety(
             None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"
         )
         unavailable_status = status in UNAVAILABLE_STATUSES
-        not_measured = require_measured and status not in MEASURED_STATUSES
+        # Fees are a sourced schedule/configuration, not market microstructure.
+        not_measured = require_measured and field != "fee_pct" and status not in MEASURED_STATUSES
         if unavailable_value or unavailable_status or not_measured:
             missing_fields.append(field)
 

@@ -124,6 +124,9 @@ def test_runtime_risk_uses_canonical_spread_slippage_funding_liquidity_and_stale
 
     def execution_result(**overrides):
         market = {
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "TEST_FEE_SCHEDULE",
             "spread_pct": 0.0002,
             "spread_status": "MEASURED",
             "expected_slippage_pct": 0.0002,

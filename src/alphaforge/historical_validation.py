@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from .realized_accounting import finite_cash
 
 from .walk_forward import (
     HistoricalRow,
@@ -36,10 +39,10 @@ def _number(row: Mapping[str, Any], key: str) -> float:
     value = row.get(key)
     if value in (None, ""):
         raise ValueError(f"canonical BACKTEST evidence is missing {key}")
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"canonical BACKTEST evidence has invalid {key}") from exc
+    parsed = finite_cash(value)
+    if parsed is None:
+        raise ValueError(f"canonical BACKTEST evidence has invalid {key}")
+    return parsed
 
 
 def _timestamp(value: Any) -> str:
@@ -107,6 +110,30 @@ def historical_rows_from_backtest_decisions(
                 execution_cost_semantics=_cost_semantics(row.get("execution_cost_semantics")),
             )
         )
+        raw_proof = row.get("diagnostics_json")
+        try:
+            proof = dict(raw_proof) if isinstance(raw_proof, Mapping) else json.loads(str(raw_proof or "{}"))
+        except (ValueError, TypeError):
+            proof = {}
+        if (not isinstance(proof, Mapping)
+                or proof.get("realized_accounting_version") != "CASH_LEDGER_V1"
+                or proof.get("realized_evidence_status") != "COMPLETE"
+                or str(proof.get("realized_cost_source") or "").strip().upper() in {"", "UNKNOWN", "UNAVAILABLE"}):
+            raise ValueError("canonical BACKTEST evidence requires cost-complete realized cash provenance")
+        try:
+            raw_costs = proof.get("realized_costs_json")
+            costs = dict(raw_costs) if isinstance(raw_costs, Mapping) else json.loads(str(raw_costs or "{}"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid realized cost components") from exc
+        adapted[-1] = replace(adapted[-1], realized_cash_evidence={
+            **{key: proof.get(key) for key in ("realized_accounting_version", "realized_evidence_status",
+                "realized_cost_source", "closed_timestamp", "gross_pnl", "initial_risk_usd", "total_cost_usd", "net_r", "filled_quantity")},
+            **{key: row.get(key) for key in ("run_id", "profile_id", "profile_name", "position_id", "side")},
+            "net_pnl_usdt": _number(row, "net_pnl_usdt"),
+            "fill": _number(row, "trigger_price"), "stop": _number(row, "sl"),
+            "exit_price": _number(row, "close_price"), "hold_minutes": _number(row, "hold_minutes"),
+            "realized_costs": costs,
+        })
     return tuple(adapted)
 
 

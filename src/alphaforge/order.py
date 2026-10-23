@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ from typing import Any, Callable, Literal, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_decision_rr_metrics, build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING, adverse_expected_fill_price, build_stop_risk_metrics, evaluate_stop_risk_policy
+from alphaforge.execution import build_decision_rr_metrics, build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_cost_breakdown, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING, adverse_expected_fill_price, build_stop_risk_metrics, evaluate_stop_risk_policy, evaluate_execution_safety
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
@@ -764,18 +765,7 @@ def evaluate_signal_decision(
             candidate.expectancy = inferred_expectancy
             market_ctx = {**market_ctx, "expectancy": inferred_expectancy}
 
-    quality = evaluate_trade_quality(candidate, market_ctx, recent_stats, config)
     execution_ctx = market_ctx.get("execution_ctx") if isinstance(market_ctx.get("execution_ctx"), Mapping) else build_execution_context(market_ctx)
-    order_payload = {"risk_reward": candidate.rr, "rr": candidate.rr}
-    effective_rr, execution_flags, rr_breakdown = _effective_rr(
-        order_payload,
-        execution_ctx,
-        mode=mode_enum.value,
-        min_effective_rr=float(config.get("MIN_EFFECTIVE_RR", MIN_RR_THRESHOLD)),
-    )
-    if mode_enum == TradingMode.BACKTEST:
-        execution_flags = [flag for flag in execution_flags if flag != "UNKNOWN_EXECUTION_CONTEXT"]
-
     canonical_rr_stage = build_decision_rr_metrics(
         candidate.rr,
         {
@@ -794,6 +784,30 @@ def evaluate_signal_decision(
         and canonical_rr_stage.get("execution_cost_semantics") is not None
         else "UNAVAILABLE"
     )
+    quality = evaluate_trade_quality(
+        candidate, {**market_ctx, **canonical_rr_stage}, recent_stats, config
+    )
+    effective_rr = float(canonical_rr_stage["effective_rr"])
+    execution_safety = evaluate_execution_safety(
+        execution_ctx, effective_rr=effective_rr,
+        min_effective_rr=float(config.get("MIN_EFFECTIVE_RR", MIN_RR_THRESHOLD)),
+        thresholds=config, require_measured=mode_enum is TradingMode.LIVE,
+    )
+    execution_flags = list(execution_safety["all_failed_gates"])
+    rr_breakdown = {
+        **build_execution_cost_breakdown(candidate.rr, execution_ctx).as_dict(),
+        **canonical_rr_stage,
+        "raw_rr": canonical_rr_stage["executable_raw_rr"],
+        "cost_penalty": canonical_rr_stage["remaining_execution_penalty"],
+        "cost_penalty_rr": canonical_rr_stage["remaining_execution_penalty"],
+        "cost_penalty_total": canonical_rr_stage["remaining_execution_penalty"],
+        "reject_flags": execution_flags,
+        "diagnostics_json": json.dumps({
+            "authority": "build_decision_rr_metrics",
+            "formula": "effective_rr = max(executable_raw_rr - remaining_execution_penalty, 0)",
+        }, sort_keys=True),
+        "execution_evidence_status": execution_safety["execution_evidence_status"],
+    }
 
     diagnostics = {
         **quality.diagnostics,
@@ -801,6 +815,7 @@ def evaluate_signal_decision(
         "execution_flags": execution_flags,
         "effective_rr_breakdown": rr_breakdown,
         "canonical_rr_stage": canonical_rr_stage,
+        "execution_safety": execution_safety,
         "shared_decision_boundary": "evaluate_signal_decision",
     }
     reject_reason = ""

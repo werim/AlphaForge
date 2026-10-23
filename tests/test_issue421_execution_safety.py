@@ -87,6 +87,9 @@ def _thresholds(**overrides: Any) -> dict[str, Any]:
 
 def test_none_volatility_value_cannot_be_promoted_to_measured_string_evidence() -> None:
     ctx = build_execution_context({
+        "fee_pct": 0.0004,
+        "fee_status": "CONFIGURED",
+        "fee_source": "TEST_FEE_SCHEDULE",
         "spread_pct": 0.0002,
         "spread_status": "MEASURED",
         "expected_slippage_pct": 0.0002,

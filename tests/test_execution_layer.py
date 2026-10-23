@@ -91,6 +91,9 @@ from alphaforge.execution import (
 
 def _measured_ctx(**overrides):
     ctx = {
+        "fee_pct": 0.0,
+        "fee_status": "CONFIGURED",
+        "fee_source": "TEST_NO_FEE_SCHEDULE",
         "expected_slippage_pct": 0.001,
         "slippage_status": "MEASURED",
         "spread_pct": 0.001,

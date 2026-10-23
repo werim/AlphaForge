@@ -55,13 +55,19 @@ def test_scan_creates_virtual_candidate(monkeypatch):
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
     monkeypatch.setattr(bo, "_historical_authoritative_score", lambda *_args, **_kwargs: {"score": .9, "expectancy": .2, "expectancy_bucket": "HIGH", "accepted": True, "reject_reason": "", "diagnostics": {}})
     candles = [bo.Candle(1, 104, 104, 103.6, 104.0, 100), bo.Candle(2, 104, 104, 103.6, 104.0, 100), bo.Candle(3, 100.0, 105.5, 104.5, 105.0, 100)]
-    context = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}}
+    context = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001,
+               "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
+               "latency_ms": 10.0, "latency_status": "MODEL_ESTIMATE", "latency_source": "TEST_LATENCY_MODEL"}}
     c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, context)
     assert c is not None
     assert c.score == pytest.approx(.9)
     assert context["market_ctx"]["score"] == pytest.approx(.9)
     assert context["market_ctx"]["expectancy"] == pytest.approx(.2)
     assert context["market_ctx"]["legacy_geometry_score"] != pytest.approx(.9)
+    assert context["market_ctx"]["fee_pct"] == 0.0004
+    assert context["market_ctx"]["fee_source"] == "TEST_FEE_SCHEDULE"
+    assert context["market_ctx"]["latency_ms"] == 10.0
+    assert context["market_ctx"]["latency_source"] == "TEST_LATENCY_MODEL"
 
 
 def test_scan_with_portfolio_state_uses_shared_decision_candidate():
@@ -1379,7 +1385,9 @@ def test_rescue_enabled_only_backtest_and_marks_reduced_size_exports():
     candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
     stats = bo.RescueStats()
     cand = bo.process_backtest_result(
-        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0,
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), {**_rescue_mctx(), "realized_cost_source": "TEST_EXPLICIT_ZERO_COST",
+            "realized_costs_usd": dict(entry_spread=0, entry_slippage=0, entry_fee=0,
+                exit_spread=0, exit_slippage=0, exit_fee=0, funding=0, latency_impact_penalty=0)}, 1000, 1.0,
         lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
         rescue_config=bo.RescueConfig(enabled=True), rescue_stats=stats, mode="BACKTEST",
     )
@@ -1540,7 +1548,10 @@ def test_short_breakdown_breakout_normal_stop_gate_counts_enabled_backtest_only(
     assert summary["quality_gate_accepted_count"] == 1
     assert summary["quality_gate_would_tp_count"] == 1
     assert summary["quality_gate_reason_breakdown"] == {"LOW_SCORE": 1}
-    assert summary["baseline_plus_quality_gate_net_pnl"] > 4.0
+    assert summary["baseline_plus_quality_gate_net_pnl"] is None
+    assert summary["quality_gate_baseline_realized_net_pnl_usdt"] == 4.0
+    assert summary["quality_gate_counterfactual_scaled_total_r"] == pytest.approx(.3)
+    assert summary["quality_gate_authority"] == "DIAGNOSTIC_ONLY"
 
 
 def test_short_breakdown_breakout_normal_stop_gate_live_and_paper_disabled():

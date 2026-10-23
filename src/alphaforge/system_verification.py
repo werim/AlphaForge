@@ -56,6 +56,16 @@ _MODEL_BY_RISK = {
 
 _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
     "BUILD_DEPENDENCY_INTEGRITY": ("tests/test_ci_branch_contract.py",),
+    # Campaign attachment/supervision and operator recovery have dedicated
+    # production-path suites; keep them scoped rather than broadening runtime.
+    "BURNIN_CAMPAIGN": (
+        "tests/test_phase8_burnin_campaign.py",
+        "tests/test_issue581_burnin_dynamic_universe.py",
+    ),
+    "BURNIN_OPERATIONS": (
+        "tests/test_phase9_burnin_ops.py",
+        "tests/test_issue631_reject_recovery.py",
+    ),
     "CONFIG_AUTHORITY": (
         "tests/test_issue491_paper_candidate_notional_ssot.py",
         "tests/test_issue500_correlation_risk_config_ssot.py",
@@ -101,15 +111,26 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue450_sqlite_concurrency.py",
     ),
     "PORTFOLIO_RISK": (
+        "tests/test_issue646_legacy_realized_accounting.py",
         "tests/test_issue496_portfolio_risk_authority.py",
         "tests/test_portfolio_risk_engine.py",
     ),
-    "READINESS_EVIDENCE": ("tests/test_live_readiness.py",),
+    "READINESS_EVIDENCE": (
+        "tests/test_live_readiness.py",
+        "tests/test_phase7_qualification.py",
+        "tests/test_burnin_qualification_evidence_integrity.py",
+        "tests/test_issue547_qualification_evidence.py",
+        "tests/test_issue344_qualification_writer_lifetime.py",
+    ),
     "RECONCILIATION_INTEGRITY": (
         "tests/test_reconciliation_sqlite_contention.py",
         "tests/test_runtime_live_authorization.py",
     ),
     "RESOLVER_INTEGRITY": (
+        "tests/test_quality_gate_accounting_integrity.py",
+        "tests/test_issue646_legacy_realized_accounting.py",
+        "tests/test_issue506_walk_forward.py",
+        "tests/test_walk_forward_cash_integrity.py",
         "tests/test_issue421_position_window_integrity.py",
         "tests/test_issue421_full_chain_replay.py",
     ),
@@ -244,6 +265,9 @@ def assess_path(raw_path: str) -> PathAssessment:
             "persistent schema contract changed",
         )
 
+    if path == "backtest_order.py":
+        return _assessment(path, RiskLevel.HIGH, ("RESOLVER_INTEGRITY", "PORTFOLIO_RISK"),
+                           "legacy realized cash accounting and portfolio state changed")
     if lower.startswith("src/alphaforge/"):
         if name in {
             "order.py",
@@ -259,8 +283,11 @@ def assess_path(raw_path: str) -> PathAssessment:
             )
 
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+            (("realized_accounting.py", "historical_validation.py", "walk_forward.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
             (("execution.py",), ("EXECUTION_SAFETY", "DECISION_PARITY"), "execution economics/safety changed"),
             (("runtime.py",), ("RUNTIME_AUTHORITY", "RESTART_RECOVERY"), "authoritative runtime changed"),
+            (("burnin_ops.py",), ("BURNIN_OPERATIONS", "RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "burn-in operational supervision and recovery changed"),
+            (("burnin_campaign.py",), ("BURNIN_CAMPAIGN", "BURNIN_OPERATIONS", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY", "RESOLVER_INTEGRITY"), "burn-in campaign lifecycle, evidence and worker supervision changed"),
             (("decision_invariant.py",), ("DECISION_PARITY",), "cross-mode decision invariant changed"),
             (("portfolio_risk",), ("PORTFOLIO_RISK",), "portfolio-risk authority changed"),
             (("burnin_resolver.py",), ("RESOLVER_INTEGRITY", "TIME_INTEGRITY"), "resolver authority changed"),

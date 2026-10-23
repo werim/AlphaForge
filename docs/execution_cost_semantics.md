@@ -115,6 +115,28 @@ value.
 
 ## Fees and other costs
 
+The shared `evaluate_signal_decision()` boundary gates on
+`build_decision_rr_metrics()` before quality/execution decisions, using expected
+executable entry and the residual cost penalty. Entry slippage already represented
+by expected fill is credited once; it must not be charged a second time. The
+protected BACKTEST projection reads that actual decision stage. Legacy simulator
+rows without this stage retain their explicit legacy provenance and are not
+equivalent realized-PnL or three-mode parity evidence.
+
+Fee and funding values are critical cost evidence in the pre-submit safety
+contract. Missing fees are recorded in the cost model's missing fields rather
+than silently becoming a zero-fee assumption. The existing
+`REJECT_UNKNOWN_EXECUTION_CONTEXT` policy controls rejection of missing evidence;
+its default remains fail-closed. A fee schedule may be `CONFIGURED` even when
+market microstructure must be measured. Unknown funding is not a zero rate.
+`UNAVAILABLE_BLOCKING` and `INVALID_FAKE_ZERO` cannot prove the protected parity
+contract even when all compared surfaces contain the same invalid status.
+
+Equal economic numbers do not erase provenance: PAPER expected-fill evidence is
+`MODELLED`, whereas estimated BACKTEST/LIVE_PRECHECK expectations are `ESTIMATED`.
+The existing strict parity checker continues to expose that difference; this
+change does not convert it into a three-mode PASS or a LIVE authorization.
+
 The pre-submit `evaluate_execution_safety()` contract rejects supplied non-finite,
 malformed or boolean spread, slippage, latency, liquidity, funding, fee and orderbook
 numbers as `EXECUTION_CONTEXT_UNAVAILABLE`. Their names appear in `missing_fields`
@@ -164,3 +186,74 @@ runtime/lifecycle/provenance payloads. The object records:
 - fee treatment
 
 Historical rows are not backfilled or reinterpreted without explicit provenance.
+
+### Legacy realized cash ledger (CASH_LEDGER_V1)
+
+`backtest_order.finalize` and SQL-backed PAPER closure share the cash identities in
+`realized_accounting`: directional filled quantity times price movement gives gross
+PnL; initial dollar risk is filled quantity times absolute filled-entry/initial-stop
+distance. Complete cash costs are subtracted once, and net R divides by that risk.
+The legacy `risk_pct` argument historically allocates **notional**, as does
+`BacktestPortfolioState.notional_for`; this repair does not reinterpret it as a
+stop-defined risk budget or enlarge exposure. `risk_scale` scales final quantity
+once. Explicit `notional` overrides the base allocation before scaling.
+
+Legacy candle simulation still fills at planned entry, uses SL-first diagnostics
+for ambiguous candles, and explicitly liquidates at the last close on TIMEOUT.
+Ambiguity cannot supply complete realized evidence. No partial-exit/managed-stop
+lifecycle is implemented in this adapter, so parity with PAPER management is
+unsupported. SQL PAPER replay remains idempotent; legacy equity and portfolio
+cash deduplicate identified closed positions and use close-time ordering.
+
+Historical candle/decision costs are not realized cash observations. Callers may
+supply `realized_costs_usd` and an attributable `realized_cost_source` for an
+individual full closure: entry/exit spread, entry/exit fee, exit slippage, signed
+funding over the actual holding interval, and latency impact. Entry slippage must
+be explicitly zero because the supplied fill already embeds its price effect.
+Optional volatility/liquidity cash penalties remain explicit when applicable.
+No historical fee/funding schedule or duration-independent funding is invented.
+The caller owns scope and observation provenance; a numeric model estimate is
+not independent historical measurement or statistical qualification.
+
+Without these cash facts, `net_pnl_usdt`, net return percent, costs and net R stay
+null with `realized_evidence_status=INCOMPLETE`. Equity, drawdown, profit factor,
+expectancy and profile ranking cannot turn missing net cash into zero. A portfolio
+with unknown realized cash fails subsequent risk checks. Price-only diagnostics
+remain explicitly named `legacy_price_return_pct` and `legacy_approx_pnl_usdt`;
+they are not net profit. SQL metadata and CSV retain the accounting version and
+cost source. Existing historical rows are never rewritten or upgraded.
+
+The walk-forward BACKTEST adapter requires `CASH_LEDGER_V1`, `COMPLETE` and an
+attributable realized cost source in persisted diagnostics. Numeric historical
+price-return fields alone cannot inherit this contract; legacy artifacts remain
+unchanged and are rejected for cost-complete validation.
+
+### Quality-gate diagnostics (QUALITY_GATE_DIAGNOSTIC_V2)
+
+`_quality_gate_metrics` selects rejected shadow records using future `WOULD_TP`
+outcomes. This is retrospective reporting, not causal selection, realized net R,
+a deployable expected profit, or PAPER/LIVE acceptance/promotion authority.
+Existing selection thresholds and reporting counts are preserved; `accepted_count`
+in this namespace counts retrospective diagnostic records only.
+
+V2 keeps baseline realized cash in `quality_gate_baseline_realized_net_pnl_usdt`.
+Omitted/invalid baseline is unavailable, not zero. Counterfactual effective-RR mean
+and size-adjusted total are explicitly R fields; the latter uses the configured
+diagnostic size multiplier, not candidate position sizing or a cash conversion.
+No sample means unavailable expectancy and an empty R sum of zero. Invalid scale
+means unavailable scaled R. Candidate-provided dollar risk and risk_scale are
+retained as unverified diagnostic inputs, never inferred from balance/notional.
+
+`quality_gate_counterfactual_cash_usdt` and the retained compatibility key
+`baseline_plus_quality_gate_net_pnl` are always null: there is no attributable
+causal closure/cost model to convert this outcome-conditioned sample to cash.
+Even supplied candidate risk or partial cost fields cannot establish that model.
+Effective RR already contains decision-time cost modeling; this diagnostic does
+not subtract costs again or claim it is canonical realized net R. The #647 cash
+ledger remains the only realized accounting authority.
+
+Schema, units, selection basis, missing-evidence statuses and false decision-time/
+promotion flags travel through both summary CSV and signal-quality JSON. Dashboard
+consumers retain their existing reporting-only surface. Old reports are not
+rewritten or retroactively assigned V2 provenance; an old mixed-unit number is
+not repaired or validated by its continued presence in a historical artifact.

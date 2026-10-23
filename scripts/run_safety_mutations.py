@@ -133,6 +133,55 @@ def mutations() -> list[Mutation]:
     cases.append(Mutation("future_market_timestamp", RUNTIME,
                           "if future_delta_sec > allowed_future_skew_sec:", "if False:",
                           "tests/test_issue421_market_time.py::test_future_timestamp_beyond_allowed_clock_skew_fails_closed"))
+    accounting_test = "tests/test_issue646_legacy_realized_accounting.py"
+    cases.extend([
+        Mutation("realized_net_subtracts_costs", "src/alphaforge/realized_accounting.py",
+                 "gross_pnl - total", "gross_pnl", accounting_test + "::test_cash_identities_and_no_false_positive_expectancy"),
+        Mutation("realized_risk_includes_quantity", "src/alphaforge/realized_accounting.py",
+                 "risk = abs(fill - stop) * quantity", "risk = abs(fill - stop)",
+                 accounting_test + "::test_cash_identities_and_no_false_positive_expectancy"),
+        Mutation("missing_cash_is_not_zero", "src/alphaforge/realized_accounting.py",
+                 "total = None if absent else sum(parsed.values())", "total = sum(parsed.values())",
+                 accounting_test + "::test_missing_realized_cost_evidence_is_not_net_profit"),
+        Mutation("legacy_cash_applies_risk_scale", "backtest_order.py",
+                 "base_notional * scale / fill", "base_notional / fill",
+                 accounting_test + "::test_full_closure_matrix_matches_sql"),
+        Mutation("cash_replay_is_idempotent", "src/alphaforge/portfolio_risk.py",
+                 "if position_id in self.closed_position_ids:", "if False:",
+                 accounting_test + "::test_portfolio_unknown_cash_and_replay_are_fail_closed"),
+        Mutation("historical_cash_provenance_is_required", "src/alphaforge/historical_validation.py",
+                 'or proof.get("realized_accounting_version") != "CASH_LEDGER_V1"', 'or False',
+                 "tests/test_issue506_walk_forward.py::test_numeric_legacy_return_cannot_inherit_cost_complete_provenance"),
+        Mutation("quality_r_is_not_cash", "backtest_order.py",
+                 '"baseline_plus_quality_gate_net_pnl": None,',
+                 '"baseline_plus_quality_gate_net_pnl": sum_cash([baseline_cash, sized_expected]),',
+                 "tests/test_quality_gate_accounting_integrity.py::test_two_r_cannot_be_added_to_one_hundred_usdt"),
+        Mutation("quality_baseline_missing_is_not_zero", "backtest_order.py",
+                 "baseline_cash = finite_cash(baseline_net_pnl)",
+                 "baseline_cash = finite_cash(baseline_net_pnl) or 0.0",
+                 "tests/test_quality_gate_accounting_integrity.py::test_missing_baseline_never_becomes_zero"),
+        Mutation("quality_future_outcomes_cannot_promote", "backtest_order.py",
+                 '"quality_gate_promotion_eligible": False,',
+                 '"quality_gate_promotion_eligible": True,',
+                 "tests/test_quality_gate_accounting_integrity.py::test_signed_realized_cash_is_invariant_and_diagnostic_only"),
+    ])
+    walk_test = "tests/test_walk_forward_cash_integrity.py"
+    cases.extend([
+        Mutation("walk_forward_cash_not_percentage_sign", "src/alphaforge/walk_forward.py",
+                 'and item["net_pnl_usdt"] is not None and item["net_pnl_usdt"] < 0',
+                 'and item["net_pnl_usdt"] is not None and item["net_pnl_usdt"] > 0',
+                 walk_test + "::test_positive_percentage_sum_cannot_hide_negative_sql_cash"),
+        Mutation("walk_forward_missing_capital_cannot_pass", "src/alphaforge/walk_forward.py",
+                 'else "FAIL" if negative_oos else "INCOMPLETE"',
+                 'else "FAIL" if negative_oos else "PASS"',
+                 walk_test + "::test_positive_cash_without_window_capital_is_incomplete"),
+        Mutation("walk_forward_duplicate_cash", "src/alphaforge/walk_forward.py",
+                 'if position in realized_positions:', 'if False:',
+                 walk_test + "::test_provenance_costs_replay_and_cross_window_guards[duplicate_position]"),
+        Mutation("walk_forward_missing_legacy_cash_is_not_zero", "src/alphaforge/walk_forward.py",
+                 'if proof is None:\n        return None', 'if proof is None:\n        return 0.0',
+                 walk_test + "::test_legacy_percent_only_rows_cannot_inherit_cash_or_capital"),
+    ])
     return cases
 
 
@@ -162,6 +211,7 @@ def main() -> int:
         shutil.copytree(ROOT / "src", work / "src", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy2(ROOT / "pyproject.toml", work / "pyproject.toml")
+        shutil.copy2(ROOT / "backtest_order.py", work / "backtest_order.py")
         baseline = sorted({case.test for case in cases})
         code, failures, errors, output = run_test(work, baseline)
         if code or failures or errors:
