@@ -1385,7 +1385,9 @@ def test_rescue_enabled_only_backtest_and_marks_reduced_size_exports():
     candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
     stats = bo.RescueStats()
     cand = bo.process_backtest_result(
-        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0,
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), {**_rescue_mctx(), "realized_cost_source": "TEST_EXPLICIT_ZERO_COST",
+            "realized_costs_usd": dict(entry_spread=0, entry_slippage=0, entry_fee=0,
+                exit_spread=0, exit_slippage=0, exit_fee=0, funding=0, latency_impact_penalty=0)}, 1000, 1.0,
         lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
         rescue_config=bo.RescueConfig(enabled=True), rescue_stats=stats, mode="BACKTEST",
     )

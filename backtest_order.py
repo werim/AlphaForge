@@ -14,6 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+from alphaforge.realized_accounting import finite_cash, position_cash_geometry, realized_cash_ledger, sum_cash, mean_cash
 from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.adaptive_learning import classify_expectancy_bucket
@@ -446,8 +447,22 @@ class LifecycleRow:
     trigger_price: float = 0.0
     close_price: float = 0.0
     close_reason: str = ""
-    net_pnl_pct: float = 0.0
-    net_pnl_usdt: float = 0.0
+    net_pnl_pct: float | None = None
+    legacy_price_return_pct: float | None = None
+    net_pnl_usdt: float | None = None
+    gross_pnl_usd: float | None = None
+    initial_risk_usd: float | None = None
+    total_cost_usd: float | None = None
+    gross_r: float | None = None
+    net_r: float | None = None
+    filled_quantity: float | None = None
+    closed_timestamp: int | None = None
+    realized_accounting_version: str = "CASH_LEDGER_V1"
+    realized_evidence_status: str = "NOT_REALIZED"
+    realized_cost_source: str = "UNAVAILABLE"
+    realized_costs_json: str = "{}"
+    realized_missing_fields: str = "[]"
+    legacy_approx_pnl_usdt: float | None = None
     hold_minutes: float = 0.0
     reject_reason: str = ""
     cancel_reason: str = ""
@@ -1565,6 +1580,7 @@ def simulate_candidate(
         # Conservative same-candle rule:
         # if both TP and SL touch inside the same candle, count SL first.
         if hit_sl and hit_tp:
+            market_ctx = {**market_ctx, "ambiguous_intrabar": True}
             hit_tp = False
         if hit_sl:
             pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100 if long_side else ((candidate.entry - candidate.sl) / candidate.entry) * 100
@@ -1646,12 +1662,51 @@ def finalize(
     mae: float = 0.0,
 ):
     market_ctx = market_ctx or {}
-    risk_usdt = balance * (risk_pct / 100)
-    net_pnl_usdt = risk_usdt * (pnl_pct / 100)
+    # risk_pct historically allocates NOTIONAL, not stop-defined dollar risk.
+    scale = finite_cash(market_ctx.get("risk_scale", 1.0))
+    base_notional = finite_cash(balance * risk_pct / 100 if market_ctx.get("notional") is None else market_ctx["notional"])
+    fill = finite_cash(trigger_price)
+    valid_size = scale is not None and 0 <= scale <= 1 and base_notional is not None and base_notional >= 0
+    quantity = base_notional * scale / fill if valid_size and fill and fill > 0 else None
+    stop = finite_cash(candidate.sl)
+    exit_fill = finite_cash(close_price)
+    valid_geometry = (quantity is not None and stop is not None
+        and exit_fill is not None and exit_fill > 0 and stop > 0
+        and str(candidate.side).upper() in {"LONG", "SHORT"})
+    geometry = position_cash_geometry(fill=fill, stop=stop, quantity=quantity,
+        exit_price=exit_fill, side=str(candidate.side).upper()) if valid_geometry else {}
+    raw_costs = market_ctx.get("realized_costs_usd")
+    raw_costs = raw_costs if isinstance(raw_costs, Mapping) else {}
+    cost_source = str(market_ctx.get("realized_cost_source") or "UNAVAILABLE").strip()
+    costs = {
+        "spread_cost": sum_cash([raw_costs.get("entry_spread"), raw_costs.get("exit_spread")]),
+        "entry_slippage_cost": raw_costs.get("entry_slippage"),
+        "exit_slippage_cost": raw_costs.get("exit_slippage"),
+        "fee_cost": sum_cash([raw_costs.get("entry_fee"), raw_costs.get("exit_fee")]),
+        "funding_cost": raw_costs.get("funding"),
+        "latency_cost": raw_costs.get("latency_impact_penalty"),
+        "volatility_penalty": raw_costs.get("volatility_penalty", 0.0),
+        "liquidity_penalty": raw_costs.get("liquidity_penalty", 0.0),
+    }
+    missing = []
+    for key, value in raw_costs.items():
+        parsed = finite_cash(value)
+        if parsed is None or (parsed < 0 and key != "funding"):
+            missing.append(key)
+    if cost_source in {"UNAVAILABLE", "UNKNOWN", ""}:
+        missing.append("realized_cost_source")
+    # Entry price already embeds slippage. A second cash debit would double count it.
+    if finite_cash(raw_costs.get("entry_slippage")) != 0:
+        missing.append("entry_slippage_already_in_fill")
+    if after != "POSITION_CLOSED" or market_ctx.get("ambiguous_intrabar"):
+        missing.append("unresolved_lifecycle")
+    accounting = realized_cash_ledger(gross_pnl=geometry.get("gross_pnl_usd"),
+        initial_risk=geometry.get("initial_risk_usd"), costs=costs, missing=missing)
+    net_pnl_usdt = accounting["net_pnl_usd"]
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
     effective_rr, reject_flags, cost_breakdown = _execution_reject_flags(candidate.rr, market_ctx)
     return LifecycleRow(
-        candidate.timestamp,
+        closed_ts,
         candidate.symbol,
         candidate.side,
         candidate.setup_type,
@@ -1667,8 +1722,19 @@ def finalize(
         trigger_price=trigger_price,
         close_price=close_price,
         close_reason=close_reason,
-        net_pnl_pct=pnl_pct,
+        net_pnl_pct=None if net_pnl_usdt is None or not quantity or not fill else net_pnl_usdt / (quantity * fill) * 100,
+        legacy_price_return_pct=pnl_pct,
         net_pnl_usdt=net_pnl_usdt,
+        gross_pnl_usd=geometry.get("gross_pnl_usd"),
+        initial_risk_usd=geometry.get("initial_risk_usd"),
+        gross_r=geometry.get("gross_r"),
+        net_r=accounting["net_r"], total_cost_usd=accounting["total_cost_usd"],
+        filled_quantity=quantity, closed_timestamp=closed_ts,
+        realized_evidence_status="COMPLETE" if not accounting["missing_fields"] else "INCOMPLETE",
+        realized_cost_source=cost_source,
+        realized_costs_json=json.dumps({k: finite_cash(v) for k, v in raw_costs.items()}, sort_keys=True),
+        realized_missing_fields=json.dumps(accounting["missing_fields"]),
+        legacy_approx_pnl_usdt=None if scale is None else balance * risk_pct / 100 * scale * pnl_pct / 100,
         hold_minutes=hold,
         order_type=candidate.order_type,
         expectancy_bucket=candidate.expectancy_bucket,
@@ -1912,7 +1978,7 @@ def process_backtest_result(
             rescue_decision_context=json.dumps(context, sort_keys=True),
         )
         sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True), "canonical_rr_stage": diagnostics.get("canonical_rr_stage") if isinstance(diagnostics, Mapping) else None}
-        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_size_multiplier, market_ctx=sim_ctx)
+        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct, market_ctx=sim_ctx)
         if portfolio_state is not None:
             candidate_notional = portfolio_state.notional_for(entry=rescued.entry, balance=balance, risk_pct=risk_pct, risk_scale=rescue_size_multiplier, notional=mctx.get("notional"))
             position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
@@ -2212,7 +2278,7 @@ def process_backtest_result(
         for key in ("stop_too_wide_softened", "original_reject_reason", "reject_reason_softened"):
             if key in diagnostics:
                 sim_ctx[key] = diagnostics[key]
-    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct * risk_scale, market_ctx=sim_ctx)
+    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=sim_ctx)
     if portfolio_state is not None:
         candidate_notional = portfolio_state.notional_for(entry=cand.entry, balance=balance, risk_pct=risk_pct, risk_scale=risk_scale, notional=mctx.get("notional"))
         position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
@@ -2424,10 +2490,23 @@ def _persist_lifecycle_rows(
                 "take_profit": row.tp,
                 "exit_price": row.close_price,
                 "close_price": row.close_price,
-                "gross_pnl": row.net_pnl_usdt,
+                "gross_pnl": row.gross_pnl_usd,
+                "initial_risk_usd": row.initial_risk_usd,
+                "total_cost_usd": row.total_cost_usd,
+                "gross_r": row.gross_r, "net_r": row.net_r,
+                "filled_quantity": row.filled_quantity,
+                "realized_accounting_version": row.realized_accounting_version,
+                "realized_evidence_status": row.realized_evidence_status,
+                "realized_cost_source": row.realized_cost_source,
+                "realized_costs_json": row.realized_costs_json,
+                "closed_timestamp": row.closed_timestamp,
+                "realized_missing_fields": row.realized_missing_fields,
+                "legacy_approx_pnl_usdt": row.legacy_approx_pnl_usdt,
+                "legacy_price_return_pct": row.legacy_price_return_pct,
                 "net_pnl": row.net_pnl_usdt,
                 "net_pnl_usdt": row.net_pnl_usdt,
-                "fees": row.cost_penalty,
+                "fees": None if row.total_cost_usd is None else sum_cash(
+                    json.loads(row.realized_costs_json).get(key) for key in ("entry_fee", "exit_fee")),
                 "accepted_reason": row.accepted_reason,
                 "original_reject_reason": row.original_reject_reason,
                 "rescue_size_multiplier": row.rescue_size_multiplier,
@@ -2571,8 +2650,8 @@ def _persist_lifecycle_rows(
                 tp=row.tp,
                 trigger_price=row.trigger_price or None,
                 close_price=row.close_price or None,
-                net_pnl_pct=row.net_pnl_pct if row.net_pnl_pct != 0.0 else (0.0 if row.close_reason else None),
-                net_pnl_usdt=row.net_pnl_usdt if row.net_pnl_usdt != 0.0 else (0.0 if row.close_reason else None),
+                net_pnl_pct=row.net_pnl_pct,
+                net_pnl_usdt=row.net_pnl_usdt,
                 hold_minutes=row.hold_minutes if row.hold_minutes != 0.0 else (0.0 if row.close_reason else None),
                 volume_24h_usdt=_sql_nullable_number(row.volume_24h_usdt),
                 spread_pct=_sql_nullable_number(row.spread_pct),
@@ -2656,6 +2735,18 @@ def _persist_lifecycle_rows(
                        json_extract(execution_ctx, '$.close_price') AS close_price,
                        json_extract(execution_ctx, '$.close_reason') AS close_reason,
                        json_extract(execution_ctx, '$.gross_pnl') AS gross_pnl,
+                       json_extract(execution_ctx, '$.initial_risk_usd') AS initial_risk_usd,
+                       json_extract(execution_ctx, '$.total_cost_usd') AS total_cost_usd,
+                       json_extract(execution_ctx, '$.gross_r') AS gross_r,
+                       json_extract(execution_ctx, '$.net_r') AS net_r,
+                       json_extract(execution_ctx, '$.filled_quantity') AS filled_quantity,
+                       json_extract(execution_ctx, '$.closed_timestamp') AS closed_timestamp,
+                       json_extract(execution_ctx, '$.realized_accounting_version') AS realized_accounting_version,
+                       json_extract(execution_ctx, '$.realized_evidence_status') AS realized_evidence_status,
+                       json_extract(execution_ctx, '$.realized_cost_source') AS realized_cost_source,
+                       json_extract(execution_ctx, '$.realized_costs_json') AS realized_costs_json,
+                       json_extract(execution_ctx, '$.legacy_approx_pnl_usdt') AS legacy_approx_pnl_usdt,
+                       json_extract(execution_ctx, '$.legacy_price_return_pct') AS legacy_price_return_pct,
                        json_extract(execution_ctx, '$.net_pnl') AS net_pnl,
                        json_extract(execution_ctx, '$.net_pnl_usdt') AS net_pnl_usdt,
                        json_extract(execution_ctx, '$.fees') AS fees,
@@ -2997,9 +3088,9 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         "rescue_rejected_count": 0,
         "rescue_accepted_would_tp_count": sum(1 for r in rescue_closed if str(r.get("close_reason", "")).upper() == "TP_HIT"),
         "rescue_accepted_would_sl_count": sum(1 for r in rescue_closed if str(r.get("close_reason", "")).upper() == "SL_HIT"),
-        "rescue_accepted_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in rescue_closed),
-        "baseline_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in baseline_closed),
-        "baseline_plus_rescue_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in baseline_closed + rescue_closed),
+        "rescue_accepted_net_pnl": sum_cash(r.get("net_pnl_usdt") for r in rescue_closed),
+        "baseline_net_pnl": sum_cash(r.get("net_pnl_usdt") for r in baseline_closed),
+        "baseline_plus_rescue_net_pnl": sum_cash(r.get("net_pnl_usdt") for r in baseline_closed + rescue_closed),
         "rescue_avg_effective_rr": (sum(_safe_float(r.get("rescue_effective_rr"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
         "rescue_avg_score": (sum(_safe_float(r.get("score"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
         "rescue_reject_reasons": {},
@@ -3031,7 +3122,7 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         "acceptance_candidates_near_threshold_count": len(near_threshold),
         "accepted_trade_quality_diagnostics": _accepted_quality_diagnostics(accepted_rows, candidate_rows),
         "score_calibration_diagnostics": _score_calibration_diagnostics(candidate_rows),
-        "disabled_filter_acceptance_evidence": {"disabled_filters": _distribution([r.get("disabled_filters", "") for r in candidate_rows if str(r.get("disabled_filters", "")) not in {"", "[]"}]), "accepted_because_filter_disabled_count": sum(int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) for r in accepted_rows), "estimated_pnl_impact_usdt": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0) for r in accepted_rows if int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) > 0)},
+        "disabled_filter_acceptance_evidence": {"disabled_filters": _distribution([r.get("disabled_filters", "") for r in candidate_rows if str(r.get("disabled_filters", "")) not in {"", "[]"}]), "accepted_because_filter_disabled_count": sum(int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) for r in accepted_rows), "estimated_pnl_impact_usdt": sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in accepted_rows if int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) > 0)},
     }
 
 
@@ -3084,12 +3175,12 @@ def _accepted_quality_diagnostics(accepted_rows: List[Mapping[str, Any]], candid
             b["tp"] += int(o == "TP_HIT")
             b["sl"] += int(o == "SL_HIT")
             b["open"] += int(o in {"OPEN_AT_END", "OPEN", "CANCELLED", "UNKNOWN"})
-            b["net_pnl"] += _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+            b["net_pnl"] = sum_cash([b["net_pnl"], r.get("net_pnl_usdt", r.get("net_pnl"))])
         for b in out.values():
             n = max(1, int(b["count"]))
             b["tp_rate"] = b["tp"] / n
             b["sl_rate"] = b["sl"] / n
-            b["expectancy"] = b["net_pnl"] / n
+            b["expectancy"] = mean_cash(b["net_pnl"], n)
         return out
 
     enriched = []
@@ -3125,7 +3216,7 @@ def _score_calibration_diagnostics(candidate_rows: List[Mapping[str, Any]]) -> D
         b["tp"] += int(outcome in {"TP_HIT", "WOULD_TP"})
         b["sl"] += int(outcome in {"SL_HIT", "WOULD_SL"})
         b["timeout"] += int(outcome in {"WOULD_TIMEOUT", "OPEN_AT_END"})
-        b["net_pnl"] += _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+        b["net_pnl"] = sum_cash([b["net_pnl"], r.get("net_pnl_usdt", r.get("net_pnl"))])
         eff = _safe_float(r.get("effective_rr"), -1.0)
         if eff >= 0:
             b["effective_rr_sum"] += eff; b["effective_rr_count"] += 1
@@ -3133,7 +3224,7 @@ def _score_calibration_diagnostics(candidate_rows: List[Mapping[str, Any]]) -> D
         b["expectancy_buckets"][eb] = b["expectancy_buckets"].get(eb, 0) + 1
     for b in out.values():
         n = max(1, int(b["count"]))
-        b["tp_rate"] = b["tp"] / n; b["sl_rate"] = b["sl"] / n; b["net_pnl_per_signal"] = b["net_pnl"] / n
+        b["tp_rate"] = b["tp"] / n; b["sl_rate"] = b["sl"] / n; b["net_pnl_per_signal"] = mean_cash(b["net_pnl"], n)
         b["mean_effective_rr"] = b["effective_rr_sum"] / b["effective_rr_count"] if b["effective_rr_count"] else None
     return {"score_10_saturation_count": sum(1 for r in rows if _safe_float(r.get("score"), -1.0) >= 10.0), "by_score_bucket": out}
 
@@ -3169,17 +3260,17 @@ def build_accepted_loss_diagnostics(rows: List[Mapping[str, Any]]) -> Dict[str, 
         for r in enriched:
             key = str(key_func(r) or "UNKNOWN")
             b = grouped.setdefault(key, {"count": 0, "wins": 0, "losses": 0, "open": 0, "net_pnl": 0.0, "tp_gain_sum": 0.0, "tp_count": 0, "sl_loss_sum": 0.0, "sl_count": 0})
-            pnl = _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+            pnl = finite_cash(r.get("net_pnl_usdt", r.get("net_pnl")))
             o = outcome(r)
-            b["count"] += 1; b["net_pnl"] += pnl
+            b["count"] += 1; b["net_pnl"] = sum_cash([b["net_pnl"], pnl])
             b["wins"] += int(o == "TP_HIT"); b["losses"] += int(o == "SL_HIT"); b["open"] += int(o not in {"TP_HIT", "SL_HIT"})
-            if o == "TP_HIT": b["tp_gain_sum"] += pnl; b["tp_count"] += 1
-            if o == "SL_HIT": b["sl_loss_sum"] += pnl; b["sl_count"] += 1
+            if o == "TP_HIT": b["tp_gain_sum"] = sum_cash([b["tp_gain_sum"], pnl]); b["tp_count"] += 1
+            if o == "SL_HIT": b["sl_loss_sum"] = sum_cash([b["sl_loss_sum"], pnl]); b["sl_count"] += 1
         for key, b in grouped.items():
             n = max(1, int(b["count"]))
             b["win_rate"] = b["wins"] / n; b["loss_rate"] = b["losses"] / n
-            b["avg_tp_gain"] = b["tp_gain_sum"] / b["tp_count"] if b["tp_count"] else 0.0
-            b["avg_sl_loss"] = b["sl_loss_sum"] / b["sl_count"] if b["sl_count"] else 0.0
+            b["avg_tp_gain"] = mean_cash(b["tp_gain_sum"], b["tp_count"]) if b["tp_count"] else 0.0
+            b["avg_sl_loss"] = mean_cash(b["sl_loss_sum"], b["sl_count"]) if b["sl_count"] else 0.0
             flat_rows.append({"grouping": grouping, "bucket": key, **b})
         return grouped
 
@@ -3197,7 +3288,7 @@ def build_accepted_loss_diagnostics(rows: List[Mapping[str, Any]]) -> Dict[str, 
         "by": by,
         "rows": flat_rows,
         "high_effective_rr_accepted_outcome_split": _distribution([outcome(r) for r in high_rr]),
-        "score_10_accepted_net_pnl": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0) for r in score10),
+        "score_10_accepted_net_pnl": sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in score10),
     }
 
 def build_filter_profile_comparison_artifact(summary: Mapping[str, Any], quality_summary: Mapping[str, Any], filter_state: Mapping[str, Any]) -> Dict[str, Any]:
@@ -3210,8 +3301,8 @@ def build_filter_profile_comparison_artifact(summary: Mapping[str, Any], quality
         "win": _safe_float(summary.get("tp_hits"), 0.0),
         "loss": _safe_float(summary.get("sl_hits"), 0.0),
         "open": _safe_float(summary.get("open_at_end"), 0.0),
-        "net_pnl": _safe_float(summary.get("total_net_pnl_usdt"), 0.0),
-        "return": _safe_float(summary.get("total_pnl_pct"), 0.0),
+        "net_pnl": finite_cash(summary.get("total_net_pnl_usdt")),
+        "return": finite_cash(summary.get("total_pnl_pct")),
         "accepted_effective_rr_distribution": quality_summary.get("accepted_trade_quality_diagnostics", {}).get("by_effective_rr_bucket", {}),
         "score_calibration": quality_summary.get("score_calibration_diagnostics", {}),
         "top_reject_reasons": quality_summary.get("reject_reason_distribution", {}),
@@ -3228,7 +3319,14 @@ def _accepted_terminal_rows_for_risk(lifecycle_rows: List[LifecycleRow]) -> List
         r for r in lifecycle_rows
         if not r.reject_reason and r.status_after in {"POSITION_CLOSED", "OPEN_AT_END", "TP_HIT", "SL_HIT"}
     ]
-    return sorted(rows, key=lambda r: (r.timestamp, r.symbol, r.side))
+    ordered = sorted(rows, key=lambda r: (r.closed_timestamp or r.timestamp, r.symbol, r.side))
+    unique, seen = [], set()
+    for row in ordered:
+        key = row.position_id or id(row)
+        if key not in seen:
+            unique.append(row)
+            seen.add(key)
+    return unique
 
 
 def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balance: float) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -3240,7 +3338,14 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
     gross_profit = gross_loss = 0.0
     curve: List[Dict[str, Any]] = []
     for idx, row in enumerate(_accepted_terminal_rows_for_risk(lifecycle_rows), start=1):
-        pnl = float(row.net_pnl_usdt or 0.0)
+        pnl = finite_cash(row.net_pnl_usdt)
+        if pnl is None or equity is None:
+            equity = None
+            curve.append({"trade_index": idx, "timestamp": row.closed_timestamp or row.timestamp, "symbol": row.symbol,
+                "side": row.side, "close_reason": row.close_reason or row.status_after,
+                "net_pnl_usdt": pnl, "equity": None, "peak_equity": None,
+                "drawdown": None, "drawdown_pct": None})
+            continue
         equity += pnl
         peak = max(peak, equity)
         drawdown = equity - peak
@@ -3256,7 +3361,7 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
         longest_loss = max(longest_loss, cur_loss)
         longest_win = max(longest_win, cur_win)
         curve.append({
-            "trade_index": idx, "timestamp": row.timestamp, "symbol": row.symbol, "side": row.side,
+            "trade_index": idx, "timestamp": row.closed_timestamp or row.timestamp, "symbol": row.symbol, "side": row.side,
             "close_reason": row.close_reason or row.status_after, "net_pnl_usdt": pnl,
             "equity": equity, "peak_equity": peak, "drawdown": drawdown, "drawdown_pct": drawdown_pct,
         })
@@ -3267,6 +3372,11 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
         "longest_win_streak": longest_win,
         "profit_factor": (gross_profit / gross_loss if gross_loss else (float("inf") if gross_profit else 0.0)),
     }
+    metrics["realized_evidence_status"] = "COMPLETE" if equity is not None else "INCOMPLETE"
+    metrics["ending_equity"] = equity
+    if equity is None:
+        for key in ("max_drawdown", "max_drawdown_pct", "longest_loss_streak", "longest_win_streak", "profit_factor"):
+            metrics[key] = None
     return curve, metrics
 
 
@@ -3289,17 +3399,25 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
     score10_after = [r for r in accepted_after if float(r.score or 0.0) >= cfg.saturated_score_threshold]
     high_vol_after = [r for r in accepted_after if _is_high_vol_context(r.regime, {"volatility_regime": r.volatility_regime})]
     reasons = []
-    net = _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
-    pf = _safe_float(summary.get("profit_factor"), 0.0)
-    dd = abs(_safe_float(summary.get("max_drawdown_pct"), 0.0))
-    loss = int(_safe_float(summary.get("longest_loss_streak"), 0.0))
+    net = finite_cash(summary.get("total_net_pnl_usdt"))
+    pf = finite_cash(summary.get("profit_factor"))
+    # Infinite PF is valid for a measured, cost-complete all-winning series.
+    if summary.get("profit_factor") == float("inf"):
+        pf = float("inf")
+    raw_dd = finite_cash(summary.get("max_drawdown_pct"))
+    dd = None if raw_dd is None else abs(raw_dd)
+    loss = finite_cash(summary.get("longest_loss_streak"))
     avg_day = before_count / max(1, int(_safe_float(summary.get("requested_last_n_days"), 1.0)))
     score10_tp = sum(1 for r in score10_after if r.close_reason == "TP_HIT")
     score10_sl = sum(1 for r in score10_after if r.close_reason == "SL_HIT")
-    if net <= 0: reasons.append("NET_PNL_NOT_POSITIVE")
-    if pf < cfg.min_profit_factor_for_profile_pass: reasons.append("PROFIT_FACTOR_BELOW_MIN")
-    if dd > cfg.max_drawdown_pct_for_profile_pass: reasons.append("MAX_DRAWDOWN_TOO_HIGH")
-    if loss > cfg.max_loss_streak_for_profile_pass: reasons.append("LOSS_STREAK_TOO_HIGH")
+    if net is None: reasons.append("REALIZED_NET_EVIDENCE_INCOMPLETE")
+    elif net <= 0: reasons.append("NET_PNL_NOT_POSITIVE")
+    if pf is None: reasons.append("PROFIT_FACTOR_UNAVAILABLE")
+    elif pf < cfg.min_profit_factor_for_profile_pass: reasons.append("PROFIT_FACTOR_BELOW_MIN")
+    if dd is None: reasons.append("DRAWDOWN_UNAVAILABLE")
+    elif dd > cfg.max_drawdown_pct_for_profile_pass: reasons.append("MAX_DRAWDOWN_TOO_HIGH")
+    if loss is None: reasons.append("LOSS_STREAK_UNAVAILABLE")
+    elif loss > cfg.max_loss_streak_for_profile_pass: reasons.append("LOSS_STREAK_TOO_HIGH")
     if avg_day > cfg.max_accepted_trades_per_day: reasons.append("OVERTRADE_RISK")
     if score10_sl > score10_tp: reasons.append("SCORE_SATURATION_RISK")
     if cfg.profile in {"HIGH_VOL_MOMENTUM_DIAGNOSTIC", "HIGH_VOL_GUARD_OFF_DIAGNOSTIC", "VOL_GUARD_RELAXED_DIAGNOSTIC"}:
@@ -3317,7 +3435,7 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
         "trade_count_before_after": {"before": before_count, "after": len(accepted_after)},
         "loss_streak_before_after": {"before": None, "after": loss},
         "profit_factor_before_after": {"before": None, "after": pf},
-        "max_drawdown_before_after": {"before": None, "after": _safe_float(summary.get("max_drawdown_pct"), 0.0)},
+        "max_drawdown_before_after": {"before": None, "after": raw_dd},
         "score10_tp_sl_before_after": {"before": None, "after": {"tp": score10_tp, "sl": score10_sl}},
         "high_vol_trade_count_before_after": {"before": None, "after": len(high_vol_after)},
         "diagnostic_profile_warning": HIGH_VOL_GUARD_DIAGNOSTIC_WARNING if cfg.profile == "HIGH_VOL_GUARD_OFF_DIAGNOSTIC" else "",
@@ -3724,7 +3842,7 @@ def build_symbol_regime_acceptance_diagnostics(lifecycle_rows: List[LifecycleRow
             "tp_count": cnt(rows, "TP_HIT"), "sl_count": cnt(rows, "SL_HIT"),
             "tp_rate": cnt(rows, "TP_HIT") / n if n else 0.0, "sl_rate": cnt(rows, "SL_HIT") / n if n else 0.0,
             "mean_effective_rr": sum(_safe_float(r.effective_rr if r.effective_rr is not None else r.rr, 0.0) for r in rows) / n if n else 0.0,
-            "mean_net_pnl": sum(float(r.net_pnl_usdt or 0.0) for r in rows) / n if n else 0.0,
+            "mean_net_pnl": mean_cash(sum_cash(r.net_pnl_usdt for r in rows), n),
             "score_10_tp_count": cnt(score10, "TP_HIT"), "score_10_sl_count": cnt(score10, "SL_HIT"),
             "high_regime_tp_count": cnt(high, "TP_HIT"), "high_regime_sl_count": cnt(high, "SL_HIT"),
             "normal_regime_tp_count": cnt(normal, "TP_HIT"), "normal_regime_sl_count": cnt(normal, "SL_HIT"),
@@ -4916,7 +5034,7 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
         "quality_gate_tp_rate": tp / (tp + sl) if (tp + sl) else 0.0,
         "quality_gate_mean_effective_rr": (sum(eff_vals) / len(eff_vals)) if eff_vals else 0.0,
         "quality_gate_expected_effective_expectancy": expected,
-        "baseline_plus_quality_gate_net_pnl": baseline_net_pnl + sized_expected,
+        "baseline_plus_quality_gate_net_pnl": sum_cash([baseline_net_pnl, sized_expected]),
         "quality_gate_size_multiplier": cfg.size_multiplier,
         "quality_gate_reason_breakdown": _distribution([r.get("reject_reason") for r in candidates]),
         "quality_gate_symbol_breakdown": _distribution([r.get("symbol") for r in candidates]),
@@ -5483,8 +5601,9 @@ def main():
         "WOULD_TIMEOUT": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_TIMEOUT"),
     }
     rescue_reason_names = {"HIGH_EFFECTIVE_RR_RESCUE", SHORT_BREAKDOWN_RESCUE_REASON}
-    rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason in rescue_reason_names]
-    baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason not in rescue_reason_names]
+    closed_rows = [r for r in _accepted_terminal_rows_for_risk(lifecycle) if r.status_after == "POSITION_CLOSED"]
+    rescue_closed = [r for r in closed_rows if r.accepted_reason in rescue_reason_names]
+    baseline_closed = [r for r in closed_rows if r.accepted_reason not in rescue_reason_names]
     rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason in rescue_reason_names]
     accepted_reason_breakdown = _distribution([
         r.accepted_reason
@@ -5494,7 +5613,7 @@ def main():
     quality_gate_metrics = _quality_gate_metrics(
         [_quality_record_from_shadow(s, args.interval) for s in rejected_shadow],
         quality_gate_config,
-        baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
+        baseline_net_pnl=sum_cash(r.net_pnl_usdt for r in baseline_closed),
     )
     equity_curve_rows, drawdown_metrics = build_equity_curve_metrics(lifecycle, args.balance)
     gate_funnel_rows = build_default_gate_funnel([asdict(x) for x in rejected_shadow] or rejected, lifecycle)
@@ -5516,9 +5635,9 @@ def main():
         "rescue_rejected_count": rescue_stats.rejected_count,
         "rescue_accepted_would_tp_count": sum(1 for r in rescue_closed if r.close_reason == "TP_HIT"),
         "rescue_accepted_would_sl_count": sum(1 for r in rescue_closed if r.close_reason == "SL_HIT"),
-        "rescue_accepted_net_pnl": sum(r.net_pnl_usdt for r in rescue_closed),
-        "baseline_net_pnl": sum(r.net_pnl_usdt for r in baseline_closed),
-        "baseline_plus_rescue_net_pnl": sum(r.net_pnl_usdt for r in lifecycle if r.status_after == "POSITION_CLOSED"),
+        "rescue_accepted_net_pnl": sum_cash(r.net_pnl_usdt for r in rescue_closed),
+        "baseline_net_pnl": sum_cash(r.net_pnl_usdt for r in baseline_closed),
+        "baseline_plus_rescue_net_pnl": sum_cash(r.net_pnl_usdt for r in closed_rows),
         "rescue_avg_effective_rr": (sum(r.rescue_effective_rr for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
         "rescue_avg_score": (sum(r.score for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
         "rescue_reject_reasons": json.dumps(rescue_stats.reject_reasons, sort_keys=True),
@@ -5551,12 +5670,12 @@ def main():
             / max(1, sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"))
         ),
         "avg_rr": 0.0 if not lifecycle else sum(_safe_float(r.rr, 0.0) for r in lifecycle) / len(lifecycle),
-        "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle) / len(lifecycle),
-        "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle),
-        "return_unit": "pct_of_position_risk_sum",
+        "avg_pnl_pct": 0.0 if not lifecycle else mean_cash(sum_cash(r.net_pnl_pct for r in closed_rows), len(closed_rows)),
+        "total_pnl_pct": sum_cash(r.net_pnl_pct for r in closed_rows),
+        "return_unit": "sum_of_cost_complete_position_notional_returns_pct",
         "net_pnl_unit": "USDT",
         **drawdown_metrics,
-        "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),
+        "total_net_pnl_usdt": sum_cash(r.net_pnl_usdt for r in closed_rows),
         "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle) / len(lifecycle),
         "performance_by_symbol": {},
         "performance_by_regime": {},
@@ -5737,7 +5856,7 @@ def main():
         rejected_shadow,
         args.interval,
         quality_gate_config=quality_gate_config,
-        baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
+        baseline_net_pnl=sum_cash(r.net_pnl_usdt for r in baseline_closed),
     )
     with open(os.path.join(args.output_dir, "signal_quality_summary.json"), "w") as f:
         json.dump(signal_quality_summary, f, indent=2, sort_keys=True)

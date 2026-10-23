@@ -107,6 +107,16 @@ def historical_rows_from_backtest_decisions(
                 execution_cost_semantics=_cost_semantics(row.get("execution_cost_semantics")),
             )
         )
+        raw_proof = row.get("diagnostics_json")
+        try:
+            proof = dict(raw_proof) if isinstance(raw_proof, Mapping) else json.loads(str(raw_proof or "{}"))
+        except (ValueError, TypeError):
+            proof = {}
+        if (not isinstance(proof, Mapping)
+                or proof.get("realized_accounting_version") != "CASH_LEDGER_V1"
+                or proof.get("realized_evidence_status") != "COMPLETE"
+                or str(proof.get("realized_cost_source") or "").strip().upper() in {"", "UNKNOWN", "UNAVAILABLE"}):
+            raise ValueError("canonical BACKTEST evidence requires cost-complete realized cash provenance")
     return tuple(adapted)
 
 

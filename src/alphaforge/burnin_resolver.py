@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .realized_accounting import position_cash_geometry, realized_cash_ledger
 import json, math, sqlite3, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping, Sequence
@@ -521,7 +522,7 @@ def _entry_costs_usd(row: Mapping[str, Any], *, risk_usd: float) -> dict[str, fl
     multiplier = risk_usd if provenance.get("execution_cost_unit") == "R" else 1.0
     def value(name: str) -> float | None:
         raw = _finite_number(row.get(name))
-        return None if raw is None else raw * multiplier
+        return None if raw is None or raw < 0 else raw * multiplier
     return {
         "spread_cost": value("entry_spread"),
         "entry_slippage_cost": value("entry_slippage"),
@@ -935,14 +936,15 @@ def resolve_position_closure(
     original_qty = float(r['quantity'])
     remaining_qty = float(r.get('remaining_quantity') if r.get('remaining_quantity') is not None else original_qty)
     side = _side(r.get('side'))
-    sign = -1.0 if side == 'SHORT' else 1.0
     initial_stop = float(r['stop'])
-    risk_per_unit = abs(fill - initial_stop)
-    risk_usd = risk_per_unit * original_qty
-    final_slice_gross = (float(exit_price) - fill) * remaining_qty * sign
     previous_gross = float(r.get('realized_gross_pnl') or 0.0)
-    gross_pnl = previous_gross + final_slice_gross
-    gross_r = gross_pnl / risk_usd if risk_usd > 0 else None
+    geometry = position_cash_geometry(fill=fill, stop=initial_stop, quantity=original_qty,
+        exit_price=float(exit_price), side=side, remaining_quantity=remaining_qty,
+        previous_gross=previous_gross)
+    risk_usd = geometry['initial_risk_usd']
+    final_slice_gross = geometry['final_slice_gross']
+    gross_pnl = geometry['gross_pnl_usd']
+    gross_r = geometry['gross_r']
 
     missing = [k for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty') if exit_costs.get(k) is None]
     missing += [k for k in ('entry_spread','entry_slippage','entry_fee') if r.get(k) is None]
@@ -956,11 +958,12 @@ def resolve_position_closure(
 
     def exit_value(name: str) -> float | None:
         raw = _finite_number(exit_costs.get(name))
-        if raw is None:
+        if raw is None or (raw < 0 and name != "funding"):
             return None
         return raw * multiplier * (1.0 if explicit_usd else remaining_fraction)
 
     final_exit = {key: exit_value(key) for key in _EXIT_COST_INPUTS}
+    missing += [key for key in _EXIT_COST_INPUTS if key in exit_costs and final_exit[key] is None]
     partial_exit = _prior_partial_exit_components(conn, trade_id)
     entry_costs = _entry_costs_usd(r, risk_usd=risk_usd)
 
@@ -988,9 +991,12 @@ def resolve_position_closure(
             partial_exit['liquidity_penalty'] + float(final_exit['liquidity_penalty'] or 0.0)
         ),
     }
-    total = None if missing else sum(float(value or 0.0) for value in costs_usd.values())
-    net_pnl = None if total is None else gross_pnl - total
-    net_r = None if net_pnl is None or risk_usd <= 0 else net_pnl / risk_usd
+    accounting = realized_cash_ledger(gross_pnl=gross_pnl, initial_risk=risk_usd,
+                                     costs=costs_usd, missing=missing)
+    missing = accounting['missing_fields']
+    total = accounting['total_cost_usd']
+    net_pnl = accounting['net_pnl_usd']
+    net_r = accounting['net_r']
 
     partial_events = [
         event for event in _management_events(conn, trade_id)

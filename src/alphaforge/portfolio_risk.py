@@ -1063,6 +1063,8 @@ class BacktestPortfolioState:
     cooldown_until: dict[str, float] = field(default_factory=dict)
     consecutive_loss_count: int = 0
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    closed_position_ids: set[str] = field(default_factory=set)
+    cash_evidence_complete: bool = True
 
     def __post_init__(self) -> None:
         if self.current_equity is None:
@@ -1102,12 +1104,15 @@ class BacktestPortfolioState:
         symbol_key = f"{symbol}:{day}"
         total_daily = self.global_daily_trade_counts.get(day)
         symbol_daily = self.symbol_daily_trade_counts.get(symbol_key)
-        daily_pnl = self.daily_realized_pnl.get(day, 0.0)
+        daily_pnl = self.daily_realized_pnl.get(day, 0.0) if self.cash_evidence_complete else None
         rolling_dd = None
         if self.peak_equity and self.current_equity is not None:
             rolling_dd = max(0.0, (self.peak_equity - self.current_equity) / self.peak_equity)
         open_map = {pid: {"symbol": p.symbol, "notional": p.notional, "side": p.side} for pid, p in self.open_positions.items()}
         snap = snapshot_from_state(mode=mode, symbol=symbol, side=side, candidate_notional=candidate_notional, equity=self.current_equity, available_balance=self.current_equity, open_positions={p.symbol: {"notional": p.notional, "side": p.side} for p in self.open_positions.values()}, config=config, now=float(timestamp or 0.0) / 1000.0 if timestamp else None, cooldown_until=self.cooldown_until, daily_realized_pnl=daily_pnl, trades_today_symbol=symbol_daily, trades_today_global=total_daily, consecutive_loss_count=self.consecutive_loss_count, rolling_drawdown_pct=rolling_dd)
+        if not self.cash_evidence_complete:
+            snap.risk_state_complete = False
+            snap.risk_state_missing_fields = sorted(set(snap.risk_state_missing_fields + ["realized_net_cash"]))
         try:
             diag = json.loads(snap.diagnostics_json or "{}")
         except Exception:
@@ -1126,10 +1131,18 @@ class BacktestPortfolioState:
             return
         self.open_positions[position_id] = BacktestPosition(position_id=position_id, symbol=symbol, side=str(side).upper(), notional=float(notional), entry_price=float(entry_price or 0.0), opened_ts=int(timestamp or 0), correlation_group=correlation_group_for_symbol(symbol))
 
-    def close_position(self, *, position_id: str, symbol: str, timestamp: int, net_pnl_usdt: float, close_reason: str) -> None:
+    def close_position(self, *, position_id: str, symbol: str, timestamp: int, net_pnl_usdt: float | None, close_reason: str) -> None:
+        if position_id in self.closed_position_ids:
+            return
+        self.closed_position_ids.add(position_id)
         self.pending_entries.pop(position_id, None)
         self.open_positions.pop(position_id, None)
-        pnl = float(net_pnl_usdt or 0.0)
+        from .realized_accounting import finite_cash
+        pnl = finite_cash(net_pnl_usdt)
+        if pnl is None or not self.cash_evidence_complete:
+            self.cash_evidence_complete = False
+            self.current_equity = None
+            return
         self.current_equity = float(self.current_equity or 0.0) + pnl
         self.peak_equity = max(float(self.peak_equity or self.current_equity or 0.0), float(self.current_equity or 0.0))
         day = self._day_key(timestamp)
