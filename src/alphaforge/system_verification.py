@@ -104,6 +104,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue450_sqlite_concurrency.py",
     ),
     "PORTFOLIO_RISK": (
+        "tests/test_issue646_legacy_realized_accounting.py",
         "tests/test_issue496_portfolio_risk_authority.py",
         "tests/test_portfolio_risk_engine.py",
     ),
@@ -119,6 +120,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_runtime_live_authorization.py",
     ),
     "RESOLVER_INTEGRITY": (
+        "tests/test_issue646_legacy_realized_accounting.py",
         "tests/test_issue421_position_window_integrity.py",
         "tests/test_issue421_full_chain_replay.py",
     ),
@@ -253,6 +255,9 @@ def assess_path(raw_path: str) -> PathAssessment:
             "persistent schema contract changed",
         )
 
+    if path == "backtest_order.py":
+        return _assessment(path, RiskLevel.HIGH, ("RESOLVER_INTEGRITY", "PORTFOLIO_RISK"),
+                           "legacy realized cash accounting and portfolio state changed")
     if lower.startswith("src/alphaforge/"):
         if name in {
             "order.py",
@@ -268,6 +273,7 @@ def assess_path(raw_path: str) -> PathAssessment:
             )
 
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+            (("realized_accounting.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
             (("execution.py",), ("EXECUTION_SAFETY", "DECISION_PARITY"), "execution economics/safety changed"),
             (("runtime.py",), ("RUNTIME_AUTHORITY", "RESTART_RECOVERY"), "authoritative runtime changed"),
             (("burnin_ops.py",), ("BURNIN_OPERATIONS", "RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "burn-in operational supervision and recovery changed"),

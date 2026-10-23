@@ -186,3 +186,39 @@ runtime/lifecycle/provenance payloads. The object records:
 - fee treatment
 
 Historical rows are not backfilled or reinterpreted without explicit provenance.
+
+### Legacy realized cash ledger (CASH_LEDGER_V1)
+
+`backtest_order.finalize` and SQL-backed PAPER closure share the cash identities in
+`realized_accounting`: directional filled quantity times price movement gives gross
+PnL; initial dollar risk is filled quantity times absolute filled-entry/initial-stop
+distance. Complete cash costs are subtracted once, and net R divides by that risk.
+The legacy `risk_pct` argument historically allocates **notional**, as does
+`BacktestPortfolioState.notional_for`; this repair does not reinterpret it as a
+stop-defined risk budget or enlarge exposure. `risk_scale` scales final quantity
+once. Explicit `notional` overrides the base allocation before scaling.
+
+Legacy candle simulation still fills at planned entry, uses SL-first diagnostics
+for ambiguous candles, and explicitly liquidates at the last close on TIMEOUT.
+Ambiguity cannot supply complete realized evidence. No partial-exit/managed-stop
+lifecycle is implemented in this adapter, so parity with PAPER management is
+unsupported. SQL PAPER replay remains idempotent; legacy equity and portfolio
+cash deduplicate identified closed positions and use close-time ordering.
+
+Historical candle/decision costs are not realized cash observations. Callers may
+supply `realized_costs_usd` and an attributable `realized_cost_source` for an
+individual full closure: entry/exit spread, entry/exit fee, exit slippage, signed
+funding over the actual holding interval, and latency impact. Entry slippage must
+be explicitly zero because the supplied fill already embeds its price effect.
+Optional volatility/liquidity cash penalties remain explicit when applicable.
+No historical fee/funding schedule or duration-independent funding is invented.
+The caller owns scope and observation provenance; a numeric model estimate is
+not independent historical measurement or statistical qualification.
+
+Without these cash facts, `net_pnl_usdt`, net return percent, costs and net R stay
+null with `realized_evidence_status=INCOMPLETE`. Equity, drawdown, profit factor,
+expectancy and profile ranking cannot turn missing net cash into zero. A portfolio
+with unknown realized cash fails subsequent risk checks. Price-only diagnostics
+remain explicitly named `legacy_price_return_pct` and `legacy_approx_pnl_usdt`;
+they are not net profit. SQL metadata and CSV retain the accounting version and
+cost source. Existing historical rows are never rewritten or upgraded.

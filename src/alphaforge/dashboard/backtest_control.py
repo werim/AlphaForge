@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
+from alphaforge.realized_accounting import finite_cash, sum_cash, mean_cash
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import config_snapshot, effective_config_values, managed_config_value
 from alphaforge.contracts import canonical_utc_timestamp
@@ -1103,8 +1104,11 @@ PROFILE_FILTERS: dict[str, list[str]] = {
 
 
 def _profit_factor(rows: list[Mapping[str, Any]]) -> float | None:
-    wins = sum(max(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0), 0.0) for r in rows)
-    losses = abs(sum(min(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0), 0.0) for r in rows))
+    cash = [finite_cash(r.get("net_pnl_usdt", r.get("net_pnl"))) for r in rows]
+    if any(value is None for value in cash):
+        return None
+    wins = sum(max(value, 0.0) for value in cash)
+    losses = abs(sum(min(value, 0.0) for value in cash))
     if losses == 0:
         return None if wins == 0 else float("inf")
     return wins / losses
@@ -1113,7 +1117,7 @@ def _profit_factor(rows: list[Mapping[str, Any]]) -> float | None:
 def _avg_net(rows: list[Mapping[str, Any]]) -> float | None:
     if not rows:
         return None
-    return sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in rows) / len(rows)
+    return mean_cash(sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in rows), len(rows))
 
 
 def _artifact_missing_message(path: Path, fallbacks: list[Path] | None = None) -> str:
@@ -1348,7 +1352,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.win_count = _safe_int(summary.get("tp_hits")) if summary else sum(1 for r in closed_rows if str(r.get("close_reason") or "").upper() == "TP_HIT")
     result.loss_count = _safe_int(summary.get("sl_hits")) if summary else sum(1 for r in closed_rows if str(r.get("close_reason") or "").upper() == "SL_HIT")
     result.open_count = _safe_int(summary.get("open_at_end")) if summary else sum(1 for r in closed_rows if str(r.get("close_reason") or "").upper() in {"TIMEOUT", "OPEN_AT_END"})
-    result.net_pnl = summary.get("total_net_pnl_usdt") if summary else str(sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in closed_rows))
+    fallback_net = sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in closed_rows)
+    result.net_pnl = summary.get("total_net_pnl_usdt") if summary else (None if fallback_net is None else str(fallback_net))
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = summary.get("max_drawdown")
     result.strategy_quality_guardrails = strategy_quality if isinstance(strategy_quality, dict) else {}
@@ -1603,7 +1608,7 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
     filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() else {}
     accepted_count, accepted, accepted_source = _canonical_profile_accepted_rows(summary, lifecycle, backtest_orders)
     no_trades = accepted_count == 0
-    net = 0.0 if no_trades else _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
+    net = 0.0 if no_trades else _safe_float_or_none(summary.get("total_net_pnl_usdt"))
     loss_count = 0 if no_trades else (_safe_int(summary.get("sl_hits")) or 0)
     win_count = 0 if no_trades else (_safe_int(summary.get("tp_hits")) or 0)
     rejected_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected)
@@ -1614,15 +1619,17 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
     components = {
         "raw_net_pnl": net,
         "max_drawdown_penalty": drawdown_penalty,
-        "loss_streak_penalty": max(0, max_losses - 2) * max(abs(net) * 0.05, 1.0),
-        "overtrade_penalty": max(0.0, avg_per_day - 3.0) * max(abs(net) * 0.02, 1.0),
+        "loss_streak_penalty": max(0, max_losses - 2) * max(abs(net or 0) * 0.05, 1.0),
+        "overtrade_penalty": max(0.0, avg_per_day - 3.0) * max(abs(net or 0) * 0.02, 1.0),
         "execution_cost_penalty": abs(_summary_value(accepted, "cost_penalty", "mean") or 0.0) * accepted_count,
         "low_sample_penalty": max(0, 5 - accepted_count) * 2.0,
         "no_executed_trade_penalty": 1000000.0 if no_trades else 0.0,
     }
-    components["final_objective_score"] = components["raw_net_pnl"] - sum(v for k, v in components.items() if k != "raw_net_pnl")
+    components["final_objective_score"] = None if net is None else net - sum(v for k, v in components.items() if k != "raw_net_pnl")
     score10 = [r for r in accepted if (_safe_float_or_none(r.get("score")) or 0) >= 10]
     warn = list(warnings or [])
+    if net is None:
+        warn.append("REALIZED_NET_EVIDENCE_INCOMPLETE")
     if profile == "ALL_FILTERS_OFF":
         warn.append("FILTERS_OFF_STRESS_TEST")
     if max_dd is None:
@@ -1647,11 +1654,11 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
         "win_count": win_count, "loss_count": loss_count, "open_count": 0 if no_trades else (_safe_int(summary.get("open_at_end")) or 0), "timeout_count": 0 if no_trades else _safe_int(summary.get("timeout_count")),
         "gross_pnl": _safe_float_or_none(summary.get("total_gross_pnl_usdt")), "net_pnl": net, "return_pct": _safe_float_or_none(summary.get("total_pnl_pct")), "return": _safe_float_or_none(summary.get("total_pnl_pct")),
         "max_drawdown": max_dd, "max_drawdown_status": "AVAILABLE" if max_dd is not None else "UNAVAILABLE", "max_consecutive_losses": max_losses,
-        "profit_factor": _profit_factor(accepted), "avg_win": _avg_net([r for r in accepted if _safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) > 0]),
+        "profit_factor": None if net is None else _profit_factor(accepted), "avg_win": _avg_net([r for r in accepted if _safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) > 0]),
         "avg_loss": _avg_net([r for r in accepted if _safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) < 0]),
-        "expectancy_per_trade": net / accepted_count if accepted_count else 0.0, "avg_trades_per_day": avg_per_day,
+        "expectancy_per_trade": None if net is None else net / accepted_count if accepted_count else 0.0, "avg_trades_per_day": avg_per_day,
         "accepted_effective_rr_distribution": _numeric_distribution(accepted, "effective_rr"), "rejected_effective_rr_distribution": _numeric_distribution(rejected, "effective_rr"),
-        "score_10_count": len(score10), "score_10_tp_count": sum(1 for r in score10 if str(r.get("close_reason")).upper() == "TP_HIT"), "score_10_sl_count": sum(1 for r in score10 if str(r.get("close_reason")).upper() == "SL_HIT"), "score_10_timeout_count": sum(1 for r in score10 if "TIMEOUT" in str(r.get("close_reason")).upper()), "score_10_net_pnl": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in score10),
+        "score_10_count": len(score10), "score_10_tp_count": sum(1 for r in score10 if str(r.get("close_reason")).upper() == "TP_HIT"), "score_10_sl_count": sum(1 for r in score10 if str(r.get("close_reason")).upper() == "SL_HIT"), "score_10_timeout_count": sum(1 for r in score10 if "TIMEOUT" in str(r.get("close_reason")).upper()), "score_10_net_pnl": sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in score10),
         "top_reject_reasons": diagnostics["top_rejection_reasons"], "objective_score": components, "warnings": sorted(set(warn)),
         "bucket_diagnostics": _bucket_diagnostics(accepted), "artifact_paths": {"directory": str(profile_dir), "summary": str(profile_dir / "order_backtest_summary.csv"), "lifecycle": str(profile_dir / "order_lifecycle.csv"), "rejected": str(profile_dir / "rejected_orders.csv")},
     }
@@ -1771,8 +1778,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
                 result.error_message = (completed.stderr or completed.stdout or f"{profile} failed")[-1200:]
                 return result
             comparison_profiles[profile] = _comparison_metrics(profile, profile_dir, request.initial_balance, warnings, window_days=request.last_days)
-        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("raw_net_pnl", 0.0) or 0.0), reverse=True)
-        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("final_objective_score", 0.0) or 0.0), reverse=True)
+        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: (r.get("objective_score", {}).get("raw_net_pnl") is not None, int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("raw_net_pnl") or 0.0), reverse=True)
+        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: (r.get("objective_score", {}).get("final_objective_score") is not None, int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("final_objective_score") or 0.0), reverse=True)
         raw_rank = {r["profile_name"]: i + 1 for i, r in enumerate(raw_sorted)}
         obj_rank = {r["profile_name"]: i + 1 for i, r in enumerate(obj_sorted)}
         leaderboard = []

@@ -409,3 +409,13 @@ def test_plan_is_json_serializable() -> None:
     rendered = json.dumps(payload, sort_keys=True)
     assert '"risk_level": "HIGH"' in rendered
     assert '"recommended_model": "HIGH_REASONING"' in rendered
+
+
+@pytest.mark.parametrize("source", ["backtest_order.py", "src/alphaforge/realized_accounting.py",
+    "src/alphaforge/burnin_resolver.py", "src/alphaforge/portfolio_risk.py",
+    "src/alphaforge/dashboard/backtest_control.py"])
+def test_realized_accounting_source_only_selects_sql_cash_regressions(source):
+    plan = _plan(source)
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ("T0", "T1", "T2", "T3")
+    assert "tests/test_issue646_legacy_realized_accounting.py" in plan.selected_tests
