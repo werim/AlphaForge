@@ -227,3 +227,33 @@ The walk-forward BACKTEST adapter requires `CASH_LEDGER_V1`, `COMPLETE` and an
 attributable realized cost source in persisted diagnostics. Numeric historical
 price-return fields alone cannot inherit this contract; legacy artifacts remain
 unchanged and are rejected for cost-complete validation.
+
+### Quality-gate diagnostics (QUALITY_GATE_DIAGNOSTIC_V2)
+
+`_quality_gate_metrics` selects rejected shadow records using future `WOULD_TP`
+outcomes. This is retrospective reporting, not causal selection, realized net R,
+a deployable expected profit, or PAPER/LIVE acceptance/promotion authority.
+Existing selection thresholds and reporting counts are preserved; `accepted_count`
+in this namespace counts retrospective diagnostic records only.
+
+V2 keeps baseline realized cash in `quality_gate_baseline_realized_net_pnl_usdt`.
+Omitted/invalid baseline is unavailable, not zero. Counterfactual effective-RR mean
+and size-adjusted total are explicitly R fields; the latter uses the configured
+diagnostic size multiplier, not candidate position sizing or a cash conversion.
+No sample means unavailable expectancy and an empty R sum of zero. Invalid scale
+means unavailable scaled R. Candidate-provided dollar risk and risk_scale are
+retained as unverified diagnostic inputs, never inferred from balance/notional.
+
+`quality_gate_counterfactual_cash_usdt` and the retained compatibility key
+`baseline_plus_quality_gate_net_pnl` are always null: there is no attributable
+causal closure/cost model to convert this outcome-conditioned sample to cash.
+Even supplied candidate risk or partial cost fields cannot establish that model.
+Effective RR already contains decision-time cost modeling; this diagnostic does
+not subtract costs again or claim it is canonical realized net R. The #647 cash
+ledger remains the only realized accounting authority.
+
+Schema, units, selection basis, missing-evidence statuses and false decision-time/
+promotion flags travel through both summary CSV and signal-quality JSON. Dashboard
+consumers retain their existing reporting-only surface. Old reports are not
+rewritten or retroactively assigned V2 provenance; an old mixed-unit number is
+not repaired or validated by its continued presence in a historical artifact.

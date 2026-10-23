@@ -4973,20 +4973,21 @@ def build_score_calibration_artifacts(records: List[Mapping[str, Any]]) -> tuple
     summary={"total_rows": len(rows), "score_source_interpretation": "BACKTEST score mixes breakout/range strength, raw RR expectancy, and execution context; PAPER/LIVE AIBrain score is probabilistic quality after costs. Diagnostics test both raw WOULD_TP and effective_tp_hit.", "pearson_score_would_tp": pear_raw, "spearman_score_would_tp": _spearman(xs, raw_y) if len(xs)==len(raw_y) else None, "pearson_score_effective_tp_hit": pear_eff, "spearman_score_effective_tp_hit": _spearman(xs, eff_y) if len(xs)==len(eff_y) else None, "monotonicity": {"score_bucket_count": len(bucket_rows), "violations": monotonic_violations, "generally_improves_with_score": monotonic_violations == 0}, "miscalibration_flags": sorted(set(flags)), "thresholds_changed": False, "acceptance_logic_changed": False, "calibrated_score_scope": "BACKTEST_DIAGNOSTIC_ONLY", "calibrated_score_future_leakage": "NO_FORWARD_OUTCOME_FIELDS_USED; row-local pre-decision score/RR/execution/volatility/stop-distance fields only"}
     return diagnostics, summary
 
-def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig, baseline_net_pnl: float = 0.0) -> Dict[str, Any]:
+def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig, baseline_net_pnl: float | None = None) -> Dict[str, Any]:
     rejected = [r for r in records if r.get("source") == "REJECTED_SHADOW"]
     mode_ok = "BACKTEST" in {m.upper() for m in cfg.modes}
     candidates: List[Dict[str, Any]] = []
     rejected_reasons: Dict[str, int] = {}
     daily_counts: Dict[str, int] = {}
-    for r in rejected:
+    for original in rejected:
+        r = dict(original)
         if "stop_distance_pct_bucket" not in r:
             r["stop_distance_pct_bucket"] = _bucket_quality(r.get("stop_distance_pct"), [0.75, 1.5], ["TIGHT", "NORMAL", "WIDE"])
         reason = str(r.get("reject_reason", "")).upper()
-        eff = _quality_float(r.get("effective_rr"))
-        score = _quality_float(r.get("score"))
-        spread = _quality_float(r.get("spread_pct"))
-        slip = _quality_float(r.get("expected_slippage_pct"))
+        eff = finite_cash(r.get("effective_rr"))
+        score = finite_cash(r.get("score"))
+        spread = finite_cash(r.get("spread_pct"))
+        slip = finite_cash(r.get("expected_slippage_pct"))
         stop_bucket = str(r.get("stop_distance_pct_bucket") or "").upper()
         blocked = (
             not cfg.enabled or not mode_ok or cfg.allowed_gate_name != QUALITY_GATE_NAME
@@ -5018,11 +5019,39 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
     tp = sum(1 for r in candidates if r.get("outcome") == "WOULD_TP")
     sl = sum(1 for r in candidates if r.get("outcome") == "WOULD_SL")
     unknown = sum(1 for r in candidates if r.get("outcome") not in {"WOULD_TP", "WOULD_SL"})
-    eff_vals = [_quality_float(r.get("effective_rr")) for r in candidates]
+    eff_vals = [finite_cash(r.get("effective_rr")) for r in candidates]
     eff_vals = [v for v in eff_vals if v is not None]
-    expected = (sum((( _quality_float(r.get("effective_rr")) or 0.0) if r.get("outcome") == "WOULD_TP" else (-1.0 if r.get("outcome") == "WOULD_SL" else 0.0)) for r in candidates) / len(candidates)) if candidates else 0.0
-    sized_expected = expected * cfg.size_multiplier * len(candidates)
+    # This population is selected using future WOULD_TP outcomes. Its effective
+    # RR is a retrospective R diagnostic, not realized net R or a causal forecast.
+    expected = finite_cash(sum(eff_vals) / len(eff_vals)) if eff_vals else None
+    size = finite_cash(cfg.size_multiplier)
+    valid_size = size is not None and 0 <= size <= 1
+    sized_expected = finite_cash(sum(eff_vals) * size) if valid_size else None
+    baseline_cash = finite_cash(baseline_net_pnl)
+    reported_risk = [{
+        "symbol": r.get("symbol"), "timestamp": r.get("timestamp"),
+        "reported_initial_risk_usdt": finite_cash(r.get("initial_risk_usd")),
+        "reported_risk_scale": finite_cash(r.get("risk_scale")),
+        "source": str(r.get("initial_risk_source") or "UNAVAILABLE"),
+        "status": "UNVERIFIED_DIAGNOSTIC_INPUT",
+    } for r in candidates]
     return {
+        "quality_gate_schema_version": "QUALITY_GATE_DIAGNOSTIC_V2",
+        "quality_gate_authority": "DIAGNOSTIC_ONLY",
+        "quality_gate_selection_basis": "RETROSPECTIVE_WOULD_TP_CONDITIONED",
+        "quality_gate_uses_future_outcomes": True,
+        "quality_gate_decision_time_eligible": False,
+        "quality_gate_promotion_eligible": False,
+        "quality_gate_baseline_realized_net_pnl_usdt": baseline_cash,
+        "quality_gate_baseline_evidence_status": "AVAILABLE" if baseline_cash is not None else "UNAVAILABLE",
+        "quality_gate_counterfactual_expectancy_r": expected,
+        "quality_gate_counterfactual_scaled_total_r": sized_expected,
+        "quality_gate_r_basis": "DECISION_EFFECTIVE_RR_NOT_REALIZED_NET_R",
+        "quality_gate_r_evidence_status": "UNAVAILABLE_INVALID_SCALE" if not valid_size else "NO_SAMPLE" if not candidates else "AVAILABLE_RETROSPECTIVE_ONLY",
+        "quality_gate_candidate_risk_evidence_json": json.dumps(reported_risk, sort_keys=True),
+        "quality_gate_counterfactual_cash_usdt": None,
+        "quality_gate_cash_evidence_status": "UNAVAILABLE_NO_CAUSAL_CLOSURE_COST_MODEL",
+        "quality_gate_combined_net_pnl_status": "DEPRECATED_INCOMPATIBLE_UNITS_AND_AUTHORITY",
         "quality_gate_enabled": cfg.enabled,
         "quality_gate_mode": ",".join(cfg.modes),
         "quality_gate_candidate_count": len(candidates),
@@ -5032,9 +5061,9 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
         "quality_gate_would_sl_count": sl,
         "quality_gate_unknown_count": unknown,
         "quality_gate_tp_rate": tp / (tp + sl) if (tp + sl) else 0.0,
-        "quality_gate_mean_effective_rr": (sum(eff_vals) / len(eff_vals)) if eff_vals else 0.0,
+        "quality_gate_mean_effective_rr": expected,
         "quality_gate_expected_effective_expectancy": expected,
-        "baseline_plus_quality_gate_net_pnl": sum_cash([baseline_net_pnl, sized_expected]),
+        "baseline_plus_quality_gate_net_pnl": None,
         "quality_gate_size_multiplier": cfg.size_multiplier,
         "quality_gate_reason_breakdown": _distribution([r.get("reject_reason") for r in candidates]),
         "quality_gate_symbol_breakdown": _distribution([r.get("symbol") for r in candidates]),
@@ -5042,7 +5071,7 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
         "quality_gate_rejected_reason_breakdown": rejected_reasons,
     }
 
-def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation], timeframe: str, thresholds: List[float] | None = None, quality_gate_config: Optional[QualityGateConfig] = None, baseline_net_pnl: float = 0.0) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation], timeframe: str, thresholds: List[float] | None = None, quality_gate_config: Optional[QualityGateConfig] = None, baseline_net_pnl: float | None = None) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     thresholds = thresholds or [1.7, 1.9, 2.1, 2.3]
     records = [_quality_record_from_lifecycle(r, timeframe) for r in accepted_rows] + [_quality_record_from_shadow(s, timeframe) for s in shadows]
     for r in records:
