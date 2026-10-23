@@ -2521,10 +2521,9 @@ class RuntimeOrchestrator:
     ) -> dict[str, Any]:
         """Compare protected BACKTEST/PAPER/LIVE_PRECHECK semantics fail closed.
 
-        BACKTEST is intentionally allowed to report incomplete legacy evidence;
-        incomplete is never promoted to parity PASS.  This prevents a pair of
-        healthy-looking PAPER/LIVE rows from proving a three-mode contract that
-        the BACKTEST evidence does not actually satisfy.
+        Compare actual decision stages, retaining their cost provenance.
+        Incomplete or invalid evidence is never promoted to parity PASS, even
+        when all modes share the same missing values or invalid status.
         """
         samples = list(
             self._qualification_samples[: max(0, int(min_sample_count))]

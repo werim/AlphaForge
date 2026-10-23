@@ -99,9 +99,10 @@ def test_wide_stop_final_sizing_and_portfolio_caps_across_actual_modes(side, sca
 
 @pytest.mark.parametrize("side", ["LONG", "SHORT"])
 @pytest.mark.parametrize("favorable", [False, True])
-def test_future_fill_signs_do_not_change_initial_decision_evidence(side, favorable):
+@pytest.mark.parametrize("expected_improvement", [False, True])
+def test_future_fill_signs_do_not_change_initial_decision_evidence(side, favorable, expected_improvement):
     direction = 1 if side == "LONG" else -1
-    expected = 100 + direction * 0.2
+    expected = 100 + direction * (-0.2 if expected_improvement else 0.2)
     actual = expected + direction * (-0.3 if favorable else 0.3)
     initial = build_execution_cost_semantics(entry=100, expected_fill=expected, actual_fill=None,
         side=side, expected_fill_provenance=PROVENANCE_MODELLED,
@@ -204,3 +205,10 @@ def test_raw_rr_boundary_is_independent_of_effective_threshold(side, raw_rr):
     decisions = [runtime._evaluate_pre_submit(signal, {**market, "mode": mode}, {}, {})
                  for mode in ("BACKTEST", "PAPER", "LIVE_PRECHECK")]
     assert {row["decision"] for row in decisions} == ({"REJECT"} if raw_rr < 1.5 else {"ACCEPT"})
+
+
+def test_absent_fee_key_is_missing_not_a_zero_fee_schedule():
+    _, market, _ = frozen_case()
+    context = dict(market["execution_ctx"])
+    del context["fee_pct"]
+    assert "fee_pct" in build_execution_cost_model(context).missing_fields

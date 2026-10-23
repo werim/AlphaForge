@@ -1160,6 +1160,7 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
             "symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
             "rr": 3.0, "side": "LONG", "market_ts": now,
             "volume_24h_usdt": 90_000_000,
+            "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
             "spread_pct": 0.0002, "spread_status": "MEASURED", "spread_source": "FIXTURE",
             "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED", "slippage_source": "FIXTURE",
             "latency_ms": 50.0, "latency_status": "MEASURED", "latency_source": "FIXTURE",
@@ -1352,7 +1353,7 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest
     monkeypatch.setattr(runtime_module, "evaluate_portfolio_risk", capture_portfolio_evidence)
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "TEST", "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -1469,6 +1470,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
         return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
                  "rr": 3.0, "side": "LONG", "market_ts": time.time(),
                  "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
+                 "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "TEST",
                  "volatility_pct": 0.4, "trend_strength": 0.9,
                  "liquidity_score": 0.9, "chop_score": 0.1}]
 
@@ -1521,7 +1523,8 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
     market = {"entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG",
               "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
-              "liquidity_score": .9}
+              "liquidity_score": .9, "funding_rate_pct": .00005,
+              "funding_status": "MEASURED", "funding_source": "TEST"}
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
                                 diagnostics={"inputs": market})
     orchestrator = RuntimeOrchestrator(
@@ -1791,6 +1794,7 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
             "rr": 3.0, "side": "LONG", "market_ts": now,
             "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
             "volume_24h_usdt": 90_000_000,
+            "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
             "spread_pct": 0.0002, "spread_status": "MEASURED", "spread_source": "FIXTURE",
             "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED", "slippage_source": "FIXTURE",
             "latency_ms": 50.0, "latency_status": "MEASURED", "latency_source": "FIXTURE",
