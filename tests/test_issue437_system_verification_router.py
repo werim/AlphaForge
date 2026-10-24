@@ -509,3 +509,10 @@ def test_real_ci_step_consumes_storage_source_only_selection(tmp_path, monkeypat
     assert required_suites <= set(argv[4:])
     assert set(argv[4:]) <= set(plan.selected_tests)
     assert kwargs == {"check": True}
+
+
+@pytest.mark.parametrize("source", ["src/alphaforge/storage_volume.py", "src/alphaforge/storage_measurement.py"])
+def test_storage_sandbox_source_only_selects_pre_attempt_regressions(source):
+    plan = _plan(source)
+    assert plan.risk_level == RiskLevel.HIGH
+    assert "tests/test_storage_sandbox_preflight.py" in plan.selected_tests

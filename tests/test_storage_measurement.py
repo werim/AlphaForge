@@ -100,13 +100,34 @@ def test_quota_metadata_requires_exact_dedicated_volume(tmp_path,monkeypatch):
         entry.clear();entry.update(before)
 
 
+def sandbox_record(mount, sha='a'*40):
+    import hashlib
+    nonce = 'f'*32
+    return dict(schema=v.SANDBOX_SCHEMA, status='SANDBOX_VERIFIED', source_sha=sha,
+        profile_sha256=hashlib.sha256(v.sandbox_profile(mount).encode()).hexdigest(),
+        script_sha256=hashlib.sha256(v._SANDBOX_CHECK.encode()).hexdigest(),
+        executable=v.SANDBOX_EXEC, returncode=0, inside_write=True, outside_absent=True,
+        outside_errno=errno.EPERM, nonce=nonce,
+        stdout=json.dumps({'nonce':nonce,'outside_errno':errno.EPERM}), stderr='')
+
+
+def sandbox_success(command, **kwargs):
+    assert command[0] == v.SANDBOX_EXEC and command[1] == '-p'
+    assert command[5] == v._SANDBOX_CHECK
+    nonce, inside, outside = command[-3:]
+    Path(inside).write_text(nonce)
+    assert not Path(outside).exists()
+    return SimpleNamespace(returncode=0, stdout=json.dumps({'nonce':nonce,'outside_errno':errno.EPERM}).encode(), stderr=b'')
+
+
 def physical_fixture(tmp_path,monkeypatch):
     identity={'mount':str(tmp_path),'cap_bytes':10000000,'filesystem':{'fsid':9},'host':'host','backend':v.BACKEND}
     monkeypatch.setattr(v,'inspect_volume',lambda *a:identity)
     c=v.ControlFile(tmp_path/'.af-capacity-proof.control',{'identity':identity,'source_sha':'a'*40,'host_reserve_bytes':100})
     result={'status':'PHYSICALLY_VERIFIED','identity':identity,'aggregate_enospc':True,'sandbox_denial':True,
             'files_written':4,'observed_capacity_bytes':9000000,'capacity_errno':errno.ENOSPC,
-            'container_free_at_error':1000,'completed_at':time.time()}
+            'container_free_at_error':1000,'completed_at':time.time(),
+            'sandbox_verification':sandbox_record(tmp_path), 'sandbox_returncode':0}
     c.put(1,result);c.close()
     return identity,result
 
@@ -391,8 +412,7 @@ def test_backend_probe_requires_aggregate_capacity_not_single_file_or_sampled_by
     monkeypatch.setattr(v,'inspect_volume',lambda *a:identity)
     monkeypatch.setattr(v,'container_free',lambda p:999999999)
     def deny(command,**kw):
-        Path(command[-2]).touch()
-        return SimpleNamespace(returncode=1,stdout=b'',stderr=b'fixture permission denied')
+        return sandbox_success(command, **kw)
     monkeypatch.setattr(v.subprocess,'run',deny)
     real_write=os.write;written=0
     def quota(fd,data):
@@ -539,8 +559,7 @@ def test_four_gib_probe_reaches_native_capacity_with_bounded_inventory_latency(t
     monkeypatch.setattr(v,'container_free',free)
     monkeypatch.setattr(v.time,'monotonic',lambda:clock[0])
     def deny(command,**kw):
-        Path(command[-2]).touch()
-        return SimpleNamespace(returncode=1,stdout=b'',stderr=b'fixture denied')
+        return sandbox_success(command, **kw)
     monkeypatch.setattr(v.subprocess,'run',deny)
     def write(fd,data):
         if written[0]+len(data)>cap-8*1024**2:
@@ -562,8 +581,7 @@ def test_probe_reserves_headroom_for_entire_next_write(tmp_path, monkeypatch):
     reads = iter([cap + reserve, reserve + 1])
     monkeypatch.setattr(v, 'container_free', lambda _: next(reads))
     def deny(command, **kw):
-        Path(command[-2]).touch()
-        return SimpleNamespace(returncode=1, stdout=b'', stderr=b'fixture denied')
+        return sandbox_success(command, **kw)
     monkeypatch.setattr(v.subprocess, 'run', deny)
     monkeypatch.setattr(v.os, 'write', lambda *a: pytest.fail('reserve must be checked before writing'))
     result = v.probe(tmp_path, cap, 'a' * 40, reserve)
@@ -581,8 +599,7 @@ def test_new_physical_attempt_preserves_failed_claim_and_is_consumed(tmp_path, m
     before = old.read_bytes()
     monkeypatch.setattr(v, 'container_free', lambda _: 10**12)
     def deny(command, **kw):
-        Path(command[-2]).touch()
-        return SimpleNamespace(returncode=1, stdout=b'', stderr=b'fixture denied')
+        return sandbox_success(command, **kw)
     monkeypatch.setattr(v.subprocess, 'run', deny)
     written = 0
     def write(fd, data):

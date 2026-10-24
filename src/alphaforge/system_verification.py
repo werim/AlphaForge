@@ -98,6 +98,7 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
     # Real-runtime admission and quota/host identity share the evidence contract;
     # these suites exist only alongside that implementation, not on bare dev.
     "STORAGE_MEASUREMENT_INTEGRITY": (
+        "tests/test_storage_sandbox_preflight.py",
         "tests/test_storage_measurement.py",
         "tests/test_storage_host_identity.py",
         "tests/test_storage_admission_contract.py",

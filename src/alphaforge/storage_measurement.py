@@ -566,7 +566,7 @@ def admission_evidence(path, cfg, db: Path, duration, *, intervals=("1h","15m","
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest='cmd',required=True)
-    for command in ('inspect','probe','prepare'):
+    for command in ('inspect','sandbox-preflight','probe','prepare'):
         p=sub.add_parser(command);p.add_argument('--mount',type=Path,required=True);p.add_argument('--cap-bytes',type=int,required=True)
         if command=='probe':
             p.add_argument('--host-reserve-bytes',type=int,required=True)
@@ -580,10 +580,25 @@ def main(argv=None):
     args=parser.parse_args(argv)
     if args.cmd=='inspect':
         result={'geometry':volume.inspect_volume(args.mount,args.cap_bytes),'backend_verification':'UNVERIFIED_WITHOUT_PHYSICAL_PROOF','ready':False}
+    elif args.cmd=='sandbox-preflight':
+        source=source_identity()
+        if source['dirty']: raise ValueError('DIRTY_SOURCE')
+        identity=volume.inspect_volume(args.mount,args.cap_bytes)
+        result=volume.sandbox_preflight(args.mount,source['sha'])
+        # Full bounded diagnostics, not a physical proof or admission certificate.
+        print(json.dumps({'command':args.cmd,'identity':identity,'verification':result,
+                          'admission_eligible':False,'physical_acceptance':'NOT_RUN'},sort_keys=True))
+        return 0 if volume.sandbox_verified(result,args.mount,source['sha']) else 3
     elif args.cmd=='probe':
         source=source_identity()
         if source['dirty']: raise ValueError('DIRTY_SOURCE')
-        result=volume.probe(args.mount,args.cap_bytes,source['sha'],args.host_reserve_bytes,attempt_id=args.attempt_id)
+        try:
+            result=volume.probe(args.mount,args.cap_bytes,source['sha'],args.host_reserve_bytes,attempt_id=args.attempt_id)
+        except volume.SandboxPreflightError as exc:
+            print(json.dumps({'command':args.cmd,'status':'FAILED','reason':str(exc),
+                              'sandbox_verification':exc.evidence,'admission_eligible':False,
+                              'physical_attempt_started':False},sort_keys=True))
+            return 3
     elif args.cmd=='prepare':
         env=read_json(args.config_input);env=env.get('env',env)
         result=prepare(env,args.mount,args.cap_bytes,args.proof_hash)

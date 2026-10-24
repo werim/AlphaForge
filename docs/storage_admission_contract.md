@@ -43,8 +43,9 @@ directories, sampled bytes and RLIMIT_FSIZE are not this backend.
 
 Read-only geometry inspection is **not physical verification**. The separate
 explicit `probe` entrypoint requires an otherwise unused dedicated volume (only
-standard macOS metadata directories may exist). It reserves a durable attempt,
-then checks both successful sandbox-local writing and denied outside writing.
+standard macOS metadata directories may exist). Before reserving a durable attempt it verifies that the canonical inner
+`sandbox-exec` actually starts and completes its nonce-bound local-write /
+outside-EPERM-or-EACCES challenge in the caller's execution context.
 It writes several own bounded temporary fill files, with writes at most 8 MiB
 and a native free-space check reserving the entire next write above host reserve,
 until native ENOSPC/EDQUOT
@@ -213,3 +214,62 @@ If no such volume exists, provisioning needs separate authorization; the
 measurement entrypoint will not create one. Do not supply an execution command
 while that mandatory prerequisite is unverified. Old Issue631 approval, launcher, image failures and stats-only
 measurements cannot supply it; the historical hdiutil failure remains INCONCLUSIVE.
+
+
+## Sandbox execution preflight and retest readiness
+
+The canonical `sandbox_preflight` authority in `storage_volume` runs the unchanged
+profile through `/usr/bin/sandbox-exec` using the current interpreter. A structured,
+fresh nonce response, successful child exit, matching owned local sentinel and
+explicit outside EPERM/EACCES are all required. Nonzero exit after creating the
+local sentinel, malformed/contradictory output, missing binary, permission-denied
+spawn, timeout, interruption, missing sentinels or unexpected outside creation
+fail closed. Diagnostics retain bounded redacted stdout/stderr, reason, returncode,
+source SHA and profile/script identity. Only matching own challenge files are
+removed; unexpected objects remain for inspection.
+
+The existing measurement CLI exposes `sandbox-preflight` for this non-capacity
+check. It writes only tiny temporary challenge files, no claim or fill, and
+reports physical acceptance NOT_RUN and admission=false. It must run in the
+**actual final caller/worker context before the operator's O_EXCL operation latch**.
+A parent, sibling or outer sandbox's denial is not evidence of inner execution.
+`probe` repeats the same canonical guard before its own O_EXCL control and before
+any fill. CLI failure returns 3 with the diagnostics and physical_attempt_started=false.
+That does not reset or refund any operator latch already consumed outside this API.
+
+Do not place the canonical physical probe under an additional sandbox wrapper
+without verifying that its inner sandbox invocation is supported in that exact
+context. The failed operator wrapper from 24 October 2026 invoked sandbox-exec
+around a worker that called `probe`, causing the inner sandbox_apply to fail.
+The old outer local-write/denial PASS cannot substitute for canonical acceptance.
+Keep this historical harness/evidence immutable; do not rerun or edit it.
+The real calibration guardian/worker sandbox remains unchanged by this correction.
+
+Persisted physical proofs now also require the structured canonical sandbox
+verification record. Old booleans or ENOSPC alone are insufficient; no historical
+control, source SHA or failed result is rewritten or upgraded. O_EXCL and original
+control-inode locking still prevent attempt reuse. A failed consumed attempt
+remains permanently non-admissible.
+
+Revised plan (documentation only; **no retry authorization**):
+
+1. Preserve old and failed-new volumes, controls, operation latch, logs, hashes and
+   inode identities. Recheck them read-only; no deletion, quota change or reuse.
+2. Qualify a clean exact new PR head through software CI. New source makes old
+   physical proof cross-scoped. PR #637 stays unmerged until physical acceptance.
+3. Obtain fresh explicit authorization for one fresh attempt and, if necessary,
+   separately authorized dedicated finite-quota provisioning. Never infer either
+   permission from software PASS or from the previous consumed authorization.
+4. Before consuming a fresh operation ID, run the canonical non-capacity preflight
+   in the final worker context. Require strict success, matching source/profile,
+   dedicated empty backend identity, finite quota, native reserve, unique ID,
+   single ownership and an armed independently owned deadline watchdog. Unknown
+   or contradictory evidence stops before fill; it grants no automatic retry.
+5. Only within that new authorized scope may canonical capacity probing run.
+   Retain complete structured sandbox and aggregate ENOSPC evidence; a bounded
+   Python check is not an OS hard-timeout guarantee. Review all required physical
+   controls before any subsequent separately authorized runtime stage.
+
+SQLite/WAL/archive containment, six-hour PAPER calibration, seven-day qualification,
+LIVE and merging #637 remain separate blocked stages. This software guard neither
+proves those physical contracts nor authorizes their execution.

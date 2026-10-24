@@ -16,6 +16,7 @@ import plistlib
 import re
 import struct
 import subprocess
+import sys
 import time
 
 from alphaforge.burnin import canonical_hash
@@ -112,6 +113,121 @@ def sandbox_profile(mount: Path) -> str:
     return ('(version 1)(allow default)'
             f'(deny file-write* (require-all (require-not (subpath "{value}"))'
             '(require-not (literal "/dev/null"))))')
+
+
+SANDBOX_SCHEMA = "canonical-sandbox-verification.v1"
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Only this child writes the challenge. EPERM/EACCES must be observed by Python,
+# not inferred from sandbox-exec failing to start or apply its profile.
+_SANDBOX_CHECK = '''import errno,json,sys
+nonce,inside,outside=sys.argv[1:]
+with open(inside,'x') as f:f.write(nonce)
+denied=None
+try:
+    with open(outside,'x') as f:f.write(nonce)
+except OSError as exc:
+    denied=exc.errno
+print(json.dumps({'nonce':nonce,'outside_errno':denied}),flush=True)
+sys.exit(0 if denied in (errno.EPERM,errno.EACCES) else 2)
+'''
+
+
+class SandboxPreflightError(ValueError):
+    def __init__(self, evidence):
+        self.evidence = evidence
+        super().__init__("CANONICAL_SANDBOX_PREFLIGHT_FAILED:" + evidence["reason"])
+
+
+def sandbox_verified(evidence: dict, mount: Path, source_sha: str) -> bool:
+    """One validator for live preflight and persisted physical acceptance."""
+    if not isinstance(evidence, dict):
+        return False
+    try:
+        stdout = evidence.get("stdout", "")
+        payload = json.loads(stdout)
+        if (not isinstance(stdout, str) or len(stdout) > 65536 or not isinstance(payload, dict)
+                or set(payload) != {"nonce", "outside_errno"}
+                or payload["nonce"] != evidence.get("nonce")
+                or type(payload["outside_errno"]) is not int
+                or payload["outside_errno"] != evidence.get("outside_errno")
+                or evidence.get("stderr") != ""):
+            return False
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(evidence, dict)
+        and evidence.get("schema") == SANDBOX_SCHEMA and evidence.get("status") == "SANDBOX_VERIFIED"
+        and evidence.get("source_sha") == source_sha
+        and evidence.get("profile_sha256") == hashlib.sha256(sandbox_profile(mount).encode()).hexdigest()
+        and evidence.get("script_sha256") == hashlib.sha256(_SANDBOX_CHECK.encode()).hexdigest()
+        and evidence.get("executable") == SANDBOX_EXEC
+        and evidence.get("returncode") == 0 and type(evidence.get("returncode")) is int
+        and evidence.get("inside_write") is True and evidence.get("outside_absent") is True
+        and type(evidence.get("outside_errno")) is int and evidence["outside_errno"] in (errno.EPERM, errno.EACCES)
+        and isinstance(evidence.get("nonce"), str) and re.fullmatch(r"[0-9a-f]{32}", evidence["nonce"]) is not None)
+
+
+def sandbox_preflight(mount: Path, source_sha: str) -> dict:
+    """Bounded challenge in the actual caller context; no claim, quota fill or admission.
+
+    Call before an operator attempt latch as well as at the canonical probe
+    boundary. An outer write denial cannot substitute for this inner execution.
+    """
+    if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", source_sha):
+        raise ValueError("SANDBOX_SOURCE_SHA_INVALID")
+    mount = mount.resolve(strict=True)
+    profile = sandbox_profile(mount)
+    nonce = os.urandom(16).hex()
+    inside = mount / (".af-sandbox-positive-" + nonce)
+    outside = mount.parent / (".af-sandbox-denied-" + nonce)
+    result = dict(schema=SANDBOX_SCHEMA, status="FAILED", reason="UNVERIFIED",
+        source_sha=source_sha, executable=SANDBOX_EXEC, nonce=nonce,
+        profile_sha256=hashlib.sha256(profile.encode()).hexdigest(),
+        script_sha256=hashlib.sha256(_SANDBOX_CHECK.encode()).hexdigest(),
+        interpreter=sys.executable, returncode=None, inside_write=False,
+        outside_absent=False, outside_errno=None, stdout="", stderr="")
+    def diagnostic(value):
+        raw = value or b""
+        return redact(raw[:65536].decode(errors="replace") if isinstance(raw, bytes) else str(raw)[:65536])
+    def owned(path):
+        return (not path.is_symlink() and path.is_file() and path.stat().st_size == len(nonce)
+                and path.read_text() == nonce)
+    if any(path.exists() or path.is_symlink() for path in (inside, outside)):
+        result["reason"] = "SANDBOX_CHALLENGE_COLLISION"
+        return result
+    try:
+        completed = subprocess.run([SANDBOX_EXEC, "-p", profile, sys.executable, "-c",
+            _SANDBOX_CHECK, nonce, str(inside), str(outside)], capture_output=True, timeout=10)
+        result.update(returncode=completed.returncode, stdout=diagnostic(completed.stdout),
+                      stderr=diagnostic(completed.stderr), inside_write=owned(inside),
+                      outside_absent=not (outside.exists() or outside.is_symlink()))
+        if completed.returncode != 0:
+            result["reason"] = "CANONICAL_SANDBOX_EXECUTION_FAILED"
+        else:
+            payload = json.loads(completed.stdout)
+            if (not isinstance(payload, dict) or set(payload) != {"nonce", "outside_errno"}
+                    or payload.get("nonce") != nonce or len(completed.stdout) > 65536):
+                raise ValueError("SANDBOX_OUTPUT_INVALID")
+            result.update(outside_errno=payload["outside_errno"], status="SANDBOX_VERIFIED")
+            if sandbox_verified(result, mount, source_sha):
+                result["reason"] = "VERIFIED_INNER_EXECUTION_AND_DENIAL"
+            else:
+                result.update(status="FAILED", reason="SANDBOX_CHALLENGE_UNVERIFIED")
+    except subprocess.TimeoutExpired as exc:
+        result.update(reason="SANDBOX_TIMEOUT", stdout=diagnostic(exc.stdout), stderr=diagnostic(exc.stderr))
+    except (OSError, ValueError, TypeError, KeyboardInterrupt) as exc:
+        result.update(status="FAILED", reason="SANDBOX_" + type(exc).__name__,
+                      spawn_errno=getattr(exc, "errno", None))
+    finally:
+        # Never delete a pre-existing or unexpected object, even on failure.
+        for path in (inside, outside):
+            try:
+                if owned(path):
+                    path.unlink()
+                elif path.exists() or path.is_symlink():
+                    result.update(status="FAILED", reason="SANDBOX_SENTINEL_IDENTITY_MISMATCH")
+            except OSError:
+                result.update(status="FAILED", reason="SANDBOX_SENTINEL_CLEANUP_FAILED")
+    return result
 
 
 class ControlFile:
@@ -223,6 +339,8 @@ def verify(mount: Path, cap: int, proof_hash: str, source_sha: str) -> dict:
             or claim.get("source_sha") != source_sha or result.get("identity") != identity
             or result.get("status") != "PHYSICALLY_VERIFIED"
             or result.get("aggregate_enospc") is not True or result.get("sandbox_denial") is not True
+            or not sandbox_verified(result.get("sandbox_verification"), mount, source_sha)
+            or type(result.get("sandbox_returncode")) is not int or result["sandbox_returncode"] != 0
             or result.get("files_written", 0) < 2 or result.get("observed_capacity_bytes", 0) <= cap // 2
             or result.get("capacity_errno") not in (errno.ENOSPC, errno.EDQUOT)
             or type(claim.get("host_reserve_bytes")) is not int or claim["host_reserve_bytes"] <= 0
@@ -272,32 +390,22 @@ def _probe(mount: Path, cap: int, source_sha: str, host_reserve: int, *, attempt
         raise ValueError("BACKING_HOST_RESERVE_INSUFFICIENT")
     path = mount / (f".af-capacity-proof.{attempt_id}.control" if attempt_id else ".af-capacity-proof.control")
     extra = {"attempt_id": attempt_id, "prior_proofs": prior_proofs} if attempt_id else {}
+    if path.exists() or path.is_symlink():
+        raise FileExistsError("PHYSICAL_ATTEMPT_ID_ALREADY_CONSUMED")
+    verification = sandbox_preflight(mount, source_sha)
+    if not sandbox_verified(verification, mount, source_sha):
+        raise SandboxPreflightError(verification)
     control = ControlFile(path, {"identity": identity,
                           "source_sha": source_sha, "host_reserve_bytes": host_reserve, "started_at": time.time(), **extra})
     files, total, enospc = [], 0, False
     started = time.monotonic()
     result = {"status": "FAILED", "identity": identity, "aggregate_enospc": False,
-              "sandbox_denial": False, "files_written": 0, "observed_capacity_bytes": 0, **extra}
+              "sandbox_denial": True, "sandbox_returncode": verification["returncode"],
+              "sandbox_verification": verification,
+              "files_written": 0, "observed_capacity_bytes": 0, **extra}
     try:
-        profile = sandbox_profile(mount)
-        # No outside file is created: attempt writing a random absent path in the
-        # existing backing directory. Success makes verification FAIL.
-        outside = mount.parent / (".af-denial-" + str(os.getpid()))
-        if outside.exists():
-            raise ValueError("PROBE_PATH_COLLISION")
-        import sys
-        inside = mount / ".af-sandbox-positive"
-        denied = subprocess.run(["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-c",
-                                "import sys;open(sys.argv[1],'x').close();open(sys.argv[2],'x').close()",
-                                str(inside), str(outside)], capture_output=True, timeout=10)
-        result["sandbox_denial"] = denied.returncode != 0 and inside.is_file() and not outside.exists()
-        result["sandbox_returncode"] = denied.returncode
-        control.put(2,{"stdout":redact(denied.stdout[:65536].decode(errors="replace"))})
-        control.put(3,{"stderr":redact(denied.stderr[:65536].decode(errors="replace"))})
-        if inside.exists():
-            inside.unlink()
-        if outside.exists():
-            outside.unlink()  # only this probe's fresh zero-byte negative-test file
+        control.put(2, {"stdout": verification["stdout"]})
+        control.put(3, {"stderr": verification["stderr"]})
         # At least two files: no single-file RLIMIT can impersonate aggregate cap.
         # Native APFS inventory is a subprocess per write. A 1 MiB ceiling
         # can spend the 600s window polling before a multi-GiB quota fills.
