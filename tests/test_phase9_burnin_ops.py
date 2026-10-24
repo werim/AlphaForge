@@ -337,7 +337,8 @@ def _exercise_burnin_preflight_dotenv(monkeypatch, tmp_path, capsys, *, process_
 
     observed = {"audit": [], "provider": [], "safety": []}
 
-    def audit():
+    def audit(*, root):
+        assert root == Path(ops.__file__).resolve().parents[2]
         observed["audit"].append((os.environ.get("BINANCE_API_KEY"), os.environ.get("BINANCE_API_SECRET")))
         return {
             "status": "PASS", "errors": [], "warnings": [],
@@ -2439,3 +2440,36 @@ def test_real_popen_exit_still_fails_immediately_despite_complete_runtime_eviden
     assert out["worker_exit_code"] == 17
     assert out["checks"]["worker_not_exited"] is False
     assert out["worker_ownership_source"] is None
+
+
+@pytest.mark.parametrize("foreign_template", [False, True])
+def test_preflight_audits_imported_source_from_external_working_directory(monkeypatch, tmp_path, foreign_template):
+    """Quota-local worker cwd must not become source/config-audit authority."""
+    from alphaforge import burnin_ops as ops
+    from alphaforge.config import load_config_from_env
+    from alphaforge.config_audit import audit_config as canonical_audit
+    from alphaforge import storage_policy
+
+    cfg = load_config_from_env(env={})
+    monkeypatch.chdir(tmp_path)
+    if foreign_template:
+        (tmp_path / ".env.example").write_text("FOREIGN=1\nFOREIGN=2\n")
+    monkeypatch.setattr(ops, "load_config_from_env", lambda: cfg)
+    monkeypatch.setattr(storage_policy, "disk_budget", lambda *a, **kw: {"status": "PASS"})
+    observed = []
+
+    class AuditBoundaryReached(Exception):
+        pass
+
+    def inspect_audit(**kwargs):
+        report = canonical_audit(**kwargs)
+        observed.append(kwargs.get("root"))
+        assert report["status"] != "FAIL", report["errors"]
+        assert not report["duplicate_template_variables"]
+        raise AuditBoundaryReached
+
+    monkeypatch.setattr(ops, "audit_config", inspect_audit)
+    with pytest.raises(AuditBoundaryReached):
+        ops.preflight(str(tmp_path / "absent.db"), "source-audit-regression", [], ["1h"])
+    assert observed == [Path(ops.__file__).resolve().parents[2]]
+    assert not (tmp_path / "absent.db").exists()

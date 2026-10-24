@@ -549,7 +549,9 @@ def _preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequ
                     "checks": checks, "blockers": blockers,
                     "evidence_locations": {"unavailable_reason": capacity["status"]}}
 
-    env_audit = audit_config()
+    # Runtime workers may run from a quota-local directory outside the checkout.
+    # Audit the imported source contracts, preserving the worker cwd for writes.
+    env_audit = audit_config(root=Path(__file__).resolve().parents[2])
     dotenv = dotenv_status()
     add("release_id_reserved_namespace_free", "PASS" if release_validation["valid"] else "FAIL", release_validation)
     add("env_contract_valid", "PASS" if env_audit["status"] != "FAIL" else "FAIL", {"errors": env_audit["errors"], "warnings": env_audit["warnings"]})
