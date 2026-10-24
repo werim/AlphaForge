@@ -126,10 +126,14 @@ efficiency record, not a second measurement system. This workflow standardizatio
 does not consume a baseline task or add VWU; preserve the existing task numbering,
 predeclared outcomes and incomplete evidence. Apply the cost/N/A rules below.
 
-Current task/operator restrictions take precedence over autonomous defaults:
-do not poll/rerun CI automatically, interrupt protected PAPER/SOAK, or merge
-without explicit authorization when restricted. Pending CI stays pending until
-the user's green/fail result; then validate the exact evidence SHA once.
+Autonomous exact-SHA CI inspection, failure remediation, review and permitted
+merge are the default; do not hand routine CI monitoring back to the user.
+Use a bounded watch or status checks at meaningful intervals, not busy polling.
+An explicit current task/operator restriction on CI inspection or reruns,
+protected PAPER/SOAK, or merge takes precedence. When the current task explicitly
+requires waiting for the user's CI green/fail result, wait and then validate the
+exact evidence SHA once. Pending or unavailable CI remains pending evidence.
+Do not dispatch or rerun CI merely to measure efficiency.
 
 ---
 
@@ -717,4 +721,4 @@ Use this compact task record (N/A with coverage note when unavailable):
 
 After task 3/3, report aggregate verified VWU, model usage, CI cost, comparable per-task efficiency, the three largest evidenced avoidable cost sources and optimizations with expected benefit, risk and verification method. Do not sum incompatible units or claim a model winner from three heterogeneous tasks. Retain the model; recommend a controlled alternative test only after comparable tasks show at least 20% lower measured TNC without worse CI success, safety or production quality. Never change model automatically.
 
-Respect the current SOAK and merge restrictions. Wait for the user's CI green/fail result; do not automatically poll CI. Pending CI is pending evidence, and the task record remains open until verification is available.
+Respect explicit current task CI, protected PAPER/SOAK and merge restrictions. Otherwise follow the autonomous exact-SHA CI/review/fix/merge loop above without routine user confirmation. Waiting for a user-supplied CI result applies only when the current task explicitly requires it. Pending CI remains pending evidence, and the task record stays open until verification is available.
