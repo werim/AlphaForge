@@ -804,7 +804,7 @@ def test_foreground_launch_invokes_runner(monkeypatch, tmp_path):
             return {"status": "STOPPED"}
 
     monkeypatch.setattr(ops, "BurnInCampaignRunner", FakeRunner)
-    out = launch_campaign(db, "rel", 0, ["BTCUSDT"], ["1h"], detach=False)
+    out = launch_campaign(db, "rel", 1, ["BTCUSDT"], ["1h"], detach=False)
     assert out["status"] == "FOREGROUND_STOPPED"
     assert FakeRunner.called
 
@@ -869,7 +869,7 @@ def test_worker_spawn_failure_terminalizes_created_continuation(monkeypatch, tmp
     db = str(tmp_path / "spawn.db")
     monkeypatch.setattr(ops, "preflight", lambda *a, **k: {"status": "PASS", "evidence_locations": {}})
     monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: (_ for _ in ()).throw(OSError("spawn failed")))
-    out = launch_campaign(db, "rel", 0, ["BTCUSDT"], ["1h"], detach=True)
+    out = launch_campaign(db, "rel", 1, ["BTCUSDT"], ["1h"], detach=True)
     conn = sqlite3.connect(db); row = conn.execute("SELECT r.status, cr.status FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id").fetchone(); conn.close()
     assert out["reason"] == "PHASE9_WORKER_SPAWN_FAILED" and row == ("FAILED", "FAILED")
 

@@ -7,12 +7,16 @@ A completed synthetic fixture is not a future workload upper bound. Both
 synthetic and recorded replay results always say `admission_eligible=false` and
 `recommended_growth_budget_bytes_per_sec=null`.
 
-The current canonical contract (`StoragePolicy`, `full_replay_duration_budget`,
-`disk_budget`) accepts a positive **operator** rate, not a verified replay
-certificate. It does not establish when synthetic evidence bounds future market
-load. Consequently this implementation does not invent that authority or solve
-an unmeasured budget by writing a favorable number. Representative empirical
-coverage and an independently justified conservative bound remain necessary.
+The canonical duration/reserve arithmetic still consumes a positive operator
+rate. Normal launch now additionally requires the reviewed real-runtime evidence
+contract in `storage_measurement`; this offline replay cannot supply that
+certificate. Representative real workload and an independently justified scoped
+conservative budget remain necessary.
+
+The [storage admission and first-measurement contract](storage_admission_contract.md)
+defines the implemented separate real-runtime entrypoint and APFS quota backend.
+Its mandatory physical proof has not been obtained in this task; the replay
+command below cannot stand in for that measurement or admission evidence.
 
 ## Workload and production semantics
 
@@ -89,7 +93,10 @@ peaks and bounded recent reports.
 A fresh real parent directory, atomic `0600 O_EXCL` attempt reservation and fresh
 `0700` child output directory isolate the laboratory. The reservation is fsynced
 **before** DB/archive/output preparation. It is never deleted on error/timeout.
-A second worker reservation prevents direct worker re-entry. The worker receives
+A second worker reservation prevents direct worker re-entry. A child-side parent
+liveness watchdog exits an orphaned worker after supervisor loss and attempts a
+durable SUPERVISOR_LOST note; a missing parent result stays INCOMPLETE. This is
+not an OS-enforced death signal, physical quota or hard real-time deadline. The worker receives
 no credentials/process config, only the selected plan and minimal environment;
 its DB paths are hardcoded below its output. Outgoing socket connects are refused
 at the application boundary. This is not an OS network-policy attestation.
