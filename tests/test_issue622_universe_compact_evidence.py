@@ -87,6 +87,13 @@ def test_legacy_full_cycle_remains_readable_and_retryable(tmp_path):
             # production data is never rewritten in place.
             persist_universe_selection(conn, selection)
             conn.execute(text("DROP TRIGGER trg_universe_selection_cycles_no_update"))
+            conn.execute(text("DROP TRIGGER trg_universe_selection_candidates_no_update"))
+            for index, candidate in enumerate(selection.candidates):
+                conn.execute(text("UPDATE universe_selection_candidates SET observed_inputs_json=:o, "
+                                  "evidence_availability_json=:a WHERE cycle_id=:c AND candidate_index=:i"),
+                             {"o": json.dumps(candidate.observed_inputs, sort_keys=True, separators=(",", ":")),
+                              "a": json.dumps(candidate.evidence_availability, sort_keys=True),
+                              "c": selection.cycle_id, "i": index})
             conn.execute(text(
                 "UPDATE universe_selection_cycles SET payload_json=:payload "
                 "WHERE cycle_id=:cycle"

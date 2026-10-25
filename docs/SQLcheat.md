@@ -412,6 +412,27 @@ sqlite3 -readonly -header -column "$DB" "SELECT c.campaign_id,c.release_id,c.cam
 
 The following is the current column inventory. `id` is the ordinary row primary key unless another key is stated. Columns ending in `_json`, `payload`, `execution_ctx`, `evidence_json`, or `diagnostics_json` are serialized JSON/text and should be inspected with `json_valid`/`json_extract` before assuming a shape.
 
+Universe evidence storage is versioned independently of strategy/evidence hashes.
+For `candidate-batch-v3`, `universe_selection_cycles.payload_json` contains one
+SHA256-checked, size-bounded lossless candidate-detail batch; candidate-row
+`observed_inputs_json` and `evidence_availability_json` contain cycle-local
+`_cycle_detail` references. Ranking, eligibility, reasons, selected flags and row
+count remain indexed SQL projections. Use
+`alphaforge.universe_evidence.load_persisted_universe_selection(conn, cycle_id)`
+to reconstruct and verify the complete original selection. Do not interpret a
+reference JSON object as missing observations or evidence. Full v1 and
+`candidate-rows-v2` records remain readable and are never rewritten. Older
+binaries cannot consume v3; rollback requires a compatible reader and must not
+resume a v3 database with an older reader. No live-database migration, evidence
+sampling, strategy hash change, or retention/threshold change is implied.
+The detail frame declares its decoded length and SHA256; decoding is bounded to
+64MiB per cycle and rejects truncated/trailing streams, mismatched counts,
+invalid references, unknown codecs and digest failures. Oversized new frames
+fail before insertion rather than silently changing representation or evidence.
+An existing legacy record may still be verified idempotently without creating
+any new frame or rewriting its historical bytes.
+
+
 ### 6.1 Core decision, execution, and evidence tables
 
 | Table | Class / purpose | Primary/logical keys and important joins | Columns (current observed order) | Code |
