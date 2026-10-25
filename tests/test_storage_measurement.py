@@ -660,3 +660,91 @@ def test_new_probe_does_not_hide_unknown_or_incomplete_evidence(tmp_path, monkey
     with pytest.raises(ValueError):
         v.probe(tmp_path, 10_000_000, 'b'*40, 100, attempt_id='not-started')
     assert not (tmp_path / '.af-capacity-proof.not-started.control').exists()
+
+
+@pytest.mark.parametrize('publish_fails', [False, True])
+def test_worker_exception_persists_redacted_failed_result_without_retry(tmp_path, monkeypatch, cfg, publish_fails):
+    root = tmp_path / 'experiment'
+    root.mkdir()
+    plan = {'backend': {'mount': str(tmp_path)}}
+    path = root / 'plan.json'
+    path.write_text(json.dumps(plan))
+    control = v.ControlFile(tmp_path / '.af-real-calibration.control',
+                            {'plan_hash': canonical_hash(plan), 'supervisor_pid': 123})
+    control.close()
+    m.exclusive_json(root / 'guardian.json',
+                     {'supervisor_pid': 123, 'guardian_pid': os.getppid()})
+    monkeypatch.setattr(m, 'validate_plan', lambda p: cfg)
+    monkeypatch.setenv('BINANCE_API_SECRET', 'fixture-sensitive-key')
+    async def failed(plan, control, guard):
+        guard.set()
+        raise RuntimeError('STORAGE_PRESSURE_RECOVERY_REQUIRED fixture-sensitive-key ' + 'x' * 1000)
+    monkeypatch.setattr(m, 'real_worker', failed)
+    if publish_fails:
+        original = m.exclusive_json
+        def full(path, value):
+            if path.name == 'worker-result.json': raise OSError(errno.ENOSPC, 'fixture full')
+            return original(path, value)
+        monkeypatch.setattr(m, 'exclusive_json', full)
+        with pytest.raises(OSError, match='fixture full'):
+            m.main(['_worker', '--plan', str(path)])
+        assert not (root / 'worker-result.json').exists()
+        with pytest.raises(FileExistsError):
+            m.main(['_worker', '--plan', str(path)])
+        return
+    with pytest.raises(RuntimeError, match='STORAGE_PRESSURE_RECOVERY_REQUIRED'):
+        m.main(['_worker', '--plan', str(path)])
+    result = json.loads((root / 'worker-result.json').read_text())
+    assert result['status'] == 'FAILED' and result['complete'] is False
+    assert result['admission_eligible'] is False and result['plan_hash'] == canonical_hash(plan)
+    assert result['reason'].startswith('RuntimeError:STORAGE_PRESSURE_RECOVERY_REQUIRED')
+    assert len(result['reason']) <= 512 and 'fixture-sensitive-key' not in result['reason']
+    before = (root / 'worker-result.json').read_bytes()
+    with pytest.raises(FileExistsError):
+        m.main(['_worker', '--plan', str(path)])
+    assert (root / 'worker-result.json').read_bytes() == before
+
+
+@pytest.mark.parametrize('mutation', ['none', 'wrong_plan', 'complete', 'missing_reason', 'missing',
+                                     'zero_exit', 'wrong_version', 'admitted', 'secret'])
+def test_supervisor_preserves_only_scoped_failed_worker_cause(tmp_path, monkeypatch, cfg, mutation):
+    path = run_fixture_plan(tmp_path, monkeypatch, cfg)
+    plan = json.loads(path.read_text())
+    plan['wall_limit_seconds'] = 5  # allow bounded child startup on slow CI hosts
+    path.write_text(json.dumps(plan))
+    monkeypatch.setattr(m, 'source_identity', lambda: plan['source'])
+    original = subprocess.Popen
+    failure = {'version': m.VERSION, 'kind': 'REAL_RUNTIME', 'status': 'FAILED',
+               'complete': False, 'admission_eligible': False,
+               'plan_hash': canonical_hash(plan), 'reason': 'RuntimeError:STORAGE_PRESSURE_RECOVERY_REQUIRED'}
+    if mutation == 'wrong_plan': failure['plan_hash'] = 'wrong'
+    if mutation == 'complete': failure['complete'] = True
+    if mutation == 'missing_reason': failure.pop('reason')
+    if mutation == 'wrong_version': failure['version'] = 'wrong'
+    if mutation == 'admitted': failure['admission_eligible'] = True
+    if mutation == 'secret':
+        monkeypatch.setenv('BINANCE_API_SECRET', 'fixture-sensitive-key')
+        failure['reason'] += ' fixture-sensitive-key'
+    def child(command, **kwargs):
+        if command[0] != '/usr/bin/sandbox-exec': return original(command, **kwargs)
+        script = 'import pathlib,sys; '
+        if mutation != 'missing':
+            script += 'pathlib.Path("worker-result.json").write_text(' + repr(json.dumps(failure)) + '); '
+        script += 'sys.exit(' + ('0' if mutation == 'zero_exit' else '1') + ')'
+        return original([sys.executable, '-c', script], **kwargs)
+    monkeypatch.setattr(m.subprocess, 'Popen', child)
+    result = m.run(path, m.file_hash(path))
+    assert result['status'] == 'FAILED' and result['admission_eligible'] is False
+    assert result['returncode'] == (0 if mutation == 'zero_exit' else 1)
+    if mutation == 'none':
+        assert result['worker'] == failure
+        assert 'STORAGE_PRESSURE_RECOVERY_REQUIRED' in result['reason']
+    elif mutation == 'secret':
+        assert 'STORAGE_PRESSURE_RECOVERY_REQUIRED' in result['reason']
+        assert 'fixture-sensitive-key' not in json.dumps(result)
+    else:
+        assert 'worker' not in result
+        assert 'STORAGE_PRESSURE_RECOVERY_REQUIRED' not in result['reason']
+    control = v.ControlFile(tmp_path / '.af-real-calibration.control')
+    try: assert control.get(1) == result
+    finally: control.close()

@@ -180,3 +180,10 @@ unknown resource state, time/log/file/aggregate/host-reserve violation, canonica
 storage blocking, malformed candles/lifecycle evidence or integrity/FK failure.
 Keep the claim, logs, input, samples, maintenance and result. Do not resume, clear
 recovery, delete the directory automatically or alter policy to turn it green.
+
+An ordinary worker exception writes a bounded, redacted, exact-plan FAILED
+record before re-raising, preserving its traceback and nonzero exit. The
+supervisor retains that cause only when the failure record's scope and shape
+validate; missing, malformed or cross-plan results remain failures. This does
+not make failed coverage measurable or permit a retry. If the failure record
+cannot be durably published, retain the consumed claim and bounded raw logs.

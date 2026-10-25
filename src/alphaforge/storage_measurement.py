@@ -456,8 +456,18 @@ def run(plan_path: Path, digest: str):
         result['returncode'] = proc.wait(timeout=5)
         validate_plan(plan)  # dependency/backend/environment drift during the window also fails
         worker = read_json(root / 'worker-result.json')
-        if (proc.returncode != 0 or worker.get('plan_hash') != canonical_hash(plan)
+        if (worker.get('plan_hash') != canonical_hash(plan)
                 or source_identity() != plan['source']):
+            raise ValueError('WORKER_OR_SOURCE_EVIDENCE_FAILED')
+        if proc.returncode != 0 or worker.get('status') == 'FAILED':
+            if (proc.returncode != 0 and worker.get('version') == VERSION and worker.get('kind') == 'REAL_RUNTIME'
+                    and worker.get('status') == 'FAILED' and worker.get('complete') is False
+                    and worker.get('admission_eligible') is False
+                    and isinstance(worker.get('reason'), str) and 0 < len(worker['reason']) <= 512):
+                # Preserve attributable failure evidence without making it measurable.
+                worker['reason'] = redact(worker['reason'], secrets)
+                result['worker'] = worker
+                raise RuntimeError('REAL_WORKER_FAILED:' + worker['reason'])
             raise ValueError('WORKER_OR_SOURCE_EVIDENCE_FAILED')
         result.update(artifacts=artifact_manifest(root), worker=worker, status='MEASURED' if worker.get('complete') is True else 'INCOMPLETE')
     except Exception as exc:
@@ -624,7 +634,15 @@ def main(argv=None):
             raise ValueError('WORKER_GUARDIAN_SCOPE')
         exclusive_json(args.plan.parent/'worker.attempt',{'plan_hash':canonical_hash(plan),'pid':os.getpid()})
         guard=parent_watchdog(os.getppid(),args.plan.parent)
-        result=asyncio.run(real_worker(plan,control_path,guard))
+        try:
+            result=asyncio.run(real_worker(plan,control_path,guard))
+        except Exception as exc:
+            secrets = tuple(v for k, v in os.environ.items() if any(w in k.upper() for w in ('SECRET','TOKEN','KEY','PASSWORD')) and len(v) >= 4)
+            exclusive_json(args.plan.parent/'worker-result.json', {
+                'version': VERSION, 'kind': 'REAL_RUNTIME', 'status': 'FAILED',
+                'complete': False, 'admission_eligible': False, 'plan_hash': canonical_hash(plan),
+                'reason': (type(exc).__name__ + ':' + redact(str(exc), secrets))[:512]})
+            raise  # retain the original traceback and nonzero process exit
         exclusive_json(args.plan.parent/'worker-result.json',result)
         return 0
     print(json.dumps({'command':args.cmd,'status':result.get('status','PREPARED'),'admission_eligible':result.get('admission_eligible',False),'hash':canonical_hash(result)},sort_keys=True))
