@@ -178,6 +178,13 @@ requires observed eligible archival. Unknown/missing surface is insufficient.
 Shadow eligibility and candidate cardinality are reported; observed coverage does
 not establish all possible future payload distributions/concurrency.
 
+The shadow proposal table is created lazily by its canonical writer. If absent,
+read-only assessment retains other measured surfaces and reports
+`shadow_evidence_status=UNAVAILABLE`, with null action/eligibility counts and an
+explicit incomplete-evidence gap. It never creates the table or calls absence
+zero. An existing empty table is AVAILABLE with empty counts and still fails
+required action coverage; malformed existing schemas remain errors.
+
 A structurally complete run is MEASURED and still admission=false. **Review is
 separate**: an explicit operator rate and scoped representation/bound justification
 are required. Rate below observed accumulated positive growth or unable to fit

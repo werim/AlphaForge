@@ -164,8 +164,9 @@ def prepare(env: dict, mount: Path, cap: int, proof_hash: str):
 
 
 def scoped_coverage(db: Path, campaign_id: str, run_id: str) -> dict:
-    """SELECT only; unknown tables/columns are evidence errors, never zero."""
+    """SELECT only; absent lazy shadow evidence is unavailable, never zero."""
     from alphaforge.storage_policy import readonly
+    from alphaforge.position_management_shadow import shadow_table_exists
     with readonly(db) as c:
         def count(table, extra="", params=()):
             return c.execute(f"SELECT COUNT(*) FROM {table} WHERE campaign_id=? AND burnin_run_id=? {extra}",
@@ -177,8 +178,11 @@ def scoped_coverage(db: Path, campaign_id: str, run_id: str) -> dict:
         from datetime import datetime
         stamps = [datetime.fromisoformat(r[0].replace('Z', '+00:00')).timestamp() for r in heartbeats if r[2]=="OPERATING"]
         cycle_counts = [r[0] for r in c.execute("SELECT COUNT(*) FROM universe_selection_candidates u JOIN burnin_universe_selection_links l ON l.cycle_id=u.cycle_id WHERE l.campaign_id=? AND l.burnin_run_id=? GROUP BY l.cycle_id", (campaign_id, run_id))]
-        eligibility = dict(c.execute("SELECT eligibility_status,COUNT(*) FROM burnin_position_management_shadow_proposals WHERE campaign_id=? AND burnin_run_id=? GROUP BY eligibility_status",(campaign_id,run_id)))
-        actions = dict(c.execute("SELECT proposed_action,COUNT(*) FROM burnin_position_management_shadow_proposals WHERE campaign_id=? AND burnin_run_id=? GROUP BY proposed_action", (campaign_id, run_id)))
+        shadow_available = shadow_table_exists(c)
+        eligibility = actions = None
+        if shadow_available:
+            eligibility = dict(c.execute("SELECT eligibility_status,COUNT(*) FROM burnin_position_management_shadow_proposals WHERE campaign_id=? AND burnin_run_id=? GROUP BY eligibility_status",(campaign_id,run_id)))
+            actions = dict(c.execute("SELECT proposed_action,COUNT(*) FROM burnin_position_management_shadow_proposals WHERE campaign_id=? AND burnin_run_id=? GROUP BY proposed_action", (campaign_id, run_id)))
         failures = c.execute("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND (event_type LIKE '%FAILED%' OR event_type LIKE '%FAILURE%' OR event_type LIKE '%DEFERRED%')", (campaign_id,)).fetchone()[0]
         resolver = c.execute("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND event_type='RESOLVER_BATCH'", (campaign_id,)).fetchone()[0]
         reconciliations = c.execute("SELECT COUNT(*) FROM exchange_reconciliation_events WHERE instance_id=? AND mode='PAPER' AND status='CLEAN' AND exchange_read_only_status='AVAILABLE'", (instances[0],)).fetchone()[0]
@@ -190,6 +194,7 @@ def scoped_coverage(db: Path, campaign_id: str, run_id: str) -> dict:
                 "candidate_rows": sum(cycle_counts), "observations": c.execute("SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=? AND o.burnin_run_id=?", (campaign_id, run_id)).fetchone()[0],
                 "rejects": count("burnin_pending_reject_labels"), "positions": count("burnin_pending_position_outcomes"),
                 "closed_positions": count("burnin_pending_position_outcomes", "AND status='CLOSED' AND evidence_complete=1"),
+                "shadow_evidence_status": "AVAILABLE" if shadow_available else "UNAVAILABLE",
                 "shadow_actions": actions, "shadow_eligibility": eligibility, "snapshots": count("runtime_state_snapshots"),
                 "resolver_batches": resolver, "clean_reconciliations": reconciliations, "failures": failures,
                 "integrity": c.execute('PRAGMA integrity_check').fetchone()[0],
@@ -213,7 +218,10 @@ def coverage_gaps(c: dict, runtime, maintenance_count: int):
         gaps.append("HEARTBEAT_GAP")
     if c.get("heartbeat_sources") != ["EXCHANGE_PUBLIC_MARKET_DATA"]:
         gaps.append("REAL_PROVIDER_SOURCE_MISSING")
-    if not required_actions <= c.get("shadow_actions", {}).keys():
+    if c.get("shadow_evidence_status") != "AVAILABLE":
+        gaps.append("SHADOW_EVIDENCE_UNAVAILABLE")
+    actions = c.get("shadow_actions")
+    if not isinstance(actions, dict) or not required_actions <= actions.keys():
         gaps.append("SHADOW_ACTION_COVERAGE_INCOMPLETE")
     if c.get("unhealthy_heartbeats") != 0:
         gaps.append("UNHEALTHY_RUNTIME_HEARTBEAT")

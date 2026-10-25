@@ -28,7 +28,7 @@ def good_coverage():
     return dict(wall_heartbeat_span=21600,heartbeat_max_gap=1,heartbeat_sources=['EXCHANGE_PUBLIC_MARKET_DATA'],
         scanner_cycles=21600,max_candidates_per_cycle=5,candidate_rows=100,observations=5,rejects=1,
         positions=1,closed_positions=1,snapshots=10,resolver_batches=2,clean_reconciliations=2,
-        failures=0,unhealthy_heartbeats=0,controller_checkpoints=1,integrity='ok',foreign_key_violations=0,journal_mode='wal',shadow_actions=dict.fromkeys(SHADOW_ACTIONS,1))
+        failures=0,unhealthy_heartbeats=0,controller_checkpoints=1,integrity='ok',foreign_key_violations=0,journal_mode='wal',shadow_evidence_status='AVAILABLE',shadow_actions=dict.fromkeys(SHADOW_ACTIONS,1))
 
 
 def test_atomic_control_race_and_torn_completion(tmp_path):
@@ -173,7 +173,7 @@ def measurement_fixture(tmp_path,monkeypatch,cfg,env=None):
     return control_path,result
 
 
-@pytest.mark.parametrize('mutation',['failed','short','synthetic','stale','tampered','wrong_plan'])
+@pytest.mark.parametrize('mutation',['failed','short','synthetic','stale','tampered','wrong_plan','unavailable_shadow'])
 def test_review_rejects_failed_short_synthetic_stale_or_changed_measurements(tmp_path,monkeypatch,cfg,mutation):
     path,result=measurement_fixture(tmp_path,monkeypatch,cfg)
     if mutation=='failed':result['status']='FAILED'
@@ -182,6 +182,7 @@ def test_review_rejects_failed_short_synthetic_stale_or_changed_measurements(tmp
     if mutation=='stale':result['completed_at']=1
     if mutation=='tampered':(tmp_path/'experiment/evidence').write_text('modified')
     if mutation=='wrong_plan':result['worker']['plan_hash']='wrong'
+    if mutation=='unavailable_shadow':result['worker']['coverage'].pop('shadow_evidence_status')
     c=v.ControlFile(path);c.put(1,result);c.close()
     with pytest.raises(ValueError):m.review(path,10,'Fixture operator scope justification only; not a measured rate.')
 
@@ -297,6 +298,110 @@ def test_coverage_reads_real_canonical_fixture_tables_without_assuming_unknown_z
     assert coverage['candidate_rows']>0 and coverage['shadow_actions']
     assert coverage['clean_reconciliations']==0
     assert m.coverage_gaps(coverage,m.configuration(env)[0].runtime,1)  # offline != real evidence
+
+
+def coverage_database(tmp_path):
+    from alphaforge import storage_calibration as cal
+    import sqlite3
+    env = {'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED': 'true',
+           'ALPHAFORGE_REJECT_FORWARD_HORIZON_BARS': '1', 'ALPHAFORGE_SCAN_INTERVAL_SEC': '60'}
+    cal.replay(cal.example(env, 'a' * 40, duration=210, candidate_count=1), tmp_path,
+               {'sha': 'a' * 40, 'dirty': False})
+    db = tmp_path / 'laboratory.db'
+    with sqlite3.connect(db) as c:
+        cid, run = c.execute('SELECT campaign_id,active_run_id FROM burnin_campaigns').fetchone()
+    return db, cid, run
+
+
+@pytest.mark.parametrize('state', ['absent', 'empty', 'other_scope'])
+def test_shadow_coverage_distinguishes_unavailable_from_known_empty(tmp_path, state, cfg):
+    import sqlite3
+    db, cid, run = coverage_database(tmp_path)
+    baseline = m.scoped_coverage(db, cid, run)
+    with sqlite3.connect(db) as c:
+        if state == 'absent':
+            c.execute('DROP TABLE burnin_position_management_shadow_proposals')
+        elif state == 'empty':
+            c.execute('DELETE FROM burnin_position_management_shadow_proposals')
+        else:
+            c.execute("UPDATE burnin_position_management_shadow_proposals SET campaign_id='other'")
+    observed = m.scoped_coverage(db, cid, run)
+    assert observed['positions'] == baseline['positions'] == 1
+    assert observed['closed_positions'] == 1 and observed['candidate_rows'] == baseline['candidate_rows']
+    assert observed['shadow_evidence_status'] == ('UNAVAILABLE' if state == 'absent' else 'AVAILABLE')
+    assert observed['shadow_actions'] == (None if state == 'absent' else {})
+    assert observed['shadow_eligibility'] == (None if state == 'absent' else {})
+    gaps = m.coverage_gaps(observed, cfg.runtime, 1)
+    assert 'SHADOW_ACTION_COVERAGE_INCOMPLETE' in gaps
+    assert ('SHADOW_EVIDENCE_UNAVAILABLE' in gaps) == (state == 'absent')
+    with sqlite3.connect(db) as c:
+        exists = c.execute("SELECT 1 FROM sqlite_master WHERE name='burnin_position_management_shadow_proposals'").fetchone()
+    assert bool(exists) == (state != 'absent')  # Reader never bootstraps missing evidence.
+
+
+def test_shadow_coverage_does_not_hide_malformed_existing_schema(tmp_path):
+    import sqlite3
+    db, cid, run = coverage_database(tmp_path)
+    with sqlite3.connect(db) as c:
+        c.execute('DROP TABLE burnin_position_management_shadow_proposals')
+        c.execute('CREATE TABLE burnin_position_management_shadow_proposals(campaign_id TEXT,burnin_run_id TEXT)')
+    with pytest.raises(sqlite3.OperationalError, match='no such column'):
+        m.scoped_coverage(db, cid, run)
+
+
+@pytest.mark.parametrize('status', [None, 'UNAVAILABLE', 'UNKNOWN'])
+def test_complete_action_keys_do_not_promote_unavailable_shadow_evidence(cfg, status):
+    coverage = good_coverage()
+    if status is None:
+        coverage.pop('shadow_evidence_status')
+    else:
+        coverage['shadow_evidence_status'] = status
+    assert 'SHADOW_EVIDENCE_UNAVAILABLE' in m.coverage_gaps(coverage, cfg.runtime, 1)
+
+
+@pytest.mark.parametrize('actions', [None, [], 'unavailable'])
+def test_invalid_shadow_action_shape_is_incomplete(cfg, actions):
+    coverage = good_coverage()
+    coverage['shadow_actions'] = actions
+    assert 'SHADOW_ACTION_COVERAGE_INCOMPLETE' in m.coverage_gaps(coverage, cfg.runtime, 1)
+
+
+def test_real_worker_preserves_partial_coverage_when_shadow_table_was_never_created(tmp_path, monkeypatch, cfg):
+    import asyncio
+    import sqlite3
+    from alphaforge import burnin_ops as ops, burnin_campaign as campaigns
+    from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
+    from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+    root = tmp_path / 'experiment'
+    root.mkdir()
+    db, _, _ = coverage_database(root)
+    with sqlite3.connect(db) as c:
+        c.execute('DROP TABLE burnin_position_management_shadow_proposals')
+    plan = {'backend': {'mount': str(tmp_path)}, 'shutdown_grace_seconds': 1}
+    monkeypatch.setattr(m, 'validate_plan', lambda p: cfg)
+    monkeypatch.setattr(ops, '_preflight', lambda *a, **kw: {'status': 'CALIBRATION_READY'})
+    monkeypatch.setattr(ops, '_git_branch', lambda: 'dev')
+    monkeypatch.setattr(v, 'usage', lambda p: {'quota_used_bytes': 0, 'host_container_free_bytes': 9999999999})
+    async def finish_early(runner):
+        with runner.engine.connect() as c:
+            run = c.execute(text('SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:cid'),
+                            {'cid': runner.campaign_id}).scalar_one()
+        save_runtime_state_snapshot(runner.engine, RuntimeStateSnapshot(
+            mode='PAPER', requested_mode='PAPER', actual_mode='PAPER', runtime_status='OPERATING',
+            instance_id='synthetic-661', campaign_id=runner.campaign_id, burnin_run_id=run))
+        save_runtime_heartbeat(runner.engine, runtime_instance_id='synthetic-661', execution_mode='PAPER',
+                               scanner_source='SYNTHETIC', runtime_state='OPERATING')
+        return {'status': 'synthetic early stop'}
+    monkeypatch.setattr(campaigns.BurnInCampaignRunner, 'run_foreground', finish_early)
+    guard = SimpleNamespace(is_set=lambda: False, set=lambda: None,
+                            worker_thread=SimpleNamespace(is_alive=lambda: True))
+    result = asyncio.run(m.real_worker(plan, tmp_path / 'control', guard))
+    assert result['complete'] is False and result['admission_eligible'] is False
+    assert result['coverage']['runtime_instance_id'] == 'synthetic-661'
+    assert result['coverage']['shadow_evidence_status'] == 'UNAVAILABLE'
+    assert result['coverage']['shadow_actions'] is None
+    assert {'SHADOW_EVIDENCE_UNAVAILABLE', 'SHADOW_ACTION_COVERAGE_INCOMPLETE',
+            'REAL_WALL_WINDOW_INCOMPLETE', 'REAL_PROVIDER_SOURCE_MISSING'} <= set(result['gaps'])
 
 
 def run_fixture_plan(tmp_path,monkeypatch,cfg):
