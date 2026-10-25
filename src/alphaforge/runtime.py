@@ -68,6 +68,7 @@ from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exch
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
+from alphaforge.readonly_snapshot_reader import ReadonlySnapshotReader
 from alphaforge.symbol_selector import (
     SymbolSelectionResult,
     UniverseConstraints,
@@ -396,6 +397,7 @@ class RuntimeOrchestrator:
     _storage_report: dict[str, Any] = field(default_factory=dict, init=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
+    _reconciliation_reader: ReadonlySnapshotReader = field(default_factory=ReadonlySnapshotReader, init=False)
     _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
     _shadow_worker_task: asyncio.Task[Any] | None = field(default=None, init=False)
     _agent_trace_repository: AgentTraceRepository | None = field(default=None, init=False)
@@ -1172,6 +1174,16 @@ class RuntimeOrchestrator:
         return self._storage_pressure
 
     async def start(self) -> None:
+        try:
+            await self._start_runtime()
+        finally:
+            # Startup reconciliation can time out before background tasks exist.
+            # Its transport still requires bounded drain and durable recovery.
+            if self._reconciliation_reader.has_unaccepted_read and not self._reconciliation_reader.closed:
+                await self._shutdown_tasks()
+                self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
+
+    async def _start_runtime(self) -> None:
         await self._check_storage_pressure(startup=True)
         self._last_start_time = canonical_utc_timestamp()
         self._runtime_status = "STARTING"
@@ -1247,6 +1259,7 @@ class RuntimeOrchestrator:
         finally:
             self._runtime_status = "STOPPING"
             self._last_shutdown_time = canonical_utc_timestamp()
+            await self._shutdown_tasks()
             finalize_status = (
                 "FAILED" if self._fatal_task_exception
                 else "RECOVERY_REQUIRED" if self._recovery_required
@@ -1272,7 +1285,6 @@ class RuntimeOrchestrator:
                 logger.warning("shutdown_runtime_state_persistence_skipped reason=SQLITE_BUSY")
             if self._fatal_task_exception is None and not self._recovery_required:
                 self._release_execution_ownership()
-            await self._shutdown_tasks()
         if self._fatal_task_exception is not None:
             reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
             raise RuntimeError(reason) from self._fatal_task_exception
@@ -7095,7 +7107,9 @@ class RuntimeOrchestrator:
                     snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE", "blocking_reason": "EXCHANGE_RECONCILIATION_UNAVAILABLE"}
             else:
                 try:
-                    snapshot_source = dict(provider.snapshot())
+                    snapshot_source = await self._reconciliation_reader.read(provider)
+                    if provider is not (self.live_reconciliation_provider or self.exchange_snapshot_provider):
+                        raise RuntimeError("reconciliation_provider_changed_during_read")
                 except Exception as exc:
                     if self.config.execution_mode == ExecutionMode.LIVE:
                         raise
@@ -7240,9 +7254,24 @@ class RuntimeOrchestrator:
         for task in tasks:
             task.cancel()
         for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                # Drain all owners before the canonical FAILED snapshot is saved.
+                if self._fatal_task_exception is None:
+                    self._fatal_task_exception = exc
+                    self._fatal_task_name = task.get_name()
         self.metrics.agent_shadow_worker_count = 0
+        unaccepted_read = self._reconciliation_reader.has_unaccepted_read
+        quiescent = await self._reconciliation_reader.close(self.config.reconciliation_timeout_sec)
+        if unaccepted_read or not quiescent:
+            self._recovery_required = True
+            self._unknown_exchange_state = True
+            self._exchange_read_only_status = "UNAVAILABLE"
+            self._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
+            self._fail_closed_reason = "RECONCILIATION_READ_UNACCEPTED_AT_SHUTDOWN"
 
     def _register_signals(self) -> None:
         loop = asyncio.get_running_loop()
