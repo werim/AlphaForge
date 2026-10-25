@@ -201,6 +201,17 @@ config/policy identity; strategy/universe/cost hashes remain bound. A certificat
 cannot be relabelled for new source or another filesystem. This is bounded scoped
 evidence, not G6/G7 qualification, LIVE readiness or launch authorization.
 
+Economic config hashes alone do not identify the storage workload. A review
+certificate also requires `prospective_workload_hash`, computed from the typed
+nonsecret configuration with the reviewed prospective R. Scan, heartbeat,
+reconciliation, maintenance, provider and other effective settings must match
+exactly; missing or forged bindings fail closed. Secret fields are excluded by
+the canonical registry/secret-name contract; fresh primary DB routing is checked
+separately. The typed calibration permit likewise compares the complete profile, allowing only the canonical quota-local agent DB routing
+override used by its launcher. For ordinary admission, an enabled agent database
+must also be a distinct fresh SQLite file on the measured backend; an external,
+shared, existing or in-memory target cannot inherit the primary DB's proof.
+
 ## Operator dependency
 
 CLI stages are inspect -> separately authorized physical probe -> prepare ->

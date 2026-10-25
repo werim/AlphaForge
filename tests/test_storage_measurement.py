@@ -156,8 +156,9 @@ def test_elapsed_time_alone_and_missing_runtime_surfaces_are_not_complete(cfg,fi
     assert m.coverage_gaps(coverage,cfg.runtime,1)
 
 
-def measurement_fixture(tmp_path,monkeypatch,cfg):
-    env={'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED':'true'}
+def measurement_fixture(tmp_path,monkeypatch,cfg,env=None):
+    if env is None:
+        env={'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED':'true'}
     plan={'config_env':env,'backend':{'mount':str(tmp_path),'filesystem':v.filesystem_identity(tmp_path)},'source':{'sha':'a'*40}}
     worker={'kind':'REAL_RUNTIME','complete':True,'gaps':[],'plan_hash':canonical_hash(plan),
             'coverage':good_coverage(),'maintenance_count':2,'positive_db_wal_growth_bytes':1000}
@@ -748,3 +749,120 @@ def test_supervisor_preserves_only_scoped_failed_worker_cause(tmp_path, monkeypa
     control = v.ControlFile(tmp_path / '.af-real-calibration.control')
     try: assert control.get(1) == result
     finally: control.close()
+
+
+@pytest.mark.parametrize('setting,value', [
+    ('ALPHAFORGE_SCAN_INTERVAL_SEC', '0.1'),
+    ('ALPHAFORGE_HEARTBEAT_INTERVAL_SEC', '5'),
+    ('ALPHAFORGE_RECONCILIATION_INTERVAL_SEC', '1'),
+    ('ALPHAFORGE_STORAGE_CHECK_INTERVAL_SEC', '10'),
+])
+def test_admission_rejects_workload_drift_even_when_strategy_hashes_match(tmp_path, monkeypatch, cfg, setting, value):
+    path, _ = measurement_fixture(tmp_path, monkeypatch, cfg)
+    cert = m.review(path, 10, 'Fixture explicit operator scope only; not a measured future upper bound.')
+    certificate = tmp_path / 'review.json'
+    certificate.write_text(json.dumps(cert))
+    env = {'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED': 'true',
+           'ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC': '10'}
+    prospective, identity = m.hashes(env)
+    changed, changed_identity = m.hashes({**env, setting: value})
+    if setting == 'ALPHAFORGE_STORAGE_CHECK_INTERVAL_SEC':
+        assert identity != changed_identity  # already bound by the existing policy identity
+    else:
+        assert identity == changed_identity  # economic identity omits workload cadence
+    assert m.admission_evidence(certificate, prospective, tmp_path / 'fresh.db', 21600)['status'] == 'PASS'
+    with pytest.raises(ValueError, match='CONFIG'):
+        m.admission_evidence(certificate, changed, tmp_path / 'changed.db', 21600)
+
+
+@pytest.mark.parametrize('field,value', [('scan_interval_sec', 0.1), ('heartbeat_interval_sec', 5.0),
+                                         ('reconciliation_interval_sec', 1.0)])
+def test_calibration_permit_binds_full_runtime_cadence(tmp_path, bound_plan, cfg, field, value):
+    from dataclasses import replace
+    root = tmp_path / 'experiment'
+    root.mkdir()
+    m.write_json(root / 'guardian.json', {'supervisor_pid': 123, 'guardian_pid': os.getppid()})
+    m.exclusive_json(root / 'worker.attempt', {'plan_hash': canonical_hash(bound_plan), 'pid': os.getpid()})
+    path = tmp_path / '.af-real-calibration.control'
+    control = v.ControlFile(path, {'plan_hash': canonical_hash(bound_plan), 'supervisor_pid': 123})
+    control.close()
+    permit = m.CalibrationPermit(bound_plan, path)
+    assert permit.assess(root / 'laboratory.db', cfg, 21600)['status'] == 'PASS'
+    changed = replace(cfg, runtime=replace(cfg.runtime, **{field: value}))
+    with pytest.raises(ValueError, match='CALIBRATION_PERMIT_SCOPE'):
+        permit.assess(root / 'laboratory.db', changed, 21600)
+    routed = replace(cfg, runtime=replace(cfg.runtime, agent_graph_database_url=f'sqlite+pysqlite:///{root / "agent-shadow.db"}'))
+    assert permit.assess(root / 'laboratory.db', routed, 21600)['status'] == 'PASS'
+    outside = replace(cfg, runtime=replace(cfg.runtime, agent_graph_database_url='sqlite+pysqlite:////outside.db'))
+    with pytest.raises(ValueError, match='CALIBRATION_PERMIT_SCOPE'):
+        permit.assess(root / 'laboratory.db', outside, 21600)
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'forged'])
+def test_full_runtime_certificate_binding_is_mandatory(tmp_path, monkeypatch, cfg, mutation):
+    path, _ = measurement_fixture(tmp_path, monkeypatch, cfg)
+    cert = m.review(path, 10, 'Fixture explicit operator scope only; not a future capacity guarantee.')
+    if mutation == 'missing': cert.pop('prospective_workload_hash')
+    else: cert['prospective_workload_hash'] = '0' * 64
+    certificate = tmp_path / 'review.json'
+    certificate.write_text(json.dumps(cert))
+    prospective, _ = m.configuration({'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED': 'true',
+                                      'ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC': '10'})
+    with pytest.raises(ValueError, match='TAMPERED'):
+        m.admission_evidence(certificate, prospective, tmp_path / 'fresh.db', 21600)
+
+
+@pytest.mark.parametrize('target', ['fresh', 'existing', 'outside', 'shared', 'memory', 'postgres'])
+def test_enabled_agent_database_is_fresh_and_on_measured_backend(tmp_path, monkeypatch, target):
+    main = tmp_path / 'fresh.db'
+    agent = tmp_path / 'agent.db'
+    if target == 'outside': agent = tmp_path.parent / 'outside-agent.db'
+    if target == 'shared': agent = main
+    url = f'sqlite+pysqlite:///{agent}'
+    if target == 'memory': url = 'sqlite+pysqlite:///:memory:'
+    if target == 'postgres': url = 'postgresql://localhost/fixture'
+    env = {'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED': 'true',
+           'ALPHAFORGE_AGENT_GRAPH_ENABLED': 'true', 'ALPHAFORGE_AGENT_GRAPH_DATABASE_URL': url}
+    cfg, _ = m.configuration(env)
+    path, _ = measurement_fixture(tmp_path, monkeypatch, cfg, env)
+    cert = m.review(path, 10, 'Fixture exact agent-storage scope only; no actual capacity claim.')
+    certificate = tmp_path / 'review.json'
+    certificate.write_text(json.dumps(cert))
+    prospective, _ = m.configuration({**env, 'ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC': '10'})
+    if target == 'existing': agent.touch()
+    if target == 'fresh':
+        assert m.admission_evidence(certificate, prospective, main, 21600)['status'] == 'PASS'
+    else:
+        with pytest.raises(ValueError, match='DATABASE'):
+            m.admission_evidence(certificate, prospective, main, 21600)
+    assert not main.exists()
+
+
+@pytest.mark.parametrize('setting,value', [
+    ('ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL', 'https://example.invalid'),
+    ('HYPERLIQUID_ENABLED', 'false'),
+    ('ALPHAFORGE_LOG_LEVEL', 'DEBUG'),
+])
+def test_provider_and_effective_config_cannot_inherit_other_profile_measurement(tmp_path, monkeypatch, cfg, setting, value):
+    path, _ = measurement_fixture(tmp_path, monkeypatch, cfg)
+    cert = m.review(path, 10, 'Fixture public-provider exact scope only; no live or market capacity claim.')
+    certificate = tmp_path / 'review.json'
+    certificate.write_text(json.dumps(cert))
+    env = {'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED': 'true',
+           'ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC': '10', setting: value}
+    changed, _ = m.configuration(env)
+    with pytest.raises(ValueError, match='CONFIG'):
+        m.admission_evidence(certificate, changed, tmp_path / 'fresh.db', 21600)
+    assert not (tmp_path / 'fresh.db').exists()
+
+
+def test_workload_scope_excludes_only_secret_values_and_owned_primary_db_location(cfg):
+    from dataclasses import replace
+    original = m.workload_config_scope(cfg)
+    rotated = replace(cfg, notifications=replace(cfg.notifications, telegram_bot_token='fixture-sensitive-key'),
+                      persistence=replace(cfg.persistence, database_url='sqlite+pysqlite:////fresh-owned.db'))
+    assert m.workload_config_scope(rotated) == original
+    assert 'telegram_bot_token' not in original['notifications']
+    assert 'database_url' not in original['persistence']
+    assert 'agent_graph_database_url' in original['runtime']
+    assert cfg.notifications.telegram_bot_token == ''

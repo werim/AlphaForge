@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 import hashlib
 import importlib.metadata
@@ -24,7 +24,7 @@ import time
 
 from alphaforge.burnin import canonical_hash
 from alphaforge.storage_calibration import (configuration, source_identity, environment_identity,
-    file_hash, write_json, footprint, peaks, redact, parent_watchdog)
+    file_hash, write_json, footprint, peaks, redact, parent_watchdog, CONFIG_REGISTRY, SECRET)
 from alphaforge.storage_policy import StoragePolicy, full_replay_duration_budget
 from alphaforge import storage_volume as volume
 
@@ -38,6 +38,21 @@ if __name__ == "__main__":
     # Shared permit type must be identical when -m entry calls other authorities.
     sys.modules[MODULE] = sys.modules[__name__]
 HASH_KEYS = ("config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")
+
+
+def workload_config_scope(cfg):
+    """Typed nonsecret config; fresh primary DB routing is checked separately."""
+    secret_fields = {setting.field_name for setting in CONFIG_REGISTRY if setting.secret}
+    def public(value):
+        if isinstance(value, dict):
+            return {k: public(v) for k, v in value.items()
+                    if k not in secret_fields and not SECRET.search(k)}
+        if isinstance(value, (list, tuple)):
+            return [public(item) for item in value]
+        return value
+    scope = public(asdict(cfg))
+    scope['persistence'].pop('database_url')
+    return scope
 
 
 def read_json(path: Path, limit=1024 * 1024):
@@ -107,6 +122,9 @@ class CalibrationPermit:
         from alphaforge.burnin_campaign import build_phase8_campaign_identity
         current_identity = build_phase8_campaign_identity(cfg.runtime, [], ["1h", "15m", "1m"], dynamic_universe=True)
         root = Path(self.plan["backend"]["mount"])
+        expected_scope, actual_scope = workload_config_scope(expected), workload_config_scope(cfg)
+        expected_agent_db = expected_scope['runtime'].pop('agent_graph_database_url')
+        actual_agent_db = actual_scope['runtime'].pop('agent_graph_database_url')
         control = volume.ControlFile(self.control_path)
         try:
             claim = control.get(0)
@@ -119,6 +137,8 @@ class CalibrationPermit:
                 or read_json(root / "experiment/guardian.json").get("guardian_pid") != os.getppid()
                 or read_json(root / "experiment/worker.attempt") != {"plan_hash":canonical_hash(self.plan),"pid":os.getpid()}
                 or duration != DURATION
+                or actual_scope != expected_scope
+                or actual_agent_db not in (expected_agent_db, f'sqlite+pysqlite:///{root / "experiment/agent-shadow.db"}')
                 or {k: current_identity[k] for k in HASH_KEYS} != self.plan["config_hashes"]
                 or StoragePolicy.from_config(cfg.runtime) != StoragePolicy.from_config(expected.runtime)):
             raise ValueError("CALIBRATION_PERMIT_SCOPE")
@@ -531,7 +551,9 @@ def review(control_path: Path, rate: int, justification: str):
         raise ValueError('REVIEWED_BUDGET_CANNOT_FIT_TARGET_POLICY')
     return {'version':VERSION, 'kind':'OPERATOR_SCOPED_EMPIRICAL_BUDGET','admission_eligible':True,
             'control':str(control_path.resolve()), 'result_hash':canonical_hash(result),
-            'prospective_config_hashes':identity,'rate':rate,'justification':justification,
+            'prospective_config_hashes':identity,
+            'prospective_workload_hash':canonical_hash(workload_config_scope(cfg)),
+            'rate':rate,'justification':justification,
             'expires_at':min(result['completed_at']+MAX_AGE,plan.get('created_at',result['completed_at'])+MAX_AGE,plan['backend'].get('proof_expires_at',result['completed_at']+MAX_AGE)),'universal_upper_bound':False}
 
 
@@ -554,16 +576,28 @@ def admission_evidence(path, cfg, db: Path, duration, *, intervals=("1h","15m","
     from alphaforge.burnin_campaign import build_phase8_campaign_identity
     identity = build_phase8_campaign_identity(cfg.runtime,[],['1h','15m','1m'],dynamic_universe=True)
     if ({k:identity[k] for k in HASH_KEYS} != certificate['prospective_config_hashes']
+            or canonical_hash(workload_config_scope(cfg)) != certificate['prospective_workload_hash']
             or cfg.runtime.storage_growth_budget_bytes_per_sec != certificate['rate']):
         raise ValueError('STORAGE_EVIDENCE_PROSPECTIVE_CONFIG_MISMATCH')
     mount = Path(result['plan']['backend']['mount'])
-    if (not db.resolve().is_relative_to(mount) or db.exists() or db.is_symlink()
-            or any(Path(str(db)+suffix).exists() for suffix in ('-wal','-shm'))):
-        raise ValueError('FRESH_DATABASE_ON_MEASURED_FILESYSTEM_REQUIRED')
-    existing_parent=db.resolve().parent
-    while not existing_parent.exists(): existing_parent=existing_parent.parent
-    if volume.filesystem_identity(existing_parent)!=result['plan']['backend']['filesystem']:
-        raise ValueError('STORAGE_EVIDENCE_TARGET_FILESYSTEM_MISMATCH')
+    def check_target(target):
+        if (not target.resolve().is_relative_to(mount) or target.exists() or target.is_symlink()
+                or any(Path(str(target)+suffix).exists() for suffix in ('-wal','-shm'))):
+            raise ValueError('FRESH_DATABASE_ON_MEASURED_FILESYSTEM_REQUIRED')
+        existing_parent=target.resolve().parent
+        while not existing_parent.exists(): existing_parent=existing_parent.parent
+        if volume.filesystem_identity(existing_parent)!=result['plan']['backend']['filesystem']:
+            raise ValueError('STORAGE_EVIDENCE_TARGET_FILESYSTEM_MISMATCH')
+    check_target(db)
+    if cfg.runtime.agent_graph_enabled:
+        from sqlalchemy.engine import make_url
+        agent_url = make_url(cfg.runtime.agent_graph_database_url)
+        if agent_url.get_backend_name() != 'sqlite' or not agent_url.database or agent_url.database == ':memory:':
+            raise ValueError('STORAGE_EVIDENCE_AGENT_DATABASE_SCOPE')
+        agent_db = Path(agent_url.database).expanduser()
+        if agent_db.resolve() == db.resolve():
+            raise ValueError('STORAGE_EVIDENCE_AGENT_DATABASE_SCOPE')
+        check_target(agent_db)
     if volume.container_free(result['plan']['backend']) < StoragePolicy.from_config(cfg.runtime).reserve(0,duration):
         raise ValueError('STORAGE_EVIDENCE_HOST_CONTAINER_RESERVE_INSUFFICIENT')
     # Existing measurement files are retained; free-space check counts them.
