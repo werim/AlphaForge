@@ -103,6 +103,12 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_storage_host_identity.py",
         "tests/test_storage_admission_contract.py",
     ),
+    "UNIVERSE_EVIDENCE_INTEGRITY": (
+        "tests/test_issue577_universe_selection.py",
+        "tests/test_issue622_universe_compact_evidence.py",
+        "tests/test_issue658_universe_batch_codec.py",
+        "tests/test_issue588_universe_writer_contention.py",
+    ),
     "STORAGE_RETENTION": (
         "tests/test_issue620_storage_policy.py",
         "tests/test_issue622_stats_only_retention.py",
@@ -295,6 +301,9 @@ def assess_path(raw_path: str) -> PathAssessment:
             (("storage_calibration.py",), ("STORAGE_CALIBRATION_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "offline storage evidence and supervisor authority changed"),
             (("storage_workload.py",), ("STORAGE_CALIBRATION_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY", "RESOLVER_INTEGRITY"), "canonical storage workload adapter changed"),
             (("storage_measurement.py", "storage_volume.py"), ("STORAGE_MEASUREMENT_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "real storage admission and capacity identity changed"),
+
+
+            (("universe_evidence.py",), ("UNIVERSE_EVIDENCE_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "immutable universe storage/replay authority changed"),
             (("storage_policy.py",), ("STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "storage lifecycle authority changed"),
             (("persistence.py",), ("PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "authoritative persistence changed"),
             (("runtime_state.py",), ("RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "runtime/reconciliation state changed"),
