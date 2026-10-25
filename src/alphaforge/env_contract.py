@@ -36,6 +36,7 @@ class EnvContractEntry:
     unsupported_explanation: str | None = None
     remove_from_templates: bool = False
     intended_future_subsystem: str | None = None
+    launcher_owned: bool = False
 
     def public_dict(self) -> dict[str, object]:
         row = asdict(self)
