@@ -191,9 +191,14 @@ def test_provider_exception_propagates_and_does_not_poison_next_read():
 def test_start_persists_recovery_before_releasing_ownership_with_pending_read(monkeypatch, phase):
     from alphaforge.runtime_state import latest_runtime_state_snapshot
 
-    provider = BlockingProvider()
-    if phase == "operating":
-        provider.release.set()
+    class FirstCompleteThenBlocking(BlockingProvider):
+        def snapshot(self):
+            if self.calls == 0:
+                self.calls += 1
+                return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
+            return super().snapshot()
+
+    provider = FirstCompleteThenBlocking() if phase == "operating" else BlockingProvider()
     orchestrator = runtime(provider)
     orchestrator.metrics.persistence_enabled = True
     released = []
@@ -212,10 +217,8 @@ def test_start_persists_recovery_before_releasing_ownership_with_pending_read(mo
                         break
                     await asyncio.sleep(0.001)
                 assert orchestrator._tasks
-                provider.release.clear()
-                provider.entered.clear()
-                read_task = asyncio.create_task(orchestrator._reconcile_runtime_state())
-                orchestrator._tasks.append(read_task)
+                # The real background loop makes its second read after the clean
+                # startup read. Do not race it with an extra test-created read.
                 await wait_entered(provider)
                 orchestrator.shutdown()
                 await task
