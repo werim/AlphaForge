@@ -434,3 +434,14 @@ def test_walk_forward_source_only_selects_cash_and_holdout_regressions(source):
     assert plan.risk_level == RiskLevel.HIGH
     assert "tests/test_walk_forward_cash_integrity.py" in plan.selected_tests
     assert "tests/test_issue506_walk_forward.py" in plan.selected_tests
+
+
+def test_universe_storage_source_routes_complete_codec_and_retention_contracts():
+    plan = _plan("src/alphaforge/universe_evidence.py")
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ("T0", "T1", "T2", "T3")
+    assert {"UNIVERSE_EVIDENCE_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"} <= set(plan.affected_invariants)
+    assert {"tests/test_issue658_universe_batch_codec.py", "tests/test_issue622_universe_compact_evidence.py",
+            "tests/test_issue577_universe_selection.py", "tests/test_issue588_universe_writer_contention.py",
+            "tests/test_issue620_storage_policy.py", "tests/test_issue622_stats_only_retention.py"} <= set(plan.selected_tests)
+    assert "UNKNOWN_PRODUCTION_CHANGE" not in plan.affected_invariants

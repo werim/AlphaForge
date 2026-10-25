@@ -95,6 +95,12 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
     # Diagnostic provenance, sampled resource evidence and supervisor loss are
     # distinct from retention and must not broaden unrelated authority routes.
     "STORAGE_CALIBRATION_INTEGRITY": ("tests/test_storage_calibration.py",),
+    "UNIVERSE_EVIDENCE_INTEGRITY": (
+        "tests/test_issue577_universe_selection.py",
+        "tests/test_issue622_universe_compact_evidence.py",
+        "tests/test_issue658_universe_batch_codec.py",
+        "tests/test_issue588_universe_writer_contention.py",
+    ),
     "STORAGE_RETENTION": (
         "tests/test_issue620_storage_policy.py",
         "tests/test_issue622_stats_only_retention.py",
@@ -286,6 +292,7 @@ def assess_path(raw_path: str) -> PathAssessment:
             (("burnin_resolver.py",), ("RESOLVER_INTEGRITY", "TIME_INTEGRITY"), "resolver authority changed"),
             (("storage_calibration.py",), ("STORAGE_CALIBRATION_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "offline storage evidence and supervisor authority changed"),
             (("storage_workload.py",), ("STORAGE_CALIBRATION_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY", "RESOLVER_INTEGRITY"), "canonical storage workload adapter changed"),
+            (("universe_evidence.py",), ("UNIVERSE_EVIDENCE_INTEGRITY", "STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "immutable universe storage/replay authority changed"),
             (("storage_policy.py",), ("STORAGE_RETENTION", "PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "storage lifecycle authority changed"),
             (("persistence.py",), ("PERSISTENCE_ATOMICITY", "RESTART_RECOVERY"), "authoritative persistence changed"),
             (("runtime_state.py",), ("RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "runtime/reconciliation state changed"),
