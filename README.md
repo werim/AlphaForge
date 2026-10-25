@@ -127,6 +127,13 @@ Current runtime safety mechanisms include:
 - fail-closed runtime recovery after unclean/unknown state;
 - provider-failure classification: only known transient transport failures receive recovery grace, while execution remains blocked until safe recovery evidence exists.
 
+Runtime reconciliation reads run outside the event loop with one owned call at
+a time. Timeout/cancellation discards late results and never starts an overlapping
+read. Shutdown drains within the configured reconciliation timeout; an unaccepted
+read retains durable recovery and execution ownership, even if it finishes during
+drain. An unresponsive read may outlive that bound in its daemon transport thread;
+process/watchdog containment remains necessary and is not proved by software tests.
+
 Do not hardcode operating thresholds in documentation or scripts. The typed source of truth is [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py).
 
 Managed float settings must be finite: NaN and infinities fail configuration
