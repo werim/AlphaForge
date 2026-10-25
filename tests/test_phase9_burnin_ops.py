@@ -2451,6 +2451,8 @@ def test_preflight_audits_imported_source_from_external_working_directory(monkey
     from alphaforge import storage_policy
 
     cfg = load_config_from_env(env={})
+    monkeypatch.setenv("ALPHAFORGE_RELEASE_ID", "source-audit-regression")
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_DATABASE_PATH", str(tmp_path / "absent.db"))
     monkeypatch.chdir(tmp_path)
     if foreign_template:
         (tmp_path / ".env.example").write_text("FOREIGN=1\nFOREIGN=2\n")

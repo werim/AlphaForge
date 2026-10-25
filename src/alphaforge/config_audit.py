@@ -95,7 +95,10 @@ def audit_config(*, env: Mapping[str, str] | None = None, root: Path | None = No
     unclassified = sorted(documented - CONTRACT_BY_NAME.keys())
     if unclassified:
         errors.append("documented variables are unclassified: " + ", ".join(unclassified))
-    missing = sorted(CONTRACT_BY_NAME.keys() - documented)
+    # Launchers supply process identity/context at runtime. Their canonical
+    # descriptions live in the inventory; blank dotenv assignments could mask
+    # existing absent-variable fallbacks and must not be required in profiles.
+    missing = sorted(row.name for row in ENV_CONTRACT if not row.launcher_owned and row.name not in documented)
     if missing:
         errors.append("contract variables missing from templates: " + ", ".join(missing))
     wired_metadata_errors = [row.name for row in ENV_CONTRACT if row.classification == "WIRED" and (not row.consumed_by or not row.behavioral_test or "::" not in row.behavioral_test)]

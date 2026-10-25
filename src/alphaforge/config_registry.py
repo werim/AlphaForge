@@ -373,6 +373,26 @@ def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
                 deprecated=True, description=f"Deprecated alias for {setting.env_name}; canonical value wins within a source.",
                 behavioral_test="tests/test_env_wiring_contract.py::test_alias_conflicts_fail_audit",
             ))
+    # Launcher-owned process context is consumed directly, rather than through
+    # RuntimeConfig or dashboard overrides. Keep it in the same audited contract.
+    rows.extend((
+        EnvContractEntry(
+            name="ALPHAFORGE_RELEASE_ID", canonical_name="ALPHAFORGE_RELEASE_ID",
+            classification="WIRED", value_type="str", default=None, applies_to=MODES,
+            launcher_owned=True,
+            consumed_by="alphaforge.runtime.RuntimeOrchestrator._phase8_runtime_hashes",
+            description="Launcher-owned release provenance; unset uses the existing runtime release configuration.",
+            behavioral_test="tests/test_worker_environment_contract.py::test_release_context_reaches_runtime_identity",
+        ),
+        EnvContractEntry(
+            name="ALPHAFORGE_BURNIN_DATABASE_PATH", canonical_name="ALPHAFORGE_BURNIN_DATABASE_PATH",
+            classification="WIRED", value_type="str", default=None, applies_to=("PAPER",),
+            launcher_owned=True,
+            consumed_by="alphaforge.db_doctor.targets.resolve_database_targets",
+            description="Launcher-owned burn-in database context for read-only target diagnosis; does not override the runtime database URL.",
+            behavioral_test="tests/test_worker_environment_contract.py::test_burnin_db_context_resolves_readonly_without_creating_target",
+        ),
+    ))
     for name in RESERVED_VARIABLES:
         secret = any(token in name for token in ("SECRET", "TOKEN", "KEY", "PASSWORD", "WEBHOOK"))
         explanation, remove, future = _reserved_details(name)
