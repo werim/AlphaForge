@@ -281,3 +281,12 @@ def test_source_configuration_excludes_credentials_in_transport_urls():
                       current_value='postgresql://user:password@host/db'),
             dict(env_name='BINANCE_API_KEY', secret=True, current_value='key')]
     assert evidence_settings(rows) == [safe]
+
+
+
+def test_sql_geometry_must_match_observed_primary_closure_before_sealing(tmp_path, monkeypatch):
+    producer, state, url, rows = trade(tmp_path, monkeypatch)
+    with producer.engine.begin() as conn:
+        conn.execute(text("UPDATE decision_evidence SET trigger_price=101 WHERE lifecycle_state_after='POSITION_CLOSED'"))
+    with pytest.raises(ValueError, match='closure geometry mismatch'):
+        producer.finish()

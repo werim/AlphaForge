@@ -194,6 +194,7 @@ class BacktestSourceProducer:
             captured = sorted((p["position_id"], p["timestamp"], p["net_pnl_usdt"]) for p in source if p["status_after"] == "POSITION_CLOSED")
             if captured != closures:
                 raise ValueError("source/SQL closure population mismatch")
+            _verify_sql_closure_facts(conn, self.identity.run_id, source)
             gaps = []
             sql_positions = _sql_positions(conn, self.identity.run_id)
             if _source_positions(source) != sql_positions:
@@ -354,6 +355,23 @@ def _valuations(identity, initialization, events, source):
                               accrued_costs_usdt=None if inventory else 0.0,
                               marked_equity_usdt=None if inventory else cash))
     return snapshots, gaps
+
+
+def _verify_sql_closure_facts(conn, run_id, source):
+    captured = {p["position_id"]: p for p in source if p["status_after"] == "POSITION_CLOSED"}
+    for row in conn.execute(text("""SELECT * FROM decision_evidence WHERE run_id=:r
+            AND lifecycle_state_after='POSITION_CLOSED'"""), dict(r=run_id)).mappings():
+        observation = captured[row["position_id"]]
+        proof = json.loads(row["diagnostics_json"])
+        for key in ("symbol", "side", "trigger_price", "sl", "close_price"):
+            if observation[key] != row[key]:
+                raise ValueError("source/SQL closure geometry mismatch")
+        for key in ("filled_quantity", "initial_risk_usd", "total_cost_usd", "net_r",
+                    "realized_evidence_status", "realized_cost_source", "realized_costs_json"):
+            if observation[key] != proof.get(key):
+                raise ValueError("source/SQL closure accounting mismatch")
+        if observation["gross_pnl_usd"] != proof.get("gross_pnl"):
+            raise ValueError("source/SQL closure gross cash mismatch")
 
 
 def _sql_snapshot_hash(conn, run_id):
