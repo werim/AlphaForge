@@ -1197,7 +1197,15 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
     orchestrator._reconciliation_status = "CLEAN"
     orchestrator._derivatives_contract_live_eligible = True
     asyncio.run(orchestrator._scan_once())
-    assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
+    # RECONCILIATION_REPAIR is not a canonical persisted lifecycle state.
+    # Preserve the attempted repair as an audited ERROR, matching the real sink.
+    repairs = [evt for evt in events
+               if evt["details"].get("attempted_state") == "RECONCILIATION_REPAIR"]
+    assert repairs
+    assert all(evt["lifecycle_event_type"] == "ERROR" for evt in repairs)
+    assert all(evt["details"]["failure_reason"] == "INVALID_LIFECYCLE_TRANSITION"
+               for evt in repairs)
+    assert any(evt["details"]["reason"] == "reconcile_timeout" for evt in repairs)
 
 
 def test_live_start_blocks_placeholder_bootstrap_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
