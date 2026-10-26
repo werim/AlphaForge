@@ -49,7 +49,7 @@ T0–T4 development routing does not waive any applicable G0–G10 release gate 
 | G2 Adjacent regressions | lifecycle, persistence, expectancy, and backtest tests | PASS / FAIL |
 | G3 GitHub CI | required CI checks for the commit | PASS / INCOMPLETE |
 | G4 Offline BACKTEST | deterministic, no-network canonical path | PASS / FAIL |
-| G5 Historical BACKTEST | fixed BTCUSDT/ETHUSDT, 1h, 30-day comparison | PASS / INCOMPLETE |
+| G5 Historical BACKTEST | fixed BTCUSDT/ETHUSDT, 1h, 30-day comparison plus admissible provenance and attributable economics under [the historical contract](HISTORICAL_VALIDATION.md) | PASS / FAIL / INCOMPLETE |
 | G6 PAPER smoke | new campaign, 30–60 minutes, fresh release identity | PASS / INCOMPLETE |
 | G7 PAPER evidence | separate evidence campaign with complete persistence | PASS / INCOMPLETE |
 | G8 7-day burn-in | duration, lifecycle, cost, reject, and reconciliation evidence | PASS / INCOMPLETE |
@@ -57,6 +57,14 @@ T0–T4 development routing does not waive any applicable G0–G10 release gate 
 | G10 Final readiness | all mandatory gates explicitly pass | PASS / INCOMPLETE |
 
 The protocol also records `NOT_APPLICABLE` and `NOT_OBSERVABLE`; neither is a passing state. A paused historical campaign may support diagnostics, but cannot be reused for G6–G8.
+
+G5 is not satisfied by positive realized cash alone. The current historical
+adapter reports negative admissible OOS cash as `FAIL` and nonnegative cash as
+`INCOMPLETE` until attributable capital, flows, marked equity, closure population
+and matching runtime provenance exist. Preserve the adapter verdict in the gate
+record; inadmissible search/selection lineage cannot qualify G5 either.
+FAST fault-invariant success does not replace G5, fresh PAPER, public wall-clock
+SOAK, physical storage acceptance or LIVE authorization.
 
 ## Combined #366/#367/#368 verification
 

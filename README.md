@@ -184,11 +184,11 @@ and public six-hour SOAK qualification remain required.
 
 ## Testing
 
-The `Tests` workflow (`.github/workflows/test.yml`) runs on pushes to `CHATGPT`,
-`dev`, and `main`, and on pull requests targeting `dev` or `main`. Qualify each
+The `Tests` workflow (`.github/workflows/test.yml`) runs on pushes to `dev`
+and `main`, and on pull requests targeting `dev` or `main`. Qualify each
 pushed commit using its exact SHA; an older or cancelled run is not evidence
 for the current commit. The separate `Python application` workflow targets
-`main` only and is not the CHATGPT qualification workflow.
+`main` only; it does not qualify development branches.
 
 The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, invalid/stale/future market-time fail-closed behavior, protected BACKTEST/PAPER/LIVE_PRECHECK pre-submit semantic parity, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
 
@@ -205,7 +205,11 @@ load each have dedicated tests. The bounded-load qualification covers rapid deci
 persistence, resolver backlog, reconciliation volume, audit ingestion, repeated
 reject outcomes, and concurrent readiness/audit reads against an active PAPER
 database. The remaining #421 release gate is fresh FAST plus public six-hour SOAK
-evidence bound to the exact final `dev` SHA.
+evidence bound to the exact final `dev` SHA. This is the scope of #421, not
+whole-product completion: the fresh economic baseline (#344), bounded learning
+(#578), promotion/rollback (#579), experiment orchestration (#580), and forward
+qualification (#349) remain separate acceptance work. See the
+[current completion roadmap](docs/LIVE_READINESS_ROADMAP.md#completion-roadmap-without-mac-mini).
 
 ## Repository Navigation
 
