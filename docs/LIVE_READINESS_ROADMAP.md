@@ -1,19 +1,104 @@
 # AlphaForge LIVE Readiness Roadmap
 
-**Status:** Historical baseline with current-state notice
+**Status:** Current completion roadmap with preserved historical baseline
 **Created:** 2026-05-22  
 **Baseline branch:** `dev`  
 **Baseline version:** `0.3.25-dev`  
 **Current verdict:** ❌ **NOT LIVE-READY**
 
-> **Current-state notice (2026-09-24).** The numbered findings and delivery plan
-> below describe the `0.3.25-dev` baseline and are preserved for traceability;
-> several are implemented and regression-protected in current code. Do not use
-> them as a current defect list or infer fixed RR/default semantics from them.
-> `README.md` and `VERSION.md` summarize current maturity, while production code,
-> typed configuration and tests remain authoritative. LIVE remains blocked. Fresh
-> FAST and public six-hour SOAK evidence on the exact final release SHA is still
-> required by issue #421 and does not itself authorize LIVE.
+## Completion roadmap without Mac mini
+
+This 26 October 2026 review separates portable software, target-environment
+acceptance and LIVE readiness. The dated baseline findings and proposed sequence
+below are historical, not a current defect queue or an authorization. Current
+code/config, exact-source tests and the active PR/issue handoff take precedence.
+Use [the repository map](../README.md#repository-navigation) and
+[verification router](TEST_PROTOCOL.md#development-verification-routing) for
+implementation/test ownership; this roadmap adds no parallel authority.
+
+Statuses: **VERIFIED** means the stated scope has attributable evidence;
+**IMPLEMENTED BUT UNVERIFIED** means implementation exists but its required
+behavioral evidence is absent; **INCOMPLETE** means required work/evidence remains;
+**BLOCKED** identifies a concrete external prerequisite; **UNKNOWN** means it has
+not been established. Software verification never promotes physical acceptance.
+
+| Phase | Required outcome | Current evidence/status | Dependencies | Work possible without Mini | Acceptance criterion |
+| --- | --- | --- | --- | --- | --- |
+| Portable core | Canonical strategy/MTF decisions, executable economics, portfolio risk, lifecycle/persistence, recovery/reconciliation | VERIFIED only within exact-source CI/regression scope; whole-release validation INCOMPLETE | Final source/config; existing router | Focused regressions, deterministic replay, isolated integration/fault checks and CI; fix demonstrated defects | Required tests and parity pass for final source/config; unknown state remains blocked |
+| Historical strategy | Leakage-safe OOS with attributable post-cost capital performance | INCOMPLETE; positive realized cash cannot establish capital return/drawdown | Historical contract; attributable data/capital/flows/equity and complete runtime scope | Validate supplied artifacts; prepare authority requirements; no fabricated ledger/backfill | Admissible split/search lineage and complete economics; current adapter's INCOMPLETE/FAIL retained |
+| Target storage | Native APFS/sandbox proof and representative runtime calibration | BLOCKED for fresh acceptance; #637 is unmerged; old failures/proofs remain historical | Mini access; fresh dedicated backend; exact source/config/dependencies and proof | Inspect software contracts; prepare bounded package in existing #637 handoff | Required native proof, actual six-hour coverage and independent terminal audit; MEASURED alone is not admission |
+| Operational release | Reproducible deploy, observable healthy runtime, fault/recovery, rollback and storage admission | IMPLEMENTED BUT UNVERIFIED for complete target acceptance | Final release identity; storage certificate/budget; authenticated read-only reconciliation | Dependency/import checks, isolated recovery tests, release/runbook review | Applicable G0–G10 plus #421 FAST/public SOAK and #349 forward qualification; identity-bound reports, cleanup and no unresolved blockers |
+| Economic baseline | Mature fresh dynamic-universe PAPER evidence (#344) | INCOMPLETE | Qualified storage/host; new campaign/release; canonical execution/risk evidence | Prepare bounded acceptance queries; inspect existing evidence read-only | Mature attributable trade/reject outcomes, complete costs, portfolio/reconciliation/storage evidence; no cross-SHA mixing |
+| Learning software | Immutable challengers → OOS promotion/rollback → durable epochs (#578 → #579 → #580) | INCOMPLETE; not qualified by core CI | Mature #344 verdict and stable predecessor contracts | Specify implementation-ready tasks below; preserve dependency gates | Each issue's adversarial/restart/idempotence tests; no active policy mutation from learning reader |
+| LIVE readiness | Verified operational/capital safety and permitted exchange behavior | BLOCKED; complete target execution capability UNKNOWN in this review | All mandatory acceptance; separately scoped execution/security work and operator authorization | Non-mutating readiness evaluation; no exchange mutation | Mandatory evidence independently verified; no readiness result enables LIVE |
+
+### Shortest dependency paths
+
+1. **Portable software:** reuse matching CI/regression evidence → fix only
+   demonstrated gaps → exact-final-source focused/required checks → isolated FAST.
+   Full autonomous product completion also requires #344 → #578 → #579 → #580;
+   Mini loss does not invalidate portable core evidence, and core CI does not
+   satisfy those missing products or their economic input gate.
+2. **Target acceptance:** revalidate native source/config/dependencies/ownership →
+   fresh backend and proof → authenticated read-only/canonical preflight → bounded
+   actual calibration → independent terminal audit → separately reviewed scoped
+   growth budget/admission → exact-final-release public SOAK and fresh PAPER gates.
+   Keep #637 unmerged until its protected acceptance contract is cleared.
+3. **LIVE readiness:** completed software plus target/economic/operational gates →
+   non-mutating readiness assessment → separately designed/authorized venue
+   execution acceptance, if required → separate LIVE authorization. This document
+   authorizes no Testnet or LIVE submit/cancel/modify/funds action.
+
+### Implementation-ready remaining tasks
+
+- **Historical capital authority:** extend the existing realized-accounting and
+  walk-forward authorities only after defining attributable opening capital,
+  external flows, concurrent/open-position marks, complete closure population
+  and matching campaign/run/release/config identities. Never substitute notional,
+  initial risk or a balance literal. Acceptance must reject missing/mixed scope,
+  duplicate realization, incomplete marks/flows, future leakage and inconsistent
+  cash; portfolio returns/drawdown remain null until the authority is complete.
+- **#578:** after #344, reuse canonical trade/reject evidence and parameter owners;
+  produce bounded immutable challengers or NO_CHANGE/INSUFFICIENT_EVIDENCE. Test
+  incomplete costs, stale/cross-scoped rows, overfit concentration and bound
+  violations. Do not implement tuning against an unqualified baseline.
+- **#579:** consume immutable challengers through the existing split/lineage
+  contract; one transactional PAPER champion/promotion/rollback authority. Test
+  OOS reuse, insufficient evidence, concurrent promotion and crash/restart.
+- **#580:** consume stable #578/#579 contracts with persisted fenced epochs,
+  unchanged-evidence no-op and bounded retry/compute. Test duplicate triggers,
+  ownership takeover and crashes at every transition; no autonomous LIVE path.
+- **Operational acceptance:** use existing readiness, reconciliation, recovery,
+  storage and qualification authorities. Require measured resource/heartbeat/feed
+  and evidence-health observations, rollback, process containment and consistent
+  terminal copies. A passed mock provider is not authenticated reconciliation.
+
+These are acceptance tasks under the existing issues, not a second task queue.
+No new production subsystem is justified merely by the absence of Mini access.
+
+### Portable, equivalent and mandatory physical evidence
+
+Ordinary SQLite persistence, replay, concurrency, failure classification and
+safety parity can be checked in isolated local execution/CI. Their evidence is
+limited to the actual interpreter, dependencies, OS and filesystem tested.
+Synthetic clocks and providers provide useful fault-invariant evidence, not
+wall-clock health, authenticated exchange state or representative economics.
+
+Linux containers do not reproduce macOS sandbox/APFS quota behavior. A local
+Apple Silicon Mac does not certify the designated Intel Mini's identity,
+resources, native sandbox, watchdog/process lifetime or six-hour workload.
+Another host is admissible only if the existing acceptance contract explicitly
+permits it; never silently substitute it.
+
+The bounded physical package remains in the single
+[PR #637 handoff](https://github.com/werim/AlphaForge/pull/637), including pinned
+source/config/dependencies, stage order, new-backend identity prerequisites,
+resource/time/log bounds, abort rules, proof/plan/claim binding, preservation and
+terminal audit. Fresh target execution is **NOT_RUN** here. Do not reconnect,
+provision, probe, prepare/run, reuse consumed claims, inject faults, resume
+protected PAPER/SOAK or merge #637 as a side effect of this portable review.
+Mutable native prerequisites must be refreshed when access is restored; historical
+staging or physical success cannot be inherited by a new source/run.
 
 ## Purpose
 
@@ -21,7 +106,7 @@ This document is the standing reference for future AlphaForge LIVE-readiness upd
 
 Success is stable positive expectancy after spread, slippage, latency, fees, liquidity degradation and operational failure modes. Trade count, raw win rate, and isolated PnL spikes are not readiness evidence.
 
-## Current Verified Progress
+## Verified Progress at Baseline (historical)
 
 The `dev` branch currently includes useful groundwork:
 
@@ -83,7 +168,7 @@ The environment template lists `ALPHAFORGE_ALLOW_LIVE_ORDERS`, `ALPHAFORGE_DRY_R
 
 **Required outcome:** no safety flag is represented as active unless code and tests prove enforcement.
 
-## P1 Readiness Gaps
+## P1 Readiness Gaps at Baseline (historical)
 
 ### Selector rejects are not complete canonical SQL/lifecycle evidence
 
@@ -103,13 +188,13 @@ A canonical context is needed for exchange source, market type, bid/ask, spread,
 
 **Required outcome:** missing mandatory context is a deterministic reject, never silently replaced by optimistic zeros.
 
-## Venue Policy Until Readiness
+## Venue Policy at Baseline (historical)
 
 - Initial executable venue: Binance USDT-M Futures only.
 - Hyperliquid remains observation-only or disabled for trading until bid/ask or orderbook quality, funding, execution adapter, fill/reconciliation and cost-model evidence are implemented.
 - LIVE universe begins with the most liquid approved instruments only after Testnet and canary gates pass.
 
-## Delivery Program
+## Delivery Program at Baseline (historical)
 
 ### Stage 0: Lock LIVE Fail-Closed
 
@@ -241,7 +326,7 @@ Initial real-money operation, only after all earlier gates, must use:
 - Lifecycle transition error.
 - Kill-switch activation.
 
-## Planned PR Sequence
+## Planned PR Sequence at Baseline (historical)
 
 | Order | Proposed PR | Priority |
 |---:|---|---:|
@@ -274,7 +359,8 @@ No LIVE run should occur until PRs 1 through 4 are complete. No real-money opera
 
 ## Update Protocol
 
-For each future AlphaForge change related to LIVE readiness, update this document with:
+After a coherent readiness milestone, update the current roadmap and the single
+active PR/issue handoff with:
 
 1. PR/commit reference and date.
 2. Which blocker or stage item it addresses.
