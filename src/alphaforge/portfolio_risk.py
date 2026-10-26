@@ -1065,12 +1065,15 @@ class BacktestPortfolioState:
     diagnostics: dict[str, Any] = field(default_factory=dict)
     closed_position_ids: set[str] = field(default_factory=set)
     cash_evidence_complete: bool = True
+    evidence_producer: Any = None
 
     def __post_init__(self) -> None:
         if self.current_equity is None:
             self.current_equity = float(self.initial_equity)
         if self.peak_equity is None:
             self.peak_equity = float(self.current_equity)
+        if self.evidence_producer is not None:
+            self.evidence_producer.initialize(self)
 
     def _day_key(self, ts: int | float | str | None) -> str:
         try:
@@ -1134,6 +1137,9 @@ class BacktestPortfolioState:
     def close_position(self, *, position_id: str, symbol: str, timestamp: int, net_pnl_usdt: float | None, close_reason: str) -> None:
         if position_id in self.closed_position_ids:
             return
+        if self.evidence_producer is not None:
+            self.evidence_producer.assert_cash_authority()
+        previous_cash = self.current_equity
         self.closed_position_ids.add(position_id)
         self.pending_entries.pop(position_id, None)
         self.open_positions.pop(position_id, None)
@@ -1142,8 +1148,12 @@ class BacktestPortfolioState:
         if pnl is None or not self.cash_evidence_complete:
             self.cash_evidence_complete = False
             self.current_equity = None
+            if self.evidence_producer is not None:
+                self.evidence_producer.cash_closed(position_id=position_id, timestamp=timestamp, net_pnl_usdt=net_pnl_usdt, before=previous_cash, after=None)
             return
         self.current_equity = float(self.current_equity or 0.0) + pnl
+        if self.evidence_producer is not None:
+            self.evidence_producer.cash_closed(position_id=position_id, timestamp=timestamp, net_pnl_usdt=pnl, before=previous_cash, after=self.current_equity)
         self.peak_equity = max(float(self.peak_equity or self.current_equity or 0.0), float(self.current_equity or 0.0))
         day = self._day_key(timestamp)
         self.daily_realized_pnl[day] = self.daily_realized_pnl.get(day, 0.0) + pnl

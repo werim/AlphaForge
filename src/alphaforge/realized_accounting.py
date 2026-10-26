@@ -57,3 +57,13 @@ def sum_cash(values) -> float | None:
 
 def mean_cash(total, count) -> float | None:
     return None if total is None else total / count if count else 0.0
+
+
+def filled_position_quantity(*, balance, risk_pct, fill, risk_scale=1.0, notional=None):
+    """Canonical legacy BACKTEST fill sizing, also observed at source opening."""
+    scale = finite_cash(risk_scale)
+    capital, allocation = finite_cash(balance), finite_cash(risk_pct)
+    base = finite_cash(capital * allocation / 100 if notional is None and capital is not None and allocation is not None else notional)
+    price = finite_cash(fill)
+    valid = scale is not None and 0 <= scale <= 1 and base is not None and base >= 0
+    return base * scale / price if valid and price and price > 0 else None

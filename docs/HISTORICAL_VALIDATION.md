@@ -128,9 +128,9 @@ segment. Partial/mixed lifecycle evidence is not qualified through this adapter.
 
 ## Historical capital evidence: producer and consumer contract
 
-**Design status: NOT_IMPLEMENTED.** This section defines the missing input
-contract; it does not add an accepted manifest field, a capital ledger, a schema,
-a producer or a historical PASS path. Current version-2 reports retain null
+**Consumer admission status: NOT_IMPLEMENTED.** The prospective BACKTEST source
+producer below implements source capture, not capital-metric admission. This
+section does not add an accepted capital manifest field or historical PASS path. Current version-2 reports retain null
 capital return/equity/drawdown and INCOMPLETE capital evidence. Unknown manifest
 fields are not evidence. A correct CSV digest proves bytes, not population
 completeness or the truth of a capital assertion.
@@ -247,13 +247,71 @@ cash without complete capital evidence remains INCOMPLETE; negative cash and
 search inadmissibility retain their current precedence. Rehashing a subset export
 or declaring a complete manifest cannot certify its omitted population.
 
-**Next dependency:** define and implement source-bound opening/flow/position-mark
-and population-coverage production in the existing BACKTEST simulation/accounting
-path, starting with a fully recorded, homogeneous zero-flow window. First prove
-that its actual source can persist the facts above; then add the strict schema
-and transactional persistence plus an adapter to the existing report. Do not
-build a dormant ledger before the source and valuation semantics exist. No Mini
-is needed for that software task, but it is not solved by current risk snapshots
-or available closure exports. Actual historical data remains unavailable until
-such a producer supplies attributable records. #344 and subsequent learning,
+**Next dependency:** the prospective capture below persists attributable source
+facts, but legacy eager simulation still cannot certify chronological executable
+marks and accrued open costs. Extend those source semantics before adding strict
+capital consumer admission. No Mini is required. Historical data without actual
+producer records remains unavailable; no existing report is backfilled. #344,
 physical acceptance and LIVE authorization remain independent requirements.
+
+
+### Prospective BACKTEST source capture (v1)
+
+New runs may opt in with `backtest_order.py --source-evidence`. This is a local,
+SQLite-only USDT `BacktestPortfolioState` path. It creates additive
+`backtest_source_runs` and `backtest_source_events` tables only when selected;
+normal initialization, PAPER and LIVE are unaffected. Existing runs cannot be
+backfilled. `backtest_source_evidence.json` is exported from a consistent SQL
+snapshot after lifecycle persistence and atomic finalization.
+
+The constructor records actual initial simulated capital before decisions, the
+flat opening inventory and its origin. Source identity binds the run/window,
+full git SHA, relevant source-file content digest, nonsecret resolved config/CLI
+(connection URLs are excluded because they can embed credentials),
+strategy and cost configuration, requested universe and exact source candles.
+Source capture observes the real simulator lifecycle before portfolio replay and
+records each canonical net-cash effect when `BacktestPortfolioState` closes it.
+Quantities reuse the same `filled_position_quantity` function as finalization;
+realized geometry and costs reuse `realized_accounting`. Fees and funding remain
+components of the net closure amount, never additional cash debits or deposits.
+External flows are unsupported. The owned close-only simulation mutation path,
+initialization and complete event population provide zero-flow coverage; an
+unexplained change invalidates conservation.
+
+Immutable event keys/sequence and payload hashes allow identical retries and
+reject conflicting retries. Finalization holds a SQLite writer reservation,
+reconciles source and SQL open/closed lifecycle populations, checks actual
+portfolio inventory and closing cash against the observed cash chain, and seals
+the SQL snapshot and event population. An interrupted run has no completion
+watermark. Export rejects subsequent SQL snapshot drift. Independent replay uses
+`validate_source_packet` with identity/completion hashes obtained from canonical
+SQL or an independently retained receipt, never trusted solely from the packet.
+Hashes establish integrity relative to that source; they do not authenticate an
+arbitrarily supplied file. Consumers still ignore capital manifest assertions.
+
+Coverage is `[start, end)`, with the opening before all interval events and the
+closing after events strictly before `end`. Valuations retain stable position
+IDs, side, quantity, fill and source candle hashes. Candle-close gross unrealized
+P&L is diagnostic; a mark is available only at its exact candle-close boundary
+(no stale carry or future quote). Complete source bars are required across the
+requested universe and schedule. Empty input is not proof of a flat portfolio.
+Flat snapshots reconcile marked equity to attributable simulated cash.
+
+Limitations are explicit: the legacy eager simulator uses candle-label event
+times, can process future closures before another candidate, and supplies no
+observed accrued open-position costs or executable quote marks. Any trade retains
+`CANDLE_LABEL_EVENT_TIME_ONLY`; open inventory additionally retains
+`OPEN_POSITION_ACCRUED_COSTS_UNAVAILABLE`, with marked equity null. Gaps in bars,
+unknown closure costs/cash, population mismatch, negative cash and unexplained
+capital changes cannot become complete evidence. A fully covered flat run can
+have COMPLETE **source** evidence; this is never a historical-validation PASS.
+Source budgets are 100,000 candles/events/position-valuation pairs and 10,000
+scheduled intervals. Unsupported or excessive scope is rejected before qualification.
+
+Capital return and drawdown remain null, including for complete source packets.
+No source record is presented as historical account settlement or actual market
+execution: the product basis is the existing legacy notional/P&L simulation.
+Deterministic fixtures and offline CLI runs prove implementation behavior only.
+The remaining dependency is source-owned chronological event time and accrued
+cost/mark semantics, followed by a separately tested strict consumer admission
+contract. No Mac Mini, PAPER, physical calibration or LIVE action is required.
