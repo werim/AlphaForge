@@ -201,6 +201,26 @@ def campaign_uses_stats_only_retention(campaign: Mapping[str, Any]) -> bool:
     return str((provenance or {}).get("storage_retention_mode") or "").upper() == "PAPER_STATS_ONLY"
 
 
+def campaign_is_storage_calibration(campaign: Mapping[str, Any]) -> bool:
+    provenance = campaign.get("source_provenance")
+    if not isinstance(provenance, Mapping):
+        provenance = json.loads(campaign.get("source_provenance_json") or "{}")
+    return provenance.get("purpose") == "STORAGE_CALIBRATION_ONLY"
+
+
+def require_storage_calibration_worker(engine: Engine, campaign_id: str, permit=None) -> None:
+    with engine.connect() as conn:
+        calibration = campaign_is_storage_calibration(get_campaign(conn, campaign_id) or {})
+    if calibration:
+        from alphaforge.storage_measurement import CalibrationPermit, DURATION
+        from alphaforge.config import load_config_from_env
+        if type(permit) is not CalibrationPermit:
+            raise RuntimeError("STORAGE_CALIBRATION_OWNED_WORKER_REQUIRED")
+        permit.assess(Path(str(engine.url.database)), load_config_from_env(), DURATION)
+    elif permit is not None:
+        raise RuntimeError("CALIBRATION_PERMIT_CANNOT_AUTHORIZE_NORMAL_RUNTIME")
+
+
 def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",), dynamic_universe: bool = False) -> dict[str, Any]:
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
@@ -567,6 +587,8 @@ def require_operational_campaign_evidence(conn: Any, campaign_id: str) -> None:
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")
+    if campaign_is_storage_calibration(c) and (resume or c.get("active_run_id")):
+        raise RuntimeError("STORAGE_CALIBRATION_SINGLE_ATTEMPT_NO_RESUME")
     if _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND event_type=:kind LIMIT 1", {"cid": campaign_id, "kind": AMBIGUITY_MAINTENANCE_EVENT}).fetchone():
         raise RuntimeError("PRESERVED_AMBIGUITY_MAINTENANCE_ONLY_NO_CONTINUATION")
     require_operational_campaign_evidence(conn, campaign_id)
@@ -878,6 +900,9 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     ]
     metrics["position_management_event_count"] = len(management_rows)
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
+    if campaign_is_storage_calibration(c):
+        metrics["qualification_eligible"] = False
+        metrics["evidence_purpose"] = "STORAGE_CALIBRATION_ONLY"
     if campaign_uses_stats_only_retention(c):
         from alphaforge.storage_policy import stats_only_campaign_summary
         raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection.driver_connection
@@ -1076,6 +1101,10 @@ def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresho
     # The progress/hash check is read-only.  Do not rebuild the synthetic run
     # when the latest qualification already names the exact current evidence.
     with engine.connect() as read_conn:
+        campaign = get_campaign(read_conn, campaign_id)
+        if campaign and campaign_is_storage_calibration(campaign):
+            return {"campaign_id": campaign_id, "qualification_id": None,
+                    "verdict": "STORAGE_CALIBRATION_NOT_QUALIFICATION_ELIGIBLE", "materialized": False}
         require_operational_campaign_evidence(read_conn, campaign_id)
         current = aggregate_campaign(read_conn, campaign_id)
         campaign = get_campaign(read_conn, campaign_id)
@@ -1230,6 +1259,8 @@ def check_campaign_completion(conn: Any, campaign_id: str) -> dict[str, Any]:
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
+    if campaign_is_storage_calibration(c):
+        return {"campaign_id": campaign_id, "complete": False, "blockers": ["STORAGE_CALIBRATION_ONLY"]}
     agg = aggregate_campaign(conn, campaign_id)
     metrics = agg.get("metrics", {}) if agg.get("status") == "OK" else {}
     pending_rejects = int((_exec(conn, f"SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND {UNRESOLVED_REJECT_SQL}", {"cid": campaign_id}).fetchone()[0]) or 0)
@@ -1291,13 +1322,14 @@ class BinanceReadOnlyCandleProvider:
 
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
-    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, position_management_provider: Any | None = None, position_management_shadow_provider: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
+    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, position_management_provider: Any | None = None, position_management_shadow_provider: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None, storage_calibration_permit: Any | None = None) -> None:
+        self.storage_calibration_permit = storage_calibration_permit
         self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.position_management_provider = position_management_provider; self.position_management_shadow_provider = position_management_shadow_provider; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
             c = get_campaign(conn, self.campaign_id) or {}
-            if campaign_uses_stats_only_retention(c):
+            if campaign_uses_stats_only_retention(c) or campaign_is_storage_calibration(c):
                 return False
             count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
             agg = aggregate_campaign(conn, self.campaign_id)
@@ -1553,6 +1585,7 @@ class BurnInCampaignRunner:
                 self._stop_event.set(); return
 
     async def run_foreground(self) -> dict[str, Any]:
+        require_storage_calibration_worker(self.engine, self.campaign_id, self.storage_calibration_permit)
         old_campaign = os.environ.get("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         old_alpha_mode = os.environ.get("ALPHAFORGE_EXECUTION_MODE")
         old_mode = os.environ.get("EXECUTION_MODE")
@@ -1590,6 +1623,8 @@ class BurnInCampaignRunner:
                 with self.engine.begin() as conn:
                     fail_active_campaign_run(conn, self.campaign_id, "PERSISTENCE_DB_IDENTITY_MISMATCH", details=details)
                 raise RuntimeError("PERSISTENCE_DB_IDENTITY_MISMATCH")
+            if self.storage_calibration_permit is not None:
+                runtime._storage_calibration_permit = self.storage_calibration_permit
             attach = getattr(runtime, "_attach_phase8_campaign", None)
             if callable(attach): attach(self.campaign_id)
             else: raise RuntimeError("PHASE8_RUNTIME_ATTACH_UNAVAILABLE")
