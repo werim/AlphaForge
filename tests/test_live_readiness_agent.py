@@ -253,8 +253,8 @@ def test_unavailable_git_status_is_not_clean(monkeypatch, tmp_path):
         if cmd[-2:] == ["status", "--porcelain"]:
             return SimpleNamespace(returncode=128, stdout="")
         if cmd[-2:] == ["rev-parse", "HEAD"]:
-            return SimpleNamespace(returncode=0, stdout="abc\\n")
-        return SimpleNamespace(returncode=0, stdout="dev\\n")
+            return SimpleNamespace(returncode=0, stdout="abc\n")
+        return SimpleNamespace(returncode=0, stdout="dev\n")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     meta = module.git(tmp_path)
