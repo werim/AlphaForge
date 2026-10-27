@@ -22,17 +22,21 @@ permissions:
   issues: write
 
 concurrency:
-  group: codex-delivery-${{ github.event.workflow_run.head_sha || github.event.issue.number || github.event.inputs.pr_number || github.run_id }}
+  group: codex-delivery-verifier-v1
   cancel-in-progress: false
 
 jobs:
   verify:
     # Ignore ordinary discussion and the verifier's own comments.
     if: >-
-      github.event_name != 'issue_comment' ||
-      (github.event.issue.pull_request &&
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
        contains(github.event.comment.body, 'TASK: #') &&
-       contains(github.event.comment.body, 'RESULT:'))
+       contains(github.event.comment.body, 'RESULT:')) ||
+      (github.event_name == 'workflow_run' &&
+       (startsWith(github.event.workflow_run.head_branch, 'codex/') ||
+        github.event.workflow_run.pull_requests[0] != null))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
