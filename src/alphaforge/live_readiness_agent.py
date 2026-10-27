@@ -73,8 +73,13 @@ class DB:
     def tables(self): return {x["name"] for x in self.rows("SELECT name FROM sqlite_master WHERE type='table'")}
 def git(repo):
     def r(*a):
-        p=subprocess.run(["git",*a],cwd=repo,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False); return p.stdout.strip() if p.returncode==0 else None
-    return {"commit":r("rev-parse","HEAD"),"branch":r("branch","--show-current"),"dirty":bool(r("status","--porcelain"))}
+        try:
+            p=subprocess.run(["git",*a],cwd=repo,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False)
+        except OSError:
+            return None
+        return p.stdout.strip() if p.returncode==0 else None
+    status=r("status","--porcelain")
+    return {"commit":r("rev-parse","HEAD"),"branch":r("branch","--show-current"),"dirty":None if status is None else bool(status)}
 class LiveReadinessAgent:
     def __init__(self,db_path,campaign_id,*,repo=None,now=None,git_metadata=git,heartbeat_max_age_seconds=300): self.path=Path(db_path); self.cid=campaign_id; self.repo=Path(repo or Path.cwd()); self.now=now or datetime.now(timezone.utc).replace(microsecond=0); self.gm=git_metadata; self.age=heartbeat_max_age_seconds; self.scope={"campaign_id":campaign_id,"burnin_run_id":None,"release_id":None}
     def g(self,i,s,r,src,o,e): return Gate(i,s,r,src,o,e,ts(self.now),dict(self.scope))
@@ -91,7 +96,9 @@ class LiveReadinessAgent:
             if c:self.scope.update(burnin_run_id=c.get("active_run_id"),release_id=c.get("release_id"))
             m=self.gm(self.repo); src="git metadata + campaign provenance"
             g1=self.miss("GIT_IDENTITY",src,"campaign commit equals evaluator commit") if not c or not m.get("commit") else self.g("GIT_IDENTITY",PASS if c.get("git_commit")==m["commit"] else BLOCKED,"COMMIT_MATCH" if c.get("git_commit")==m["commit"] else "CAMPAIGN_COMMIT_MISMATCH",src,{"campaign":c.get("git_commit"),"checkout":m["commit"]},"campaign commit equals evaluator commit")
-            g2=self.g("WORKTREE_CLEAN",PASS if not m.get("dirty") else BLOCKED,"CLEAN" if not m.get("dirty") else "WORKTREE_DIRTY","git status --porcelain",{"dirty":m.get("dirty")},"evaluator worktree is clean")
+            dirty=m.get("dirty")
+            g2=(self.g("WORKTREE_CLEAN",PASS if not dirty else BLOCKED,"CLEAN" if not dirty else "WORKTREE_DIRTY","git status --porcelain",{"dirty":dirty},"evaluator worktree is clean")
+                if isinstance(dirty,bool) else self.miss("WORKTREE_CLEAN","git status --porcelain","evaluator worktree is clean"))
             absent=sorted(TABLES-tabs); g3=self.g("SCHEMA_VALID",PASS if not absent else NOT_OBSERVABLE,"CANONICAL_SCHEMA_PRESENT" if not absent else "REQUIRED_TABLES_MISSING","sqlite_master + schema_migrations",{"missing":absent},"canonical schema exists")
             g4=self.status(db,"PREFLIGHT_PASS","burnin_preflight_reports","campaign_id=?",(self.cid,),"generated_at","latest preflight PASS")
             h=at(c.get("last_heartbeat_at")) if c else None; healthy=c and str(c.get("campaign_status")).upper() in {"RUNNING","COMPLETED"} and not c.get("last_error")
