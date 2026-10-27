@@ -529,3 +529,55 @@ PYTHONPATH=src python -m alphaforge.historical_execution_scenario \
 Omit `--scenario` for observed-only verification. Output uses exclusive creation;
 keep native input and scenario artifacts separately. No scenario-only result may
 be imported as capital evidence, historical-validation PASS or LIVE readiness.
+
+### Isolated downstream scenario evaluation
+
+`historical_downstream_scenario` adds a separate
+`historical-downstream-scenario-v1` research envelope; the v1 MTF contract and
+native behavior remain unchanged. It accepts the same frozen input and explicit
+scenario JSON. Default observed-only mode has no modeled/downstream population.
+Only MTF_ALIGNED entries enter canonical BACKTEST stateless AIBrain scoring,
+confirmation, `order.evaluate_signal_decision` (pure pre-submit quality/execution
+cost), portfolio risk and sizing. It never calls order-cycle, fill or accounting
+functions. Upstream/MTF decisions, reasons and source IDs are retained intact.
+
+Scoring/confirmation precede shared quality/cost, requested notional, portfolio
+risk and final sizing. Requested notional needs attributable current balance
+before the portfolio snapshot; its authority is `BacktestPortfolioState.notional_for`.
+Without source state this call is unavailable, rather than constructing a flat
+portfolio from the opening seed.
+Independent later diagnostics may still be computed, but cannot override an
+earlier unsupported gate. Final outcomes are UPSTREAM_REJECT, MTF_REJECT,
+DOWNSTREAM_REJECT, NOT_EVALUABLE or SCENARIO_DOWNSTREAM_ALIGNED. The last is
+research eligibility only; it never authorizes an order or native admission.
+
+Native predicates sometimes compute aggregate numbers with missing-input
+fallbacks. Such numbers are not evidence: missing scorer funding/fakeout inputs
+suppress aggregate score/expectancy/confirmation; missing execution-cost inputs
+suppress effective RR and total/residual cost feasibility. Native diagnostic
+flags remain explicitly unqualified. Known canonical features, candidate and
+expected-fill RR geometry, and separate scenario fee/slippage/spread/latency/
+liquidity components remain inspectable. Funding stays null, fees are not booked,
+and expected fill is a model estimate with actual fill null. No duplicated cost
+or accounting formula is introduced.
+
+Observed-native flat snapshots do not establish a counterfactual portfolio
+sequence. This version supplies no fabricated equity, balance, position count,
+notional or risk history. Canonical portfolio risk receives an explicitly
+incomplete snapshot and sizing an unavailable original notional; both remain
+NOT_EVALUABLE even if a diagnostic policy were fail-open. Opening capital must
+not substitute for current sizing balance. Full eligibility cannot be established
+without supported scoring/cost inputs and source-owned chronological state.
+Native SL/TP representation and capital consumer admission remain blocked.
+
+```bash
+PYTHONPATH=src python -m alphaforge.historical_downstream_scenario \
+  --input /path/to/frozen/input.json --scenario /path/to/same-scenario.json \
+  --output /private/tmp/new-downstream.json
+```
+
+The separate output is exclusively created. Replay takes independently retained
+input hash and scenario, re-evaluates canonical native/MTF/downstream gates and
+rejects rehashed promotion. Artifacts carry prefix/time/config/source/model/code
+identities and full populations. They are not historical fills, realized costs,
+marked-equity evidence, historical-validation PASS or LIVE readiness.
