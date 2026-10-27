@@ -460,3 +460,17 @@ identity/completion pins read independently from primary SQL or retained receipt
 Exact existing packet replay is distinct from collecting a fresh observation.
 Conflicting same-run identities remain refused; no old historical record is
 upgraded or backfilled.
+
+Native MTF execution contexts expose `unavailable_market_fields` for the existing
+mandatory numeric prerequisites: spread, expected slippage, market-data latency
+and liquidity. This is a diagnostic of that gate, not source authentication or
+permission to fill missing values. The canonical scanner measures market-data
+latency as client HTTP RTT; order acknowledgement latency and orderbook imbalance
+are separate fields. Neither OHLC nor exchange event/transaction timestamps prove
+historical client RTT. A publisher-checksummed USD-M depth archive cannot supply
+that measurement or establish compatibility with a SPOT candle run. Existing
+BACKTEST spread/slippage/liquidity estimates remain model inputs, not observed
+microstructure. Without compatible, decision-time source observations, retain
+`MTF_EXECUTION_UNAVAILABLE`; do not introduce a provider that cannot satisfy the
+gate. Native protective SL/TP representation and consumer admission remain
+separately blocked.
