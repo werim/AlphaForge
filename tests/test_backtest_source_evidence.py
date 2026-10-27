@@ -87,6 +87,50 @@ def test_real_simulator_persistence_cash_and_mark_inputs(tmp_path, monkeypatch):
     assert packet(producer)['completion'] == result
 
 
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+@pytest.mark.parametrize('order_type', ['LIMIT', 'MARKET'])
+def test_delayed_entry_uses_trigger_bar_without_pretrigger_inventory(tmp_path, side, order_type):
+    """Candle labels bound events; they never establish exact intrabar time."""
+    long = side == 'LONG'
+    candles = [
+        bo.Candle(START, 105., 106., 104., 105., 1000.),
+        bo.Candle(START+60_000, 100., 104. if long else 100.5,
+                  99.5 if long else 96., 103. if long else 97., 1000.),
+    ]
+    producer, state, url = setup_source(tmp_path, candles={'BTCUSDT': candles})
+    candidate = bo.CandidateOrder(START, 'BTCUSDT', side, 100.,
+        99. if long else 101., 103. if long else 97., 3.,
+        'TEST', 'DELAYED_ENTRY_REGRESSION', 'TREND', 9., order_type)
+    costs = {key: 0. for key in ('entry_spread', 'exit_spread', 'entry_slippage',
+        'exit_slippage', 'entry_fee', 'exit_fee', 'funding', 'latency_impact_penalty')}
+    rows = bo.simulate_candidate(candidate, candles, 0 if order_type == 'LIMIT' else 1,
+        1000., 1., market_ctx=dict(realized_costs_usd=costs,
+        realized_cost_source='TEST_OBSERVED_ZERO_COSTS'), evidence_producer=producer)
+    for status in ('ENTRY_TRIGGERED', 'ORDER_PLACED', 'POSITION_OPENED'):
+        assert next(r for r in rows if r.status_after == status).timestamp == START+60_000
+    assert next(r for r in rows if r.status_after == 'SIGNAL_CREATED').timestamp == START
+    opened = next(r for r in rows if r.status_after == 'POSITION_OPENED')
+    closed = next(r for r in rows if r.status_after == 'POSITION_CLOSED')
+    state.open_position(position_id=opened.position_id, symbol=opened.symbol, side=side,
+        notional=10., entry_price=opened.trigger_price, timestamp=opened.timestamp)
+    state.close_position(position_id=closed.position_id, symbol=closed.symbol,
+        timestamp=closed.timestamp, net_pnl_usdt=closed.net_pnl_usdt, close_reason=closed.close_reason)
+    bo._persist_lifecycle_rows(rows, database_url=url, run_id=producer.identity.run_id)
+    result = producer.finish()
+    proof = packet(producer)
+    source_open = next(e for e in proof['events'] if e['kind'] == 'LIFECYCLE'
+                       and e['payload']['status_after'] == 'POSITION_OPENED')
+    assert source_open['effective_ms'] == START+60_000
+    assert result['valuations'][1]['positions'] == []
+    assert result['valuations'][1]['settled_cash_usdt'] == 1000.
+    assert result['valuations'][-1]['settled_cash_usdt'] == pytest.approx(state.current_equity)
+    assert result['status'] == 'INCOMPLETE'
+    assert 'CANDLE_LABEL_EVENT_TIME_ONLY' in result['gaps']
+    assert all(v['marked_equity_usdt'] is None for v in result['valuations'])
+    validate_source_packet(proof, expected_identity_hash=proof['identity_hash'],
+        expected_completion_hash=proof['completion_hash'])
+
+
 @pytest.mark.parametrize('value', [None, True, '1000', float('nan'), float('inf'), -1., 0.])
 def test_missing_or_invalid_opening_never_inherits_final_balance(tmp_path, value):
     with pytest.raises((ValueError, TypeError)):

@@ -257,6 +257,13 @@ physical acceptance and LIVE authorization remain independent requirements.
 
 ### Prospective BACKTEST source capture (v1)
 
+Entry-triggered, order-placed and position-opened events use the triggering
+candle label, including delayed entries. Signal events retain the original
+decision label. Source capture and SQL preserve these distinct times so a
+position does not enter valuation inventory before its triggering candle.
+This correction does not establish exact intrabar execution time or remove
+the traded-run completeness restrictions below.
+
 New runs may opt in with `backtest_order.py --source-evidence`. This is a local,
 SQLite-only USDT `BacktestPortfolioState` path. It creates additive
 `backtest_source_runs` and `backtest_source_events` tables only when selected;

@@ -1386,13 +1386,16 @@ def simulate_candidate(
     )
     triggered_ts = None
     trigger_price = 0.0
+    # Entry transitions use the triggering candle label, even for a delayed
+    # trigger. The signal timestamp remains the identity/decision boundary;
+    # neither label establishes an exact intrabar execution time.
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
         triggered_ts = candles[idx].timestamp
         trigger_price = candidate.entry
         start_idx = idx
         rows.append(
             LifecycleRow(
-                candidate.timestamp,
+                triggered_ts,
                 candidate.symbol,
                 candidate.side,
                 candidate.setup_type,
@@ -1419,7 +1422,7 @@ def simulate_candidate(
         )
         rows.append(
             LifecycleRow(
-                candidate.timestamp,
+                triggered_ts,
                 candidate.symbol,
                 candidate.side,
                 candidate.setup_type,
@@ -1446,7 +1449,7 @@ def simulate_candidate(
         )
         rows.append(
             LifecycleRow(
-                candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
+                triggered_ts, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
                 candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ORDER_PLACED", "POSITION_OPENED",
                 trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket,
                 volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
@@ -1468,7 +1471,7 @@ def simulate_candidate(
                 start_idx = j
                 rows.append(
                     LifecycleRow(
-                        candidate.timestamp,
+                        triggered_ts,
                         candidate.symbol,
                         candidate.side,
                         candidate.setup_type,
@@ -1495,7 +1498,7 @@ def simulate_candidate(
                 )
                 rows.append(
                     LifecycleRow(
-                        candidate.timestamp,
+                        triggered_ts,
                         candidate.symbol,
                         candidate.side,
                         candidate.setup_type,
@@ -1522,7 +1525,7 @@ def simulate_candidate(
                 )
                 rows.append(
                     LifecycleRow(
-                        candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
+                        triggered_ts, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
                         candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ORDER_PLACED", "POSITION_OPENED",
                         trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket,
                         volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
