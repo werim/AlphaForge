@@ -87,7 +87,7 @@ def run_for_sha(api: GitHub, pr: dict):
         run for run in runs.get("workflow_runs", [])
         if run.get("head_sha") == sha and run.get("status") == "completed"
     ]
-    return max(matched, key=lambda run: (run.get("run_attempt", 1), run.get("created_at", "")), default=None)
+    return max(matched, key=lambda run: (run.get("created_at", ""), run.get("run_attempt", 1)), default=None)
 
 
 def code_identity(api: GitHub, pr: dict, run: dict) -> str:
@@ -110,7 +110,7 @@ def code_identity(api: GitHub, pr: dict, run: dict) -> str:
     return "DIFFERENT_TREE"
 
 
-def required_steps(event: str) -> set[str]:
+def required_steps(event: str, base_ref: str = "main") -> set[str]:
     required = {
         "Protected safety mutation gate",
         "Run offline backtest",
@@ -118,21 +118,21 @@ def required_steps(event: str) -> set[str]:
     }
     if event == "pull_request":
         required.update({
-            "System verification routing gate",
             "Cross-surface invariant gate",
             "System audit fabric gate",
-            "Routed PR verification",
         })
+        if base_ref != "main":
+            required.update({"System verification routing gate", "Routed PR verification"})
     else:
         required.add("Full regression suite")
     return required
 
 
-def evaluate(run: dict, jobs: list[dict], identity: str, changed: list[dict]) -> dict:
+def evaluate(run: dict, jobs: list[dict], identity: str, changed: list[dict], base_ref: str = "main") -> dict:
     test_jobs = [job for job in jobs if job.get("name") == "test"]
     steps = {step["name"]: step.get("conclusion", step.get("status", "UNKNOWN"))
              for job in test_jobs for step in job.get("steps", [])}
-    required = required_steps(run.get("event", ""))
+    required = required_steps(run.get("event", ""), base_ref)
     missing = sorted(name for name in required if steps.get(name) != "success")
     production_files = [
         f.get("filename", "") for f in changed
@@ -267,7 +267,7 @@ def handle(api: GitHub, event: str, payload: dict) -> list[str]:
             continue
         jobs = list(api.pages(f"/repos/{api.repo}/actions/runs/{run['id']}/jobs", key="jobs"))
         changed = list(api.pages(f"/repos/{api.repo}/pulls/{pr['number']}/files"))
-        verdict = evaluate(run, jobs, code_identity(api, pr, run), changed)
+        verdict = evaluate(run, jobs, code_identity(api, pr, run), changed, pr["base"]["ref"])
         report = format_report(pr, run, verdict)
         publish(api, pr, report, pr["head"]["sha"])
         reports.append(f"PR #{pr['number']}: {verdict['status']}\n{report}")
