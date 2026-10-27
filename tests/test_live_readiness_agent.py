@@ -242,3 +242,49 @@ def test_release_safety_evidence_from_different_commit_is_blocked(tmp_path):
     r=report(db)
     assert gate(r,"ROLLBACK_EVIDENCE")["status"]==BLOCKED
     assert gate(r,"RUNBOOK_EVIDENCE")["status"]==BLOCKED
+
+
+def test_unavailable_git_status_is_not_clean(monkeypatch, tmp_path):
+    """Git command failure must not be promoted to a clean checkout."""
+    from types import SimpleNamespace
+    import alphaforge.live_readiness_agent as module
+
+    def fake_run(cmd, **_):
+        if cmd[-2:] == ["status", "--porcelain"]:
+            return SimpleNamespace(returncode=128, stdout="")
+        if cmd[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="abc\\n")
+        return SimpleNamespace(returncode=0, stdout="dev\\n")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    meta = module.git(tmp_path)
+    assert meta["commit"] == "abc"
+    assert meta["dirty"] is None
+
+    def missing_executable(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(module.subprocess, "run", missing_executable)
+    assert module.git(tmp_path) == {"commit": None, "branch": None, "dirty": None}
+
+
+def test_readiness_refuses_unknown_checkout_cleanliness(tmp_path):
+    db = tmp_path / "campaign.db"
+    make_db(db)
+    for unknown in (None, "", 0):
+        result = LiveReadinessAgent(
+            db, "camp", now=NOW,
+            git_metadata=lambda _repo, value=unknown: {
+                "commit": "abc", "branch": "dev", "dirty": value,
+            },
+        ).evaluate()
+        assert gate(result, "GIT_IDENTITY")["status"] == PASS
+        assert gate(result, "WORKTREE_CLEAN")["status"] == NOT_OBSERVABLE
+        assert result["overall_status"] != "READINESS_READY"
+
+    dirty_result = LiveReadinessAgent(
+        db, "camp", now=NOW,
+        git_metadata=lambda _: {"commit": "abc", "branch": "dev", "dirty": True},
+    ).evaluate()
+    assert gate(dirty_result, "WORKTREE_CLEAN")["status"] == BLOCKED
+    assert gate(report(db), "WORKTREE_CLEAN")["status"] == PASS
