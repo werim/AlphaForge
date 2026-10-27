@@ -1,0 +1,52 @@
+# Trusted main branch only. PR code must never be checked out.
+# Becomes active after this workflow is merged onto default branch main.
+name: Codex Delivery Verification
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Open Codex PR number for read-only verification"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: codex-delivery-verifier-v1
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # Ignore ordinary discussion and the verifier's own comments.
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, 'TASK: #') &&
+       contains(github.event.comment.body, 'RESULT:')) ||
+      (github.event_name == 'workflow_run' &&
+       (startsWith(github.event.workflow_run.head_branch, 'codex/') ||
+        github.event.workflow_run.pull_requests[0] != null))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted main verifier only
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify latest task delivery without PR checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/verify_codex_delivery.py

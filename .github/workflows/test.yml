@@ -50,6 +50,9 @@ jobs:
       - name: Compile
         run: python -m compileall -q src
 
+      - name: Codex delivery verifier regressions
+        run: python -m pytest -q tests/test_verify_codex_delivery.py
+
       - name: Cross-surface invariant gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py tests/test_ci_branch_contract.py
