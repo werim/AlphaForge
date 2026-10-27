@@ -474,3 +474,58 @@ microstructure. Without compatible, decision-time source observations, retain
 `MTF_EXECUTION_UNAVAILABLE`; do not introduce a provider that cannot satisfy the
 gate. Native protective SL/TP representation and consumer admission remain
 separately blocked.
+
+### Opt-in historical execution scenarios
+
+`historical_execution_scenario` is a separate research evaluator. Default
+`OBSERVED_NATIVE` verifies and preserves the frozen native audit without modeled
+records. Only an explicit `--scenario` JSON enables `MODELED_HISTORICAL_V1`.
+It calls the canonical closed-1m aggregation and MTF predicate/geometry builders;
+it never reroutes native strategy, PAPER/LIVE, risk, orders or accounting.
+
+The first version evaluates **MTF only**, retaining earlier native rejections.
+`MTF_ALIGNED` is not full strategy ACCEPT: downstream scoring/risk/cost gates are
+`NOT_EVALUATED`. All original native reasons/diagnostics remain in a separate
+`observed_native` population. Fee is declared but not booked; no simulated fill,
+SL/TP execution, marked equity or capital consumer admission is produced.
+
+The strict `ExecutionScenario` JSON requires every field in its typed contract:
+`schema=historical-execution-scenario-v1`, name, source_provider, venue, product,
+instrument, input_hash, native_config_hash, start_ms, end_ms,
+assumptions_effective_from_ms, market_data_latency_ms, order_latency_ms,
+spread_pct, expected_slippage_pct, liquidity_score and fee_pct. Hashes are SHA256
+canonical `digest(input)` and `digest(input['strategy_evidence']['profile'])`.
+Only the existing Binance SPOT BTCUSDT 1m adapter scope is supported. Rates are
+fractions, timestamps UTC epoch milliseconds, latencies integer milliseconds
+less than one minute each. Missing, unknown, nonfinite, negative, mismatched or
+out-of-range parameters are rejected; no assumption defaults to zero.
+
+Assumptions are explicit, uncalibrated counterfactual inputs. Their effective
+start is a modeled coverage domain, not a claimed historical declaration time.
+For the native decision at `t`, the evaluator consumes exactly the already-closed
+prefix through `t`; assumed availability and modeled decision are
+`t + market_data_latency_ms`. It admits no later candle from that shift.
+The earliest hypothetical execution is the strictly subsequent minute boundary
+after modeled decision plus order latency. Out-of-window boundaries are labeled;
+no execution takes place. RTT is conservatively used as an explicit availability
+delay, not inferred one-way latency or measured publication/receive timing.
+
+Separate JSON artifacts retain source provenance, full populations, input/config/
+code/scenario identities, assumptions, timing policy and limitations. Modeled MTF
+execution status is `MODELED_NOT_OBSERVED`; measured latency fields remain null.
+Funding, orderbook and submit/ack observations remain unsupported. Unknown native
+inputs are never overwritten. Reusing that modeled context at the observed native
+gate fails closed. Replay requires separately supplied frozen input and scenario,
+checks an external input hash pin, recomputes native and modeled decisions, and
+rejects rehashed tampering. Hashes bind content; they do not authenticate a provider
+or prove a real historical receipt. Verify archive checksums independently.
+
+```bash
+PYTHONPATH=src python -m alphaforge.historical_execution_scenario \
+  --input /path/to/native/input.json --scenario /path/to/explicit-scenario.json \
+  --output /private/tmp/new-scenario.json
+```
+
+Omit `--scenario` for observed-only verification. Output uses exclusive creation;
+keep native input and scenario artifacts separately. No scenario-only result may
+be imported as capital evidence, historical-validation PASS or LIVE readiness.
