@@ -15,6 +15,7 @@ from sqlalchemy import text
 from .realized_accounting import finite_cash, filled_position_quantity, position_cash_geometry, realized_cash_ledger, sum_cash
 
 VERSION = "backtest-source-v1"
+BOUNDARY_VERSION = "backtest-boundary-v1"
 DDL = (
     """CREATE TABLE IF NOT EXISTS backtest_source_runs (
         run_id TEXT PRIMARY KEY, identity_hash TEXT NOT NULL, identity_json TEXT NOT NULL,
@@ -71,7 +72,7 @@ class SourceIdentity:
             raise ValueError("source timestamps/interval must be nonnegative integer milliseconds")
         if not self.start_ms < self.end_ms or not self.interval_ms:
             raise ValueError("invalid source window")
-        if self.currency != "USDT" or self.version != VERSION:
+        if self.currency != "USDT" or self.version not in {VERSION, BOUNDARY_VERSION}:
             raise ValueError("unsupported source settlement/version")
         for name in ("run_id", "window_id"):
             if type(getattr(self, name)) is not str or not getattr(self, name).strip():
@@ -115,12 +116,15 @@ class BacktestSourceProducer:
         if type(state.initial_equity) not in (int, float) or initial is None or initial <= 0 or state.current_equity != initial or state.open_positions:
             raise ValueError("source initialization requires a new flat positive-capital simulation")
         identity = asdict(self.identity)
-        init = {"mode": "BACKTEST", "product_semantics": "LEGACY_NOTIONAL_PNL_SIMULATION", "kind": "SIMULATION_INITIALIZED", "effective_ms": self.identity.start_ms,
+        init = {"mode": "BACKTEST", "product_semantics": ("USDT_LINEAR_NO_FUNDING" if self.identity.version == BOUNDARY_VERSION else "LEGACY_NOTIONAL_PNL_SIMULATION"), "kind": "SIMULATION_INITIALIZED", "effective_ms": self.identity.start_ms,
                 "initial_equity_usdt": initial, "opening_positions": [],
                 "capital_origin": "BACKTEST_PORTFOLIO_CONSTRUCTOR", "source_order": 0,
                 "flow_authority": "INSTRUMENTED_CLOSE_ONLY_V1", "source_candles": self.source,
                 "provenance": self.provenance,
                 "observed_time_basis": "PRODUCER_WALL_UTC_NOT_HISTORICAL_DELIVERY"}
+        if self.identity.version == BOUNDARY_VERSION:
+            init['timing_semantics'] = 'SIMULATED_CANDLE_BOUNDARIES_NOT_OBSERVED_INTRABAR'
+            init['cost_recognition'] = 'ENTRY_COST_ACCRUAL_NET_CASH_ON_FULL_CLOSE'
         with self.engine.begin() as conn:
             old = conn.execute(text("SELECT * FROM backtest_source_runs WHERE run_id=:r"), {"r": self.identity.run_id}).mappings().first()
             if old:
@@ -207,7 +211,7 @@ class BacktestSourceProducer:
             closed_ids = {p["position_id"] for p in source if p["status_after"] == "POSITION_CLOSED"}
             if set(self.state.open_positions) != opened_ids - closed_ids or self.state.closed_position_ids != closed_ids:
                 gaps.append("PORTFOLIO_POSITION_POPULATION_MISMATCH")
-            snapshots, inventory_gaps = _valuations(self.identity, packet["initialization"], source, self.source)
+            snapshots, inventory_gaps = _source_valuations(self.identity, packet["initialization"], packet["events"])
             gaps.extend(inventory_gaps)
             cash = [e["payload"] for e in packet["events"] if e["kind"] == "CASH_CLOSED"]
             if sorted((p["position_id"], p["net_pnl_usdt"]) for p in cash) != sorted((p[0], p[2]) for p in captured):
@@ -241,10 +245,18 @@ class BacktestSourceProducer:
                           closing_cash_usdt=self.state.current_equity,
                           external_flows=[],
                           zero_flow_coverage="INCOMPLETE" if "UNSUPPORTED_CAPITAL_MUTATION" in gaps else "OWNED_CLOSE_ONLY",
-                          valuations=snapshots, valuation_basis="CANDLE_CLOSE_NOT_EXECUTABLE_QUOTE",
+                          valuations=snapshots, valuation_basis=("CANDLE_BOUNDARY_MODELED_EXECUTION_BOOK_EQUITY" if self.identity.version == BOUNDARY_VERSION else "CANDLE_CLOSE_NOT_EXECUTABLE_QUOTE"),
                           capital_return_pct=None, max_drawdown_pct=None)
             self._append([("FINAL", "FINAL", self.identity.end_ms, result)], conn=conn)
         return result
+
+
+def _source_valuations(identity, initialization, events):
+    if identity.version == BOUNDARY_VERSION:
+        from .backtest_chronology import replay_boundary_evidence
+        return replay_boundary_evidence(identity, initialization, events)
+    return _valuations(identity, initialization,
+        [e["payload"] for e in events if e["kind"] == "LIFECYCLE"], initialization["source_candles"])
 
 
 def _qualify_valuations(snapshots, gaps):
@@ -423,7 +435,10 @@ def validate_source_packet(packet, *, expected_identity_hash, expected_completio
     events, done = packet["events"], packet["completion"]
     if len({e["event_key"] for e in events}) != len(events):
         raise ValueError("duplicate source event")
-    if any(e["kind"] not in {"LIFECYCLE", "CASH_CLOSED"} for e in events):
+    allowed = {"LIFECYCLE", "CASH_CLOSED"}
+    if identity.version == BOUNDARY_VERSION:
+        allowed |= {"SNAPSHOT", "COST_ACCRUED", "MODEL_DIAGNOSTIC"}
+    if any(e["kind"] not in allowed for e in events):
         raise ValueError("unsupported source event kind")
     if [e["sequence"] for e in events] != list(range(1, len(events) + 1)):
         raise ValueError("source sequence/population mismatch")
@@ -442,7 +457,7 @@ def validate_source_packet(packet, *, expected_identity_hash, expected_completio
     if done["coverage_end_ms"] != (packet["identity"]["end_ms"] if done["status"] == "COMPLETE" else None):
         raise ValueError("invalid source completion watermark")
     lifecycle = [e["payload"] for e in events if e["kind"] == "LIFECYCLE"]
-    snapshots, gaps = _valuations(identity, init, lifecycle, init["source_candles"])
+    snapshots, gaps = _source_valuations(identity, init, events)
     _qualify_valuations(snapshots, done["gaps"])
     if done["valuations"] != snapshots or not set(gaps).issubset(done["gaps"]):
         raise ValueError("source valuation replay mismatch")

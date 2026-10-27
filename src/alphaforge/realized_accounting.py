@@ -67,3 +67,39 @@ def filled_position_quantity(*, balance, risk_pct, fill, risk_scale=1.0, notiona
     price = finite_cash(fill)
     valid = scale is not None and 0 <= scale <= 1 and base is not None and base >= 0
     return base * scale / price if valid and price and price > 0 else None
+
+
+def candle_boundary_costs(*, entry_fill, quantity, fee_rate, exit_fill=None):
+    """Explicit no-funding linear simulation contract; slippage is in fill prices.
+
+    Future exit fees are unknown until exit, not an opening cash debit.
+    These are model-produced costs, never exchange observations.
+    """
+    values = (entry_fill, quantity, fee_rate)
+    if any(type(v) not in (int, float) or finite_cash(v) is None for v in values):
+        raise ValueError('invalid boundary cost inputs')
+    if entry_fill <= 0 or quantity <= 0 or not 0 <= fee_rate < 1:
+        raise ValueError('unsupported boundary cost geometry')
+    if exit_fill is not None and (type(exit_fill) not in (int, float) or finite_cash(exit_fill) is None or exit_fill <= 0):
+        raise ValueError('invalid boundary exit fill')
+    return dict(entry_fee=entry_fill*quantity*fee_rate,
+                exit_fee=None if exit_fill is None else exit_fill*quantity*fee_rate,
+                entry_spread=0., exit_spread=0., entry_slippage=0., exit_slippage=0.,
+                funding=0., latency_impact_penalty=0.)
+
+
+def marked_portfolio_equity(*, cash, positions):
+    """Book equity includes incurred open costs once, not future liquidation costs.
+
+    Caller must independently certify the full position population and mark scope.
+    Missing values propagate; an empty list alone is not population evidence.
+    """
+    components = [cash]
+    for position in positions:
+        accrued = finite_cash(position.get('accrued_cost_usdt'))
+        gross = finite_cash(position.get('unrealized_gross_usdt'))
+        if accrued is None or accrued < 0 or gross is None:
+            return None
+        components.extend((gross, -accrued))
+    result = sum_cash(components)
+    return finite_cash(result)

@@ -247,10 +247,9 @@ cash without complete capital evidence remains INCOMPLETE; negative cash and
 search inadmissibility retain their current precedence. Rehashing a subset export
 or declaring a complete manifest cannot certify its omitted population.
 
-**Next dependency:** the prospective capture below persists attributable source
-facts, but legacy eager simulation still cannot certify chronological executable
-marks and accrued open costs. Extend those source semantics before adding strict
-capital consumer admission. No Mini is required. Historical data without actual
+**Next dependency:** the legacy eager simulation remains incomplete. The explicit
+candle-boundary model below can supply complete modeled source equity for its
+narrow scope; strict capital consumer admission remains a separate task. No Mini is required. Historical data without actual
 producer records remains unavailable; no existing report is backfilled. #344,
 physical acceptance and LIVE authorization remain independent requirements.
 
@@ -306,7 +305,7 @@ Flat snapshots reconcile marked equity to attributable simulated cash.
 
 Limitations are explicit: the legacy eager simulator uses candle-label event
 times, can process future closures before another candidate, and supplies no
-observed accrued open-position costs or executable quote marks. Any trade retains
+observed accrued open-position costs or executable quote marks. Any legacy eager trade retains
 `CANDLE_LABEL_EVENT_TIME_ONLY`; open inventory additionally retains
 `OPEN_POSITION_ACCRUED_COSTS_UNAVAILABLE`, with marked equity null. Gaps in bars,
 unknown closure costs/cash, population mismatch, negative cash and unexplained
@@ -319,6 +318,80 @@ Capital return and drawdown remain null, including for complete source packets.
 No source record is presented as historical account settlement or actual market
 execution: the product basis is the existing legacy notional/P&L simulation.
 Deterministic fixtures and offline CLI runs prove implementation behavior only.
-The remaining dependency is source-owned chronological event time and accrued
-cost/mark semantics, followed by a separately tested strict consumer admission
-contract. No Mac Mini, PAPER, physical calibration or LIVE action is required.
+The separate candle-boundary path below supplies declared modeled timing and
+cost/mark semantics without upgrading these legacy packets. Consumer admission
+remains a separate unimplemented contract. No Mac Mini, PAPER, physical calibration or LIVE action is required.
+
+
+### Chronological candle-boundary execution (v1)
+
+`alphaforge.backtest_chronology` supplies one separately versioned production
+execution path on the same immutable source tables, canonical BACKTEST lifecycle
+SQL and `BacktestPortfolioState`. It accepts a strict frozen intent tape, not a
+new strategy or an upgrade of eager simulator output. Example deterministic run:
+
+```bash
+PYTHONPATH=src python -m alphaforge.backtest_chronology \
+  --input tests/fixtures/candle_boundary_backtest.json \
+  --output-dir /private/tmp/alphaforge-boundary-demo
+```
+
+The checked-in input is explicitly **synthetic simulation data**, not evidence of
+actual historical market execution or causally selected strategy signals. A
+standalone CLI run produces attributable simulation evidence (input, code/config,
+run identity, SQL, independent replay pins and JSON); pytest success alone is not
+that run. Input `data_origin` preserves the supplied source declaration, without
+authenticating external strategy selection or data delivery.
+
+Supported scope: one USDT linear P&L simulation with no principal transfers or
+funding, explicit fee rate and adverse slippage basis points, full MARKET fills
+and full scheduled closes. Intent IDs, times, symbols, side, notional and reference
+risk stops are bound at initialization before stepping. The reference stop is an
+accounting risk denominator, **not an executable intrabar stop**. Stop/limit,
+partial fills and partial closes emit unsupported-source diagnostics and keep the
+packet INCOMPLETE; they are never approximated with full fills. Unsupported product
+or missing/invalid model policy is rejected before initialization.
+
+Timing and assumptions are part of the source version `backtest-boundary-v1`:
+
+- Every scheduled boundary first records a snapshot before that boundary's events.
+  The opening is flat immediately before `start`; the closing includes all events
+  strictly before `end`. No execution occurs at `end`.
+- Full closes execute before opens at each boundary; ties use immutable intent ID
+  order. This is the declared discrete simulation convention, not a claim about
+  actual intrabar order. Stable lifecycle IDs include run and intent identity.
+- Execution references the current candle's open only, adjusted adversely by the
+  explicit slippage model. High/low/close of that candle cannot affect its fill.
+  Marks use exactly the prior completed candle's close, whose modeled availability
+  is the snapshot boundary. Missing bars/marks are never carried forward.
+- Observed timestamps remain actual producer wall time. Effective boundary times
+  and availability are explicitly **simulated**, never historical delivery or
+  observed exact fill timestamps. OHLC cannot establish those facts.
+
+`realized_accounting.candle_boundary_costs` owns the model's cost components.
+Entry fees accrue at the opening source event as a liability. Cash remains the
+existing close-only realized balance; full closure recognizes gross P&L minus
+both entry and exit fees exactly once. Slippage is embedded in fills, with no
+second cash debit. Zero funding/spread/latency cash components are explicit model
+assumptions of this supported non-funding product, not inferred market observations.
+Exit fees are unknown until exit and are not reserved as an opening liability.
+`marked_portfolio_equity` owns book equity: realized cash plus open gross mark P&L
+minus incurred open costs. It is **not estimated liquidation equity**.
+
+Every scheduled snapshot binds all open IDs, quantities, entry facts, accrued-cost
+source events and exact symbol/time/field mark hashes. The runner compares its
+position inventory to canonical portfolio state; independent event replay checks
+complete schedules, deterministic causal ordering, frozen-intent fills, accrued
+costs, canonical closure cash and snapshot conservation. Finalization additionally
+reconciles SQL facts/populations and seals their snapshot. Interrupted/unsupported,
+missing, negative-cash or mismatched evidence cannot produce COMPLETE equity.
+Exact retries are idempotent; interrupted deterministic capture can replay without
+double realization, while conflicting source/config identities are refused.
+Budgets additionally cap intent count and potential position/valuation pairs.
+
+A supported traded window may now produce COMPLETE **modeled source equity**.
+Legacy eager/traded packets retain all existing INCOMPLETE restrictions. Capital
+return/drawdown and historical consumer admission remain disabled for both paths;
+no historical PASS, OOS waiver, PAPER qualification or LIVE authority follows.
+Consumer admission is a separate future contract, including explicit acceptance
+of this model's limited scope and schedule rather than unobserved intrabar truth.
