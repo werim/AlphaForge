@@ -395,3 +395,68 @@ return/drawdown and historical consumer admission remain disabled for both paths
 no historical PASS, OOS waiver, PAPER qualification or LIVE authority follows.
 Consumer admission is a separate future contract, including explicit acceptance
 of this model's limited scope and schedule rather than unobserved intrabar truth.
+
+### Causal native-strategy adapter (admission remains incomplete)
+
+`alphaforge.backtest_strategy_adapter` reuses the existing BACKTEST selector,
+`scan_symbol_backtest`, AIBrain score and shared `evaluate_signal_decision` /
+`run_order_cycle` parity boundary. It does not replace signal generation, tune
+thresholds or convert native protective orders into a scheduled exit.
+
+The adapter reads bounded, publisher-checksum-bound Binance public BTCUSDT 1m
+spot ZIP archives and exact quote-turnover fields offline. Archive URLs, byte
+SHA256, normalized data/quote hashes, UTC open/inclusive-close timestamps,
+coverage, configuration and strategy/code identity are retained. Local receipt
+files are declared provenance, not self-authenticating signatures; collection
+must independently verify the publisher/TLS source. Local-read observation time
+is recorded; an unavailable remote retrieval timestamp stays null. Spot OHLC is
+not evidence of futures funding, spread, fees, latency or actual fills.
+
+At each scheduled minute, only rows whose close is available at that boundary
+reach the native selector, scorer and MTF path. A full prior 24-hour quote-volume
+population is required. Warmup is feature-only, outside the execution interval;
+no warmup decisions or outcomes enter the run. Every decision is retained, not a
+retrospective subset. Stable IDs bind run, symbol, time and exact closed-prefix
+hash. Source signal label, close availability, native scoring label, decision
+boundary, earliest next execution boundary, actual execution (null when refused)
+and wall observation time are distinct. Optional native `causal_decision_ms`
+must equal the signal candle's release boundary; it supplies the order/risk clock
+without changing the original signal label or legacy callers.
+
+Current native candidates require protective SL/TP semantics and do not supply
+the boundary executor's scheduled full-close contract. LIMIT/STOP orders cannot
+be MARKET fills; SL/TP cannot become a fixed holding period. These candidates are
+explicitly refused, with canonical sizing proposals preserved diagnostically.
+Native missing-execution and risk rejections remain authoritative. No funding or
+other unavailable execution inputs are supplied as favorable zeros.
+
+The current adapter therefore captures a complete decision audit while executing
+**no native intents**. Only because admission is closed may its prefix audit be
+frozen before the unchanged accounting executor runs. This is not a general
+precomputed-intent route for a traded portfolio; future admitted decisions must
+consume the then-current chronological portfolio state. `strategy_evidence`
+input records are independently reproducible through native scoring, bound into
+the source strategy identity, and persisted as immutable `STRATEGY_DECISION`
+events. SQL/JSON replay checks their full schedule, prefix binding and identity.
+The source packet remains INCOMPLETE with
+`NO_SUPPORTED_CAUSAL_STRATEGY_EXECUTION`; a flat diagnostic run never supplies
+COMPLETE traded capital evidence. Consumer metrics and historical PASS remain
+unavailable. A successful archive replay proves the observed decisions only,
+not historical execution accuracy, OOS admissibility or LIVE readiness.
+
+Example using independently collected archives plus `receipts.json` and their
+publisher `.CHECKSUM` files (all outputs go to a new isolated directory):
+
+```bash
+PYTHONPATH=src python -m alphaforge.backtest_strategy_adapter \
+  --archives /path/to/verified-archives --output-dir /private/tmp/causal-backtest \
+  --start-ms 1704153600000 --end-ms 1704160800000 --run-id unique-causal-run
+```
+
+Inspect `strategy_run_summary.json`, `input.json`, `backtest.sqlite` and
+`backtest_source_evidence.json`. Independent native verification is
+`validate_strategy_evidence(input, recompute=True)`; source verification must use
+identity/completion pins read independently from primary SQL or retained receipts.
+Exact existing packet replay is distinct from collecting a fresh observation.
+Conflicting same-run identities remain refused; no old historical record is
+upgraded or backfilled.

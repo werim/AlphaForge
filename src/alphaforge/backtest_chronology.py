@@ -39,7 +39,7 @@ def _timestamp(value):
 def validate_input(data):
     fields = {'schema', 'run_id', 'start_ms', 'end_ms', 'interval_ms', 'initial_capital_usdt',
               'data_origin', 'policy', 'candles', 'intents'}
-    if set(data) != fields or data['schema'] != SCHEMA:
+    if set(data)-{'strategy_evidence'} != fields or data['schema'] != SCHEMA:
         raise ValueError('unsupported boundary input schema/fields')
     start, end, interval = (_timestamp(data[k]) for k in ('start_ms','end_ms','interval_ms'))
     if not interval or end <= start or start % interval or end % interval or (end-start)//interval > 10000:
@@ -51,7 +51,7 @@ def validate_input(data):
     if set(p) != {'product','fee_rate','slippage_bps','fill_model','decision_basis','valuation'}:
         raise ValueError('missing/unsupported boundary policy')
     if (p['product'] != 'USDT_LINEAR_NO_FUNDING' or p['fill_model'] != 'NEXT_BOUNDARY_OPEN_FULL_FILL'
-            or p['decision_basis'] != 'PRECOMMITTED_INTENTS' or p['valuation'] != 'COMPLETED_CANDLE_CLOSE'):
+            or p['decision_basis'] != ('CAUSAL_NATIVE_STRATEGY' if 'strategy_evidence' in data else 'PRECOMMITTED_INTENTS') or p['valuation'] != 'COMPLETED_CANDLE_CLOSE'):
         raise ValueError('unsupported boundary product/execution assumptions')
     if not 0 <= _number(p['fee_rate']) < 1 or not 0 <= _number(p['slippage_bps']) < 10000:
         raise ValueError('invalid explicit fee/slippage policy')
@@ -97,6 +97,9 @@ def validate_input(data):
             _number(order['fill_fraction'], positive=True)
     # Force strict serialization, including unused OHLC fields (no NaN/Infinity).
     digest(data)
+    if 'strategy_evidence' in data:
+        from .backtest_strategy_adapter import validate_strategy_evidence
+        validate_strategy_evidence(data)
 
 
 def _ids(run_id, order):
@@ -107,6 +110,10 @@ def _ids(run_id, order):
 def _key(run_id, order, phase):
     lifecycle, _ = _ids(run_id, order)
     return f'lifecycle:{lifecycle}:{1 if phase == "open" else 2}:POSITION_{"OPENED" if phase == "open" else "CLOSED"}'
+
+
+def _strategy_records(data,at):
+    return [r for r in data.get('strategy_evidence',{}).get('records',[]) if r['decision_ms']==at]
 
 
 def _supported_order(order):
@@ -191,17 +198,22 @@ def run_boundary_backtest(data, output_dir):
     files = {name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in (
         'backtest_order.py', 'src/alphaforge/backtest_source_evidence.py',
         'src/alphaforge/backtest_chronology.py', 'src/alphaforge/realized_accounting.py', 'src/alphaforge/portfolio_risk.py')}
+    if 'strategy_evidence' in data:
+        for name in ('backtest_strategy_adapter','order','ai_brain','multi_timeframe','symbol_selector'):
+            path = f'src/alphaforge/{name}.py'
+            files[path] = hashlib.sha256((ROOT/path).read_bytes()).hexdigest()
+    strategy = data.get('strategy_evidence',data['intents'])
     configuration = {k:v for k,v in data.items() if k != 'candles'}
     identity = SourceIdentity(run_id=data['run_id'], window_id=f'{data["start_ms"]}:{data["end_ms"]}',
         start_ms=data['start_ms'], end_ms=data['end_ms'], interval_ms=data['interval_ms'],
         git_sha=subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip(),
-        code_hash=digest(files), config_hash=digest(configuration), strategy_hash=digest(data['intents']),
+        code_hash=digest(files), config_hash=digest(configuration), strategy_hash=digest(strategy),
         cost_hash=digest(data['policy']), universe_hash=digest(sorted(candles)),
         data_hash=digest(data['candles']), version=BOUNDARY_VERSION)
     database_url = 'sqlite+pysqlite:///'+str((output/'backtest.sqlite').resolve())
     engine = simulation.init_db(database_url)
     producer = BacktestSourceProducer(engine, identity, candles, provenance=dict(configuration=configuration,
-        strategy=data['intents'], costs=data['policy'], source_files=files))
+        strategy=strategy, costs=data['policy'], source_files=files))
     state = BacktestPortfolioState(initial_equity=data['initial_capital_usdt'], evidence_producer=producer)
     inventory, bars = {}, _bars(data)
     try:
@@ -216,6 +228,8 @@ def run_boundary_backtest(data, output_dir):
             producer._append([(f'snapshot:{at}', 'SNAPSHOT', at, snapshot)])
             if at == data['end_ms']:
                 break
+            for record in _strategy_records(data,at):
+                producer._append([('strategy:'+record['decision_id'],'STRATEGY_DECISION',at,record)])
             if at == data['start_ms']:
                 for order in sorted(data['intents'], key=lambda o:o['intent_id']):
                     if not _supported_order(order):
@@ -292,7 +306,7 @@ def replay_boundary_evidence(identity, initialization, events):
             or initialization['product_semantics'] != data['policy']['product']
             or initialization['flow_authority'] != 'INSTRUMENTED_CLOSE_ONLY_V1'
             or initialization['provenance']['costs'] != data['policy']
-            or initialization['provenance']['strategy'] != data['intents']):
+            or initialization['provenance']['strategy'] != data.get('strategy_evidence',data['intents'])):
         raise ValueError('boundary product/policy/intent provenance mismatch')
     bars, inventory, snapshots, gaps = _bars(data), {}, [], []
     cash, cursor = initialization['initial_equity_usdt'], 0
@@ -307,6 +321,8 @@ def replay_boundary_evidence(identity, initialization, events):
             raise ValueError('boundary causal sequence mismatch')
         return event['payload']
 
+    if 'strategy_evidence' in data:
+        gaps.append('NO_SUPPORTED_CAUSAL_STRATEGY_EXECUTION')
     expected_times = set(range(data['start_ms'],data['end_ms'],data['interval_ms']))
     if any(set(bars[s]) != expected_times for s in bars):
         gaps.append('SOURCE_CANDLE_COVERAGE_INCOMPLETE')
@@ -319,6 +335,9 @@ def replay_boundary_evidence(identity, initialization, events):
         gaps.extend(missing)
         if at == data['end_ms']:
             break
+        for record in _strategy_records(data,at):
+            if take('strategy:'+record['decision_id'],'STRATEGY_DECISION',at)!=record:
+                raise ValueError('strategy source decision mismatch')
         if at == data['start_ms']:
             for order in sorted(data['intents'], key=lambda o:o['intent_id']):
                 if not _supported_order(order):

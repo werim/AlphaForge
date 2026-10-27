@@ -1081,6 +1081,13 @@ def scan_symbol_backtest(
         return None
     now = candles[idx]
     prev = candles[idx - 1]
+    native_decision_ms = now.timestamp
+    if "causal_decision_ms" in context:
+        step = SUPPORTED_INTERVAL_MS.get(str(context.get("simulation_timeframe", "1m")))
+        supplied = context["causal_decision_ms"]
+        if type(supplied) is not int or step is None or supplied != now.timestamp + step:
+            raise ValueError("causal decision must occur at the candle release boundary")
+        native_decision_ms = supplied
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
     if "mtf_source_candles" in context:
         regime_timeframe = str(context.get("regime_timeframe") or "1h")
@@ -1167,7 +1174,7 @@ def scan_symbol_backtest(
     })
     ctx = OrderExecutionContext(
         mode=TradingMode.BACKTEST,
-        timestamp=now.timestamp,
+        timestamp=native_decision_ms,
         symbol=symbol,
         balance=float(context.get("balance", 1000)),
         risk_pct=float(context.get("risk_pct", 1.0)),
@@ -1198,7 +1205,7 @@ def scan_symbol_backtest(
         if isinstance(portfolio_state, BacktestPortfolioState) and shared_decision.candidate is not None:
             decision_candidate = shared_decision.candidate
             candidate_notional = portfolio_state.notional_for(entry=decision_candidate.entry, balance=context.get("balance"), risk_pct=context.get("risk_pct"), notional=mctx.get("notional"))
-            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision_candidate.side, config=context.get("portfolio_config", {}), timestamp=now.timestamp, candidate_notional=candidate_notional)
+            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision_candidate.side, config=context.get("portfolio_config", {}), timestamp=native_decision_ms, candidate_notional=candidate_notional)
             mctx.update({"equity": portfolio_snapshot.equity, "available_balance": portfolio_snapshot.available_balance, "notional": candidate_notional})
             ctx.storage["open_positions"] = {pid: {"notional": pos.notional, "side": pos.side} for pid, pos in portfolio_state.open_positions.items()}
             ctx.storage["daily_realized_pnl"] = portfolio_snapshot.daily_realized_pnl
