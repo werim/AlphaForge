@@ -581,3 +581,43 @@ input hash and scenario, re-evaluates canonical native/MTF/downstream gates and
 rejects rehashed promotion. Artifacts carry prefix/time/config/source/model/code
 identities and full populations. They are not historical fills, realized costs,
 marked-equity evidence, historical-validation PASS or LIVE readiness.
+
+### Optional historical scoring assumptions
+
+`historical-downstream-scenario-v1` accepts a separate, explicit
+`--scoring-assumptions` JSON contract (`historical-scoring-assumptions-v1`).
+Without it, funding and fakeout remain UNAVAILABLE, with null values and exact
+reasons. Native decisions and the MTF scenario are unchanged.
+
+Required keys: `schema`, `scenario_id`, `effective_from_ms`,
+`funding_rate_fraction`, `fakeout_risk`, `rationale`. Both numeric fields are
+nullable, but at least one must be explicitly supplied. Funding is a **signed
+fraction**, strictly between -1 and 1 (0.0001 means 0.01%, not 0.0001%). Fakeout
+is a finite probability in [0,1]. No numeric defaults are applied. The exact
+parent scenario binds venue/product/instrument, original input/config hashes and
+window; assumptions must be available by the window start. A deterministic policy
+hash and per-field kind/source/availability/units accompany each evaluated prefix.
+JSON replay requires the independently supplied policy and rejects promotion.
+
+Canonical AIBrain consumes `funding_rate` and `funding_rate_pct` as fractions
+against the same configured funding threshold. This research policy explicitly
+feeds the same signed assumption to both names. AIBrain applies its existing score
+penalties; execution-cost authority applies its existing absolute-rate RR penalty
+once. These are quality/economics predicates, not cash deductions or funding
+settlement accounting. No fee or funding expense is booked.
+
+The existing historical funding loader uses Binance **USD-M** `/fapi/v1/fundingRate`;
+the scanner uses `premiumIndex`. Neither is SPOT evidence. There is no canonical
+SPOT exemption for mandatory native funding predicates, so NOT_APPLICABLE is not
+accepted as a substitute for missing funding. A funding assumption for SPOT is an
+explicit counterfactual research penalty, never a claim of actual SPOT funding.
+The canonical code has no candle-derived fakeout producer; AIBrain's 0.25 fallback
+is not an observation or a forward-outcome label. It can only become an explicit
+MODELED input through this opt-in contract. No new fakeout formula is introduced.
+OBSERVED and NOT_APPLICABLE inputs are intentionally unsupported until their
+source/product authority exists; they cannot be injected through this schema.
+
+Complete declared assumptions permit canonical score, confirmation and effective-RR
+calculations. Remaining missing inputs keep affected gates NOT_EVALUABLE.
+Portfolio state, sizing, protective SL/TP execution and capital consumers retain
+all existing restrictions. Research rejection does not authorize execution.

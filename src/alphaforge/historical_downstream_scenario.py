@@ -16,6 +16,8 @@ from .backtest_strategy_adapter import STEP
 from .execution import build_execution_context, build_decision_rr_metrics, build_execution_cost_model
 from .historical_execution_scenario import (ExecutionScenario, OBSERVED_NATIVE,
     MODELED_HISTORICAL_V1, evaluate_scenario)
+from . import historical_scoring_evidence
+from .historical_scoring_evidence import ScoringAssumptions, input_evidence
 from .order import evaluate_signal_decision
 from .portfolio_risk import PortfolioRiskSnapshot, evaluate_portfolio_risk, scale_candidate_exposure
 
@@ -42,7 +44,7 @@ def _outcome(gates):
     return 'SCENARIO_DOWNSTREAM_ALIGNED'
 
 
-def _evaluate_aligned(sim, data, scenario, native, modeled):
+def _evaluate_aligned(sim, data, scenario, native, modeled, scoring_assumptions=None):
     profile = data['strategy_evidence']['profile']
     bars = data['strategy_evidence']['feature_bars']+data['candles']['BTCUSDT']
     prefix = [b for b in bars if b['timestamp']+STEP <= native['decision_ms']]
@@ -60,8 +62,8 @@ def _evaluate_aligned(sim, data, scenario, native, modeled):
     market.update(symbol='BTCUSDT', mode='BACKTEST', regime=mtf['regime']['regime'],
         setup=geometry.get('setup_type'),timeframe=profile['execution_timeframe'],mtf=mtf,
         decision_timestamp=modeled['decision_ms'],MIN_EFFECTIVE_RR=profile['min_effective_rr'])
-    # Explicit scenario estimates only. No funding, orderbook, fakeout or current
-    # account values are supplied. Native fields/records stay untouched.
+    # Explicit scenario estimates only; optional scoring assumptions remain
+    # separately tagged. No account values or observed records are supplied.
     for field,value in dict(spread_pct=scenario.spread_pct,expected_slippage_pct=scenario.expected_slippage_pct,
         fee_pct=scenario.fee_pct,liquidity_score=scenario.liquidity_score,
         latency_ms=scenario.order_latency_ms,market_data_latency_ms=scenario.market_data_latency_ms).items():
@@ -69,6 +71,12 @@ def _evaluate_aligned(sim, data, scenario, native, modeled):
     for stem in ('spread','slippage','fee','liquidity','latency','market_data_latency'):
         market[stem+'_status']='MODEL_ESTIMATE'
         market[stem+'_source']=scenario.scenario_id
+    evidence = input_evidence(scenario, scoring_assumptions)
+    for field, record in evidence.items():
+        if record["kind"] == "MODELED":
+            market[field] = record["value"]
+    if evidence["funding_rate_pct"]["kind"] == "MODELED":
+        market.update(funding_status="MODEL_ESTIMATE", funding_source=scoring_assumptions.policy_id)
     execution = build_execution_context(market)
     market.update(execution)
     # Match native BACKTEST's source-bound stateless scoring and pure pre-submit
@@ -140,46 +148,55 @@ def _evaluate_aligned(sim, data, scenario, native, modeled):
         decision_flow='REQUIRES_SUPPORTED_RISK_AND_ATTRIBUTABLE_NOTIONAL')
     return dict(status=_outcome(gates),gates=gates,gate_order=list(GATE_ORDER),
         unavailable_evidence={k:g['reasons'] for k,g in gates.items() if g['status']=='NOT_EVALUABLE'},
-        gate_input_hash=digest(dict(prefix=prefix,scenario=asdict(scenario),profile=profile)),
+        gate_input_hash=digest(dict(prefix=prefix,scenario=asdict(scenario),profile=profile,scoring_evidence=evidence)),
         prefix_hash=digest(prefix),model_decision_ms=modeled['decision_ms'],
         measured_market_data_latency_ms=None,measured_order_latency_ms=None,
         native_authorization='DISABLED',executed_intent=None,
         unsupported_exit_reasons=list(modeled['unsupported_exit_reasons']),
+        scoring_input_evidence=evidence,
         inputs=dict(funding_rate_pct=execution.get('funding_rate_pct'),orderbook_imbalance=execution.get('orderbook_imbalance'),
                     fee_pct=execution['fee_pct'],expected_slippage_pct=execution['expected_slippage_pct'],
                     latency_ms=execution['latency_ms'],evidence_kind='SCENARIO_ASSUMPTION'))
 
 
-def evaluate_downstream(data, *, mode=OBSERVED_NATIVE, scenario=None):
+def evaluate_downstream(data, *, mode=OBSERVED_NATIVE, scenario=None, scoring_assumptions=None):
+    if scoring_assumptions is not None:
+        if mode != MODELED_HISTORICAL_V1 or scenario is None or type(scoring_assumptions) is not ScoringAssumptions:
+            raise ValueError("scoring assumptions require explicit modeled scenario")
+        scoring_assumptions.bind(scenario)
     parent = evaluate_scenario(data,mode=mode,scenario=scenario)
     rows=[]
     sim=_simulation_module() if any(m['status']=='MTF_ALIGNED' for m in parent['modeled']) else None
     for native,modeled in zip(parent['observed_native'],parent['modeled']):
-        evaluation = (_evaluate_aligned(sim,data,scenario,native,modeled) if modeled['status']=='MTF_ALIGNED'
+        evaluation = (_evaluate_aligned(sim,data,scenario,native,modeled,scoring_assumptions) if modeled['status']=='MTF_ALIGNED'
                       else dict(status=modeled['status'],gates={},gate_order=[],reasons=list(modeled['reasons'])))
         rows.append(dict(native_decision_id=native['decision_id'],scenario_decision_id=modeled['decision_id'],
             observed_native_status=native['native_status'],observed_native_reason=native['native_reason'],
             modeled_mtf_status=modeled['status'],**evaluation))
-    return dict(schema=VERSION,mode=parent['mode'],mtf_evaluation=parent,downstream=rows,
+    return dict(scoring_assumptions=None if scoring_assumptions is None else asdict(scoring_assumptions),
+        scoring_policy_id=None if scoring_assumptions is None else scoring_assumptions.policy_id,
+        schema=VERSION,mode=parent['mode'],mtf_evaluation=parent,downstream=rows,
         parent_result_hash=digest(parent),input_hash=digest(data),scenario_id=parent['scenario_id'],
-        code_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),git_sha=parent['git_sha'],
+        code_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        scoring_evidence_code_hash=hashlib.sha256(Path(historical_scoring_evidence.__file__).read_bytes()).hexdigest(),
+        git_sha=parent['git_sha'],
         consumer_admission='DISABLED',order_admission='DISABLED',capital_source_status='NOT_PRODUCED',
         capital_return_pct=None,max_drawdown_pct=None)
 
 
-def persist_downstream(path,data,*,mode=OBSERVED_NATIVE,scenario=None):
-    result=evaluate_downstream(data,mode=mode,scenario=scenario)
+def persist_downstream(path,data,*,mode=OBSERVED_NATIVE,scenario=None,scoring_assumptions=None):
+    result=evaluate_downstream(data,mode=mode,scenario=scenario,scoring_assumptions=scoring_assumptions)
     packet=dict(result=result,result_hash=digest(result))
     with Path(path).open('x') as f:
         json.dump(packet,f,indent=2,sort_keys=True,allow_nan=False);f.write('\n')
     return packet
 
 
-def replay_downstream(packet,data,*,expected_input_hash,scenario=None):
+def replay_downstream(packet,data,*,expected_input_hash,scenario=None,scoring_assumptions=None):
     if expected_input_hash!=digest(data):
         raise ValueError('downstream input pin mismatch')
     mode=OBSERVED_NATIVE if scenario is None else MODELED_HISTORICAL_V1
-    expected=evaluate_downstream(data,mode=mode,scenario=scenario)
+    expected=evaluate_downstream(data,mode=mode,scenario=scenario,scoring_assumptions=scoring_assumptions)
     if packet!=dict(result=expected,result_hash=digest(expected)):
         raise ValueError('downstream replay mismatch/promotion')
     return expected
@@ -188,11 +205,13 @@ def replay_downstream(packet,data,*,expected_input_hash,scenario=None):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',required=True);p.add_argument('--scenario');p.add_argument('--output',required=True)
+    p.add_argument('--scoring-assumptions')
     a=p.parse_args(argv);data=json.loads(Path(a.input).read_text())
     scenario=None if a.scenario is None else ExecutionScenario.from_dict(json.loads(Path(a.scenario).read_text()))
+    assumptions=None if a.scoring_assumptions is None else ScoringAssumptions.from_dict(json.loads(Path(a.scoring_assumptions).read_text()))
     mode=OBSERVED_NATIVE if scenario is None else MODELED_HISTORICAL_V1
-    packet=persist_downstream(a.output,data,mode=mode,scenario=scenario)
-    replay_downstream(packet,data,expected_input_hash=digest(data),scenario=scenario)
+    packet=persist_downstream(a.output,data,mode=mode,scenario=scenario,scoring_assumptions=assumptions)
+    replay_downstream(packet,data,expected_input_hash=digest(data),scenario=scenario,scoring_assumptions=assumptions)
     print(json.dumps(dict(mode=mode,statuses=dict(Counter(r['status'] for r in packet['result']['downstream'])),
                          git_sha=packet['result']['git_sha'],order_admission='DISABLED'),sort_keys=True))
     return 0
