@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 GitRunner = Callable[[list[str], Path], str]
+
+
+def valid_git_commit(value: Any) -> bool:
+    """Canonical full Git SHA-1 syntax; null/short/placeholders are not identity."""
+    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{40}", value)) and value != "0" * 40
 
 
 def _git(args: list[str], cwd: Path) -> str:

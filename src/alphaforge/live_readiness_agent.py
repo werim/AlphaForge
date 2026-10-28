@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from alphaforge.release_identity import valid_git_commit
 from alphaforge.release_gates import (
     rollback_verification_evidence_valid,
     runbook_verification_evidence_valid,
@@ -95,7 +96,7 @@ class LiveReadinessAgent:
             tabs=db.tables(); c=db.one("SELECT * FROM burnin_campaigns WHERE campaign_id=?",(self.cid,)) if "burnin_campaigns" in tabs else None
             if c:self.scope.update(burnin_run_id=c.get("active_run_id"),release_id=c.get("release_id"))
             m=self.gm(self.repo); src="git metadata + campaign provenance"
-            g1=self.miss("GIT_IDENTITY",src,"campaign commit equals evaluator commit") if not c or not m.get("commit") else self.g("GIT_IDENTITY",PASS if c.get("git_commit")==m["commit"] else BLOCKED,"COMMIT_MATCH" if c.get("git_commit")==m["commit"] else "CAMPAIGN_COMMIT_MISMATCH",src,{"campaign":c.get("git_commit"),"checkout":m["commit"]},"campaign commit equals evaluator commit")
+            g1=self.miss("GIT_IDENTITY",src,"campaign commit equals evaluator commit") if not c or not valid_git_commit(m.get("commit")) or not valid_git_commit(c.get("git_commit")) else self.g("GIT_IDENTITY",PASS if c.get("git_commit")==m["commit"] else BLOCKED,"COMMIT_MATCH" if c.get("git_commit")==m["commit"] else "CAMPAIGN_COMMIT_MISMATCH",src,{"campaign":c.get("git_commit"),"checkout":m["commit"]},"campaign commit equals evaluator commit")
             dirty=m.get("dirty")
             g2=(self.g("WORKTREE_CLEAN",PASS if not dirty else BLOCKED,"CLEAN" if not dirty else "WORKTREE_DIRTY","git status --porcelain",{"dirty":dirty},"evaluator worktree is clean")
                 if isinstance(dirty,bool) else self.miss("WORKTREE_CLEAN","git status --porcelain","evaluator worktree is clean"))
@@ -210,7 +211,7 @@ class LiveReadinessAgent:
             )
             g20=self.miss("RUNBOOK_EVIDENCE","runbook_evidence","contract-verified runbook PASS") if not run else self.g("RUNBOOK_EVIDENCE",PASS if run_ok else BLOCKED,"RUNBOOK_EVIDENCE_PASS" if run_ok else "RUNBOOK_EVIDENCE_INVALID","runbook_evidence",{"row":run,"evidence":run_evidence},"contract-verified runbook PASS")
         gs=[g1,g2,g3,g4,g5,g6,g7,g8,g9,g10,g11,g12,g13,g14,g15,g16,g17,g18,g19,g20]; blockers=[x.data() for x in gs if x.status in {BLOCKED,NEEDS_FIX}]; gaps=[x.data() for x in gs if x.status==NOT_OBSERVABLE]
-        return {"overall_status":BLOCKED if blockers else "READINESS_INCOMPLETE","generated_at":ts(self.now),"git_commit":self.gm(self.repo).get("commit"),"campaign_id":self.cid,"burnin_run_id":self.scope["burnin_run_id"],"release_id":self.scope["release_id"],"gates":[x.data() for x in gs],"blockers":blockers,"not_observable":gaps,"next_required_evidence":[f"{x.gate_id}:{x.reason}" for x in gs if x.status!=PASS],"authorization":"OBSERVATIONAL_ONLY_NOT_A_LIVE_AUTHORIZATION"}
+        return {"overall_status":BLOCKED if blockers else "READINESS_INCOMPLETE","generated_at":ts(self.now),"git_commit":m.get("commit"),"campaign_id":self.cid,"burnin_run_id":self.scope["burnin_run_id"],"release_id":self.scope["release_id"],"gates":[x.data() for x in gs],"blockers":blockers,"not_observable":gaps,"next_required_evidence":[f"{x.gate_id}:{x.reason}" for x in gs if x.status!=PASS],"authorization":"OBSERVATIONAL_ONLY_NOT_A_LIVE_AUTHORIZATION"}
 def summary(r): return "LIVE readiness observer v1: "+r["overall_status"]+"\n"+"\n".join(f"- {x['gate_id']}: {x['status']} ({x['reason']})" for x in r["gates"] if x["status"]!=PASS)+"\nObservational only; not a LIVE authorization mechanism or execution controller.\n"
 def main(argv=None):
     p=argparse.ArgumentParser(); p.add_argument("--db",required=True); p.add_argument("--campaign-id",required=True); p.add_argument("--json",action="store_true"); p.add_argument("--output-dir"); a=p.parse_args(argv); r=LiveReadinessAgent(a.db,a.campaign_id).evaluate(); raw=json.dumps(r,indent=2,sort_keys=True,default=str); text=summary(r)
