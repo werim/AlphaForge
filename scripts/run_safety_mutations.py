@@ -105,6 +105,17 @@ def mutations() -> list[Mutation]:
     cases.append(Mutation("future_market_timestamp", RUNTIME,
                           "if future_delta_sec > allowed_future_skew_sec:", "if False:",
                           "tests/test_issue421_market_time.py::test_future_timestamp_beyond_allowed_clock_skew_fails_closed"))
+    cases.extend([
+        Mutation("delivery_forbidden_never_claims_published", "scripts/verify_codex_delivery.py",
+                 'return "COMMENT_WRITE_FORBIDDEN "', 'return "CREATED "',
+                 "tests/test_verify_codex_delivery.py::test_forbidden_comment_preserves_summary_receipt_and_no_permission_escalation"),
+        Mutation("delivery_requires_actual_checkout", "scripts/verify_codex_delivery.py",
+                 'return "UNAVAILABLE_TESTED_CHECKOUT"', 'return "EXACT_HEAD_SHA"',
+                 "tests/test_verify_codex_delivery.py::test_actual_tested_tree_is_required_even_when_metadata_matches_head"),
+        Mutation("delivery_stale_head_not_published", "scripts/verify_codex_delivery.py",
+                 'latest["head"]["sha"] != sha', 'False',
+                 "tests/test_verify_codex_delivery.py::test_head_moves_during_log_inspection_never_publishes"),
+    ])
     return cases
 
 
@@ -134,6 +145,10 @@ def main() -> int:
         shutil.copytree(ROOT / "src", work / "src", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy2(ROOT / "pyproject.toml", work / "pyproject.toml")
+        (work / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/verify_codex_delivery.py", work / "scripts/verify_codex_delivery.py")
+        (work / ".github/workflows").mkdir(parents=True)
+        shutil.copy2(ROOT / ".github/workflows/codex-delivery-verification.yml", work / ".github/workflows/codex-delivery-verification.yml")
         baseline = sorted({case.test for case in cases})
         code, failures, errors, output = run_test(work, baseline)
         if code or failures or errors:

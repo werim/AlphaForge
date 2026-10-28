@@ -49,4 +49,12 @@ jobs:
       - name: Verify latest task delivery without PR checkout
         env:
           GH_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPTS_PATH: ${{ runner.temp }}/codex-delivery-receipts.json
         run: python3 scripts/verify_codex_delivery.py
+      - name: Preserve verification receipts independently of comment delivery
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-delivery-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-delivery-receipts.json
+          if-no-files-found: warn

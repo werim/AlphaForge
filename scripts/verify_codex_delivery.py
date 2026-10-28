@@ -11,8 +11,10 @@ import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, build_opener
+from urllib.request import Request
 
 MARK = "alpha-delivery-verifier:v1"
 SHA = re.compile(r"^[a-f0-9]{40}$")
@@ -21,13 +23,23 @@ TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 BASE = "https://api.github.com"
 
 
+class SafeRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != "https":
+            raise ValueError("insecure GitHub log redirect")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
 class GitHub:
     def __init__(self, repo: str, token: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             raise ValueError("Invalid repository")
         self.repo, self.token = repo, token
 
-    def call(self, method: str, path: str, body: dict | None = None):
+    def call(self, method: str, path: str, body: dict | None = None, *, text=False):
         if not path.startswith("/") or "://" in path:
             raise ValueError("Invalid API path")
         request = Request(
@@ -42,11 +54,14 @@ class GitHub:
                 "Content-Type": "application/json",
             },
         )
-        with urlopen(request, timeout=20) as response:
-            return json.load(response)
+        with build_opener(SafeRedirect()).open(request, timeout=20) as response:
+            return response.read().decode("utf-8") if text else json.load(response)
 
     def get(self, path: str):
         return self.call("GET", path)
+
+    def log(self, job_id: int):
+        return self.call("GET", f"/repos/{self.repo}/actions/jobs/{int(job_id)}/logs", text=True)
 
     def post(self, path: str, body: dict):
         return self.call("POST", path, body)
@@ -64,6 +79,7 @@ class GitHub:
                 yield row
             if len(rows) < 100:
                 return
+        raise RuntimeError("GITHUB_PAGINATION_INCOMPLETE")
 
 
 def eligible(pr: dict, repo: str) -> bool:
@@ -85,25 +101,65 @@ def run_for_sha(api: GitHub, pr: dict):
     runs = api.get(f"/repos/{api.repo}/actions/workflows/test.yml/runs?{query}")
     matched = [
         run for run in runs.get("workflow_runs", [])
-        if run.get("head_sha") == sha and run.get("status") == "completed"
+        if run.get("head_sha") == sha
     ]
     return max(matched, key=lambda run: (run.get("created_at", ""), run.get("run_attempt", 1)), default=None)
 
 
-def code_identity(api: GitHub, pr: dict, run: dict) -> str:
-    expected, actual = pr["head"]["sha"], run.get("head_sha", "")
-    if not SHA.fullmatch(expected) or not SHA.fullmatch(actual):
+def tested_checkout(api: GitHub, jobs: list[dict]) -> str | None:
+    """Read checkout's own log interval, not workflow head_sha or test output."""
+    tests = [job for job in jobs if job.get("name") == "test"]
+    if len(tests) != 1:
+        return None
+    job = tests[0]
+    steps = [step for step in job.get("steps", [])
+             if str(step.get("name", "")).startswith("Run actions/checkout@")
+             and step.get("conclusion") == "success"]
+    if len(steps) != 1 or not steps[0].get("started_at") or not steps[0].get("completed_at"):
+        return None
+    try:
+        from datetime import datetime
+        start = datetime.fromisoformat(steps[0]["started_at"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(steps[0]["completed_at"].replace("Z", "+00:00"))
+        found, pending = [], False
+        for line in api.log(job["id"]).lstrip("\ufeff").splitlines():
+            timestamp, _, content = line.partition(" ")
+            try:
+                when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+(?=Z$)", r"\1", timestamp).replace("Z", "+00:00"))
+            except ValueError:
+                pending = False
+                continue
+            # Jobs API truncates step bounds to seconds; logs retain fractions.
+            if not start <= when.replace(microsecond=0) <= end:
+                pending = False
+                continue
+            if pending and SHA.fullmatch(content.strip()):
+                found.append(content.strip())
+            pending = bool(re.fullmatch(r"\[command\]\S*git log -1 --format=%H", content.strip()))
+        return found[0] if len(found) == 1 else None
+    except (KeyError, OSError, ValueError):
+        return None
+
+
+def code_identity(api: GitHub, pr: dict, run: dict, checkout_sha: str | None = None) -> str:
+    expected, metadata = pr["head"]["sha"], run.get("head_sha", "")
+    if not isinstance(expected, str) or not isinstance(metadata, str) or not SHA.fullmatch(expected) or not SHA.fullmatch(metadata):
         return "INVALID_SHA"
-    if expected == actual:
-        return "EXACT_HEAD_SHA"
-    # GitHub pull_request builds sometimes test a synthetic merge commit.
-    # Tree equality proves code equality only; commit identities stay distinct.
-    if run.get("event") != "pull_request":
+    if metadata != expected:
         return "SHA_MISMATCH"
+    if not checkout_sha or not SHA.fullmatch(checkout_sha):
+        return "UNAVAILABLE_TESTED_CHECKOUT"
+    if expected == checkout_sha:
+        return "EXACT_HEAD_SHA"
+    if run.get("event") != "pull_request":
+        return "CHECKOUT_SHA_MISMATCH"
     try:
         one = api.get(f"/repos/{api.repo}/git/commits/{expected}")
-        two = api.get(f"/repos/{api.repo}/git/commits/{actual}")
-        if one["tree"]["sha"] == two["tree"]["sha"]:
+        two = api.get(f"/repos/{api.repo}/git/commits/{checkout_sha}")
+        if expected not in [parent.get("sha") for parent in two.get("parents", [])]:
+            return "UNRELATED_CHECKOUT"
+        if (SHA.fullmatch(one["tree"]["sha"])
+                and one["tree"]["sha"] == two["tree"]["sha"]):
             return "TREE_EQUIVALENT_MERGE"
     except (KeyError, OSError, ValueError):
         return "UNVERIFIABLE_MERGE"
@@ -177,7 +233,7 @@ def format_report(pr: dict, run: dict, verdict: dict) -> str:
         f"- PR: #{number}; current head: {sha}",
         f"- CI: https://github.com/{pr['base']['repo']['full_name']}/actions/runs/{run_id}"
         f" ({run.get('event')}, {run.get('conclusion')}, attempt {run.get('run_attempt', 1)})",
-        f"- Source binding: {verdict['identity']}.",
+        f"- Source binding: {verdict['identity']}; actual tested checkout: {verdict.get('tested_checkout_sha') or 'UNAVAILABLE'}.",
         "- Required steps: " + ", ".join(
             f"{name}={result}" for name, result in verdict["steps"].items()
         ),
@@ -197,7 +253,7 @@ def format_report(pr: dict, run: dict, verdict: dict) -> str:
     return "\n".join(lines)
 
 
-def publish(api: GitHub, pr: dict, message: str, sha: str):
+def _publish(api: GitHub, pr: dict, message: str, sha: str, run: dict | None = None):
     number = pr["number"]
     marker = f"<!-- {MARK} pr={number} sha={sha} -->"
     endpoint = f"/repos/{api.repo}/issues/{number}/comments"
@@ -207,11 +263,57 @@ def publish(api: GitHub, pr: dict, message: str, sha: str):
          and (comment.get("user") or {}).get("login") == "github-actions[bot]"),
         None,
     )
+    freshness = publication_source_status(api, pr, sha, run)
+    if freshness:
+        return freshness
     if existing:
         if existing.get("body") != message:
             api.patch(f"/repos/{api.repo}/issues/comments/{existing['id']}", {"body": message})
-        return
+            return "UPDATED"
+        return "UNCHANGED"
     api.post(endpoint, {"body": message})
+    return "CREATED"
+
+
+def publication_source_status(api: GitHub, pr: dict, sha: str, run: dict | None = None):
+    # Recheck after logs/files API work, immediately before comment delivery.
+    try:
+        latest = api.get(f"/repos/{api.repo}/pulls/{pr['number']}")
+        current = run_for_sha(api, latest) if run is not None else None
+    except (OSError, ValueError):
+        return "STALE_SOURCE_RECHECK_UNAVAILABLE"
+    if latest.get("state") != "open" or latest["head"]["sha"] != sha:
+        return "STALE_HEAD_NOT_PUBLISHED"
+    if run is not None:
+        keys = ("id", "run_attempt", "status", "conclusion")
+        if not current or any(current.get(k) != run.get(k) for k in keys):
+            return "STALE_CI_NOT_PUBLISHED"
+    return None
+
+
+def publish(api: GitHub, pr: dict, message: str, sha: str, run: dict | None = None):
+    try:
+        return _publish(api, pr, message, sha, run)
+    except RuntimeError as error:
+        if str(error) != "GITHUB_PAGINATION_INCOMPLETE":
+            raise
+        return "COMMENT_LOOKUP_INCOMPLETE_NOT_PUBLISHED"
+    except HTTPError as error:
+        if error.code != 403:
+            raise
+        # A transport failure is not a failed CI verdict or a successful delivery.
+        # Old logs omitted this response: retain bounded diagnostic evidence now.
+        try:
+            detail = json.loads(error.read(8192)).get("message", "")
+        except (ValueError, AttributeError):
+            detail = ""
+        headers = error.headers or {}
+        return "COMMENT_WRITE_FORBIDDEN " + json.dumps({
+            "http_status": 403, "message": str(detail)[:300],
+            "request_id": headers.get("X-GitHub-Request-Id"),
+            "rate_limit_remaining": headers.get("X-RateLimit-Remaining"),
+            "retry_after": headers.get("Retry-After"),
+        }, sort_keys=True)
 
 
 def handle(api: GitHub, event: str, payload: dict) -> list[str]:
@@ -231,7 +333,7 @@ def handle(api: GitHub, event: str, payload: dict) -> list[str]:
                 pr["head"]["sha"] == run.get("head_sha")
                 or pr["number"] in associated
             ):
-                candidates.append((pr, run))
+                candidates.append((pr, run_for_sha(api, pr) or run))
     elif event == "issue_comment":
         issue = payload.get("issue") or {}
         comment = payload.get("comment") or {}
@@ -267,10 +369,15 @@ def handle(api: GitHub, event: str, payload: dict) -> list[str]:
             continue
         jobs = list(api.pages(f"/repos/{api.repo}/actions/runs/{run['id']}/jobs", key="jobs"))
         changed = list(api.pages(f"/repos/{api.repo}/pulls/{pr['number']}/files"))
-        verdict = evaluate(run, jobs, code_identity(api, pr, run), changed, pr["base"]["ref"])
+        checkout = tested_checkout(api, jobs)
+        verdict = evaluate(run, jobs, code_identity(api, pr, run, checkout), changed, pr["base"]["ref"])
+        verdict["tested_checkout_sha"] = checkout
         report = format_report(pr, run, verdict)
-        publish(api, pr, report, pr["head"]["sha"])
-        reports.append(f"PR #{pr['number']}: {verdict['status']}\n{report}")
+        delivery = publish(api, pr, report, pr["head"]["sha"], run)
+        if delivery.startswith("STALE_"):
+            verdict["status"] = "STALE_EVIDENCE_NOT_VERIFIED"
+            report = format_report(pr, run, verdict)
+        reports.append(f"PR #{pr['number']}: {verdict['status']}\n{report}\n\nComment delivery: {delivery}")
     return reports
 
 
@@ -280,6 +387,9 @@ def main() -> int:
     api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
     reports = handle(api, event, payload)
     summary = "\n\n".join(reports) if reports else "No actionable Codex PR delivery / exact-SHA CI found."
+    receipt = dict(schema="alpha-delivery-receipts-v1", reports=reports)
+    if os.getenv("DELIVERY_RECEIPTS_PATH"):
+        Path(os.environ["DELIVERY_RECEIPTS_PATH"]).write_text(json.dumps(receipt, indent=2)+"\n")
     print(summary)
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
