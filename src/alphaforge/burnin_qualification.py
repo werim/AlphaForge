@@ -129,6 +129,10 @@ class BurnInQualificationEngine:
             if not run:
                 snap=self._snapshot(burnin_run_id,"UNKNOWN","BURN_IN_INSUFFICIENT",["BURNIN_SCHEMA_OR_EVIDENCE_MISSING","NO_BURNIN_RUN"],[],th,{})
                 self.persist_snapshot(conn,snap); return snap
+            from alphaforge.burnin_campaign import campaign_is_storage_calibration
+            if campaign_is_storage_calibration(run):
+                return self._snapshot(burnin_run_id,str(run["release_id"]),"BURN_IN_INSUFFICIENT",
+                    ["STORAGE_CALIBRATION_NOT_QUALIFICATION_ELIGIBLE"],[],th,{"qualification_eligible":False})
             release_id=str(run["release_id"]); phase=str(run.get("phase") or "PHASE7")
             mode=str(run["execution_mode"]).upper()
             if mode not in {"PAPER","LIVE_PRECHECK"}: blockers.append(f"INVALID_EXECUTION_MODE:{mode}")
