@@ -253,7 +253,7 @@ def format_report(pr: dict, run: dict, verdict: dict) -> str:
     return "\n".join(lines)
 
 
-def _publish(api: GitHub, pr: dict, message: str, sha: str):
+def _publish(api: GitHub, pr: dict, message: str, sha: str, run: dict | None = None):
     number = pr["number"]
     marker = f"<!-- {MARK} pr={number} sha={sha} -->"
     endpoint = f"/repos/{api.repo}/issues/{number}/comments"
@@ -263,6 +263,9 @@ def _publish(api: GitHub, pr: dict, message: str, sha: str):
          and (comment.get("user") or {}).get("login") == "github-actions[bot]"),
         None,
     )
+    freshness = publication_source_status(api, pr, sha, run)
+    if freshness:
+        return freshness
     if existing:
         if existing.get("body") != message:
             api.patch(f"/repos/{api.repo}/issues/comments/{existing['id']}", {"body": message})
@@ -272,18 +275,25 @@ def _publish(api: GitHub, pr: dict, message: str, sha: str):
     return "CREATED"
 
 
-def publish(api: GitHub, pr: dict, message: str, sha: str, run: dict | None = None):
+def publication_source_status(api: GitHub, pr: dict, sha: str, run: dict | None = None):
     # Recheck after logs/files API work, immediately before comment delivery.
-    latest = api.get(f"/repos/{api.repo}/pulls/{pr['number']}")
+    try:
+        latest = api.get(f"/repos/{api.repo}/pulls/{pr['number']}")
+        current = run_for_sha(api, latest) if run is not None else None
+    except (OSError, ValueError):
+        return "STALE_SOURCE_RECHECK_UNAVAILABLE"
     if latest.get("state") != "open" or latest["head"]["sha"] != sha:
         return "STALE_HEAD_NOT_PUBLISHED"
     if run is not None:
-        current = run_for_sha(api, latest)
         keys = ("id", "run_attempt", "status", "conclusion")
         if not current or any(current.get(k) != run.get(k) for k in keys):
             return "STALE_CI_NOT_PUBLISHED"
+    return None
+
+
+def publish(api: GitHub, pr: dict, message: str, sha: str, run: dict | None = None):
     try:
-        return _publish(api, pr, message, sha)
+        return _publish(api, pr, message, sha, run)
     except RuntimeError as error:
         if str(error) != "GITHUB_PAGINATION_INCOMPLETE":
             raise

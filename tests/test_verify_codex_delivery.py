@@ -304,3 +304,15 @@ def test_unformatted_multiline_artifact_output_cannot_spoof_checkout():
     assert verifier.tested_checkout(api,api.jobs())=='a'*40
     api.log=lambda _:log.replace('2026-10-28T00:00:00.200Z','unformatted\n2026-10-28T00:00:00.200Z')
     assert verifier.tested_checkout(api,api.jobs()) is None
+
+
+def test_head_move_during_comment_lookup_is_rechecked_before_write():
+    api=API();original=api.pages
+    def pages(path,key=None):
+        rows=original(path,key)
+        if path.endswith('/comments'):api.pr['head']['sha']='b'*40
+        return rows
+    api.pages=pages
+    result=verifier.handle(api,'workflow_dispatch',dict(inputs=dict(pr_number='12')))
+    assert api.writes==[]
+    assert 'STALE_HEAD_NOT_PUBLISHED' in result[0] and 'CI_EVIDENCE_VERIFIED' not in result[0]
