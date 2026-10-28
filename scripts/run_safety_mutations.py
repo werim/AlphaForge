@@ -182,6 +182,18 @@ def mutations() -> list[Mutation]:
                  'if proof is None:\n        return None', 'if proof is None:\n        return 0.0',
                  walk_test + "::test_legacy_percent_only_rows_cannot_inherit_cash_or_capital"),
     ])
+    cases.extend([
+        Mutation("readiness_invalid_identity_never_passes", "src/alphaforge/live_readiness_agent.py",
+                 'not valid_git_commit(m.get("commit")) or not valid_git_commit(c.get("git_commit"))',
+                 'not m.get("commit")',
+                 "tests/test_live_readiness_agent.py::test_missing_or_invalid_git_identity_never_qualifies_even_when_equal"),
+        Mutation("readiness_source_snapshot_consistent", "src/alphaforge/live_readiness_agent.py",
+                 '\"git_commit\":m.get(\"commit\")', '\"git_commit\":self.gm(self.repo).get(\"commit\")',
+                 "tests/test_live_readiness_agent.py::test_readiness_report_uses_one_source_identity_snapshot"),
+        Mutation("readiness_unknown_status_not_clean", "src/alphaforge/live_readiness_agent.py",
+                 'if isinstance(dirty,bool) else', 'if True else',
+                 "tests/test_live_readiness_agent.py::test_readiness_refuses_unknown_checkout_cleanliness"),
+    ])
     return cases
 
 
