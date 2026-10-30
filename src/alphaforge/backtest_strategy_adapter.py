@@ -223,7 +223,7 @@ def validate_strategy_evidence(data, *, recompute=False):
     if [r['decision_ms'] for r in e['records']]!=expected_times:
         raise ValueError('strategy decision population incomplete/duplicate')
     simulation = _simulation_module() if recompute else None
-    if recompute and _profile(simulation)!=e['profile']:
+    if recompute and digest(_profile(simulation))!=digest(e['profile']):
         raise ValueError('strategy configuration drift')
     state = BacktestPortfolioState(initial_equity=data['initial_capital_usdt'])
     quotes = dict(e['quote_volumes'])

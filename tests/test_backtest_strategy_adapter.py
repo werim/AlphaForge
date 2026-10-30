@@ -42,10 +42,23 @@ def test_native_replay_rejects_equal_python_values_with_different_json_identity(
 
 def test_native_replay_allows_key_reordering_and_later_wall_observation():
     d=data()
+    d['strategy_evidence']['profile']=dict(reversed(list(d['strategy_evidence']['profile'].items())))
     d['strategy_evidence']['records']=[dict(reversed(list(r.items()))) for r in d['strategy_evidence']['records']]
     for r in d['strategy_evidence']['records']:
         r['observed_ms']+=1
     validate_strategy_evidence(d,recompute=True)
+
+
+@pytest.mark.parametrize('field', ['mtf_guided_signal_generation_enabled', 'risk_pct'])
+def test_native_replay_rejects_profile_json_type_drift(field):
+    d=data()
+    validate_strategy_evidence(d,recompute=True)
+    profile=d['strategy_evidence']['profile']
+    original=profile[field]
+    profile[field]=int(original) if type(original) in (bool,float) else float(original)
+    assert profile[field]==original and digest(profile[field])!=digest(original)
+    with pytest.raises(ValueError,match='strategy configuration drift'):
+        validate_strategy_evidence(d,recompute=True)
 
 
 def test_native_decisions_replay_and_source_remains_incomplete_without_fabricated_trades(tmp_path):
