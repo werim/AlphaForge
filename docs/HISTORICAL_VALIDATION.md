@@ -398,6 +398,44 @@ of this model's limited scope and schedule rather than unobserved intrabar truth
 
 ### Causal native-strategy adapter (admission remains incomplete)
 
+#### Prospective breakout input receipts (observation only)
+
+The public kline scanner now retains `breakout_input_receipt` with the actual
+two decoded source rows, original open/inclusive-close timestamps, requested
+URL/symbol/timeframe, canonical-JSON pair hash and measured local read time.
+As in the archive receipt convention, `local_read_observed_ms` is separate
+from `remote_retrieval_observed_ms`; the latter stays null. This is a local
+observation of decoded rows, not a raw HTTP byte checksum, independently
+authenticated publisher receipt or proof of historical availability. Missing
+close times, malformed OHLC or an unverifiable source pair produce UNAVAILABLE
+receipt evidence while preserving existing geometry/decision behavior.
+
+The source snapshot copies the canonical prior-high/prior-low reference,
+side/setup and actual crossing flag. Runtime binds the snapshot to the existing
+signal ID and recorded decision timestamp, checking source scope, type-sensitive
+geometry identity, source hash and input observation time. It does not substitute
+persistence time for decision time. Existing legacy/shadow and accepted payload
+projections preserve the same source object; observation metrics and decision
+diagnostics store a single equivalent `breakout_provenance` envelope using the
+existing JSON writers. Guided candidates retain legacy receipts explicitly as
+LEGACY_SCANNER_SHADOW_CANDIDATE; they cannot inherit breakout provenance as their
+own geometry. Legacy candidates without receipts remain explicitly unavailable.
+
+`BOUND_LOCAL_OBSERVATION` describes only that binding. Research eligibility is
+still NOT_EVALUABLE and probability UNAVAILABLE: independent provenance,
+configuration identity, label-policy/window requirements and calibration remain
+separate. The sole label/seed authority remains `freeze_breakout`; the receipt
+does not introduce another economic gate, horizon or score. No source/schema
+migration, old-row backfill or historical dataset admission follows. Existing
+INSUFFICIENT / eligible0 and unresolved original archive matching are unchanged.
+
+The scanner cannot know the eventual canonical runtime signal ID. Runtime
+associates its existing ID when assigned, copying the cached receipt rather than
+mutating shared source data. A previously different candidate association is
+retained and refused; it is never silently rebound to the new candidate.
+
+#### Native BACKTEST semantics
+
 `alphaforge.backtest_strategy_adapter` reuses the existing BACKTEST selector,
 `scan_symbol_backtest`, AIBrain score and shared `evaluate_signal_decision` /
 `run_order_cycle` parity boundary. It does not replace signal generation, tune
@@ -438,6 +476,12 @@ consume the then-current chronological portfolio state. `strategy_evidence`
 input records are independently reproducible through native scoring, bound into
 the source strategy identity, and persisted as immutable `STRATEGY_DECISION`
 events. SQL/JSON replay checks their full schedule, prefix binding and identity.
+Each `observed_ms` must be an integer at or after that record's
+`source_available_ms`, including during recomputed replay. It remains the local
+capture time, not proof of historical publication time or client latency.
+Impossible observation times are refused before output/database creation;
+replay's exclusion of this wall-clock field from deterministic equality does
+not waive its temporal sanity checks.
 The source packet remains INCOMPLETE with
 `NO_SUPPORTED_CAUSAL_STRATEGY_EXECUTION`; a flat diagnostic run never supplies
 COMPLETE traded capital evidence. Consumer metrics and historical PASS remain
@@ -621,3 +665,57 @@ Complete declared assumptions permit canonical score, confirmation and effective
 calculations. Remaining missing inputs keep affected gates NOT_EVALUABLE.
 Portfolio state, sizing, protective SL/TP execution and capital consumers retain
 all existing restrictions. Research rejection does not authorize execution.
+
+Research scenario/downstream replay compares the entire packet through the
+existing canonical JSON digest, including its result hash. Python dictionary
+equality is insufficient: booleans and numerically equal integer/float values
+can otherwise hide type-changing edits under an unchanged hash. JSON key order
+does not affect canonical identity; changing a value/type or rehashing a promoted
+result cannot match the independently recomputed expected packet. This check
+authenticates deterministic replay identity, not the original data publisher.
+
+### Breakout-only failure labels (research, uncalibrated)
+
+`breakout_failure_labels` is a standalone label producer, with no scorer/runtime
+hook. Owner decision A limits it to failed breakouts. `freeze_breakout` reuses
+canonical `signal_geometry` and freezes the known previous high for LONG or low
+for SHORT, side/setup, decision, source/config and both source candles. It also
+requires an actual close beyond that level: the legacy geometry's setup name
+alone does not prove a crossing. Other setups are refused. Seed inputs must be
+complete, contiguous, current and available by the prediction instant. Explicit
+RECORDED, declared-boundary-model and synthetic availability bases remain distinct;
+caller hashes bind evidence but do not authenticate its publisher.
+
+No inspected canonical rule defines a fakeout lifetime or wick-vs-close
+invalidation. `LabelPolicy` therefore requires an explicit research hypothesis
+and horizon (or explicit `None`, yielding HORIZON_UNSET). RETURN_TO_LEVEL labels
+the first forward low <= level for LONG or high >= level for SHORT;
+CLOSE_BACK_INSIDE instead uses the corresponding completed close. These are
+separate versioned/pinned research targets, not defaults or calibrated choices.
+Equality is a return; no buffer/threshold is invented. Entry timeout is not
+borrowed as a fakeout horizon. Synthetic test intervals/horizons are not policy.
+
+Prediction starts at the frozen candidate decision. The prediction candle is
+excluded; aligned forward intervals cover [decision, decision+horizon*interval).
+A non-aligned prediction yields AMBIGUOUS_PREDICTION_BOUNDARY, never an inferred
+OHLC ordering. Both candidate and forward prices require scoped, strict OHLC and
+recorded/declared availability. Only completed candles available by the explicit
+as-of cutoff may resolve a label. Failure may mature on a contiguous prefix;
+absence of failure requires the entire horizon. Missing/late data is PENDING or
+INCOMPLETE_WINDOW; conflicting duplicates are AMBIGUOUS_DUPLICATE_SOURCE; neither
+becomes a binary label. Identical duplicates are idempotent. Out-of-window or
+future-unavailable prices cannot alter an earlier label.
+
+There is one frozen return event and no competing TP/success barrier, so a fully
+observed post-decision candle needs no invented TP/SL order. Wick recovery has
+different deterministic labels under the two explicit hypotheses; it does not
+select one hypothesis as authoritative. NO_FAILURE_WITHIN_HORIZON is observed
+survival under that definition, not profitability or trade success.
+
+Packets bind seed/policy/source-prefix and algorithm byte hashes; independent
+seed-pinned replay uses canonical JSON identity. No Git identity is queried.
+The producer always returns probability=null/UNAVAILABLE, dependent evaluation
+NOT_EVALUABLE and runtime admission DISABLED. Calibration, representative market
+data, immutable train/calibration splits, horizon/policy selection and untouched
+OOS remain separate pending gates. No fitted probability or runtime integration
+is implemented, and no future outcome is supplied to decision-time features.
