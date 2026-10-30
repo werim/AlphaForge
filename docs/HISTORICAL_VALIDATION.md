@@ -128,9 +128,9 @@ segment. Partial/mixed lifecycle evidence is not qualified through this adapter.
 
 ## Historical capital evidence: producer and consumer contract
 
-**Design status: NOT_IMPLEMENTED.** This section defines the missing input
-contract; it does not add an accepted manifest field, a capital ledger, a schema,
-a producer or a historical PASS path. Current version-2 reports retain null
+**Consumer admission status: NOT_IMPLEMENTED.** The prospective BACKTEST source
+producer below implements source capture, not capital-metric admission. This
+section does not add an accepted capital manifest field or historical PASS path. Current version-2 reports retain null
 capital return/equity/drawdown and INCOMPLETE capital evidence. Unknown manifest
 fields are not evidence. A correct CSV digest proves bytes, not population
 completeness or the truth of a capital assertion.
@@ -247,13 +247,475 @@ cash without complete capital evidence remains INCOMPLETE; negative cash and
 search inadmissibility retain their current precedence. Rehashing a subset export
 or declaring a complete manifest cannot certify its omitted population.
 
-**Next dependency:** define and implement source-bound opening/flow/position-mark
-and population-coverage production in the existing BACKTEST simulation/accounting
-path, starting with a fully recorded, homogeneous zero-flow window. First prove
-that its actual source can persist the facts above; then add the strict schema
-and transactional persistence plus an adapter to the existing report. Do not
-build a dormant ledger before the source and valuation semantics exist. No Mini
-is needed for that software task, but it is not solved by current risk snapshots
-or available closure exports. Actual historical data remains unavailable until
-such a producer supplies attributable records. #344 and subsequent learning,
+**Next dependency:** the legacy eager simulation remains incomplete. The explicit
+candle-boundary model below can supply complete modeled source equity for its
+narrow scope; strict capital consumer admission remains a separate task. No Mini is required. Historical data without actual
+producer records remains unavailable; no existing report is backfilled. #344,
 physical acceptance and LIVE authorization remain independent requirements.
+
+
+### Prospective BACKTEST source capture (v1)
+
+Entry-triggered, order-placed and position-opened events use the triggering
+candle label, including delayed entries. Signal events retain the original
+decision label. Source capture and SQL preserve these distinct times so a
+position does not enter valuation inventory before its triggering candle.
+This correction does not establish exact intrabar execution time or remove
+the traded-run completeness restrictions below.
+
+New runs may opt in with `backtest_order.py --source-evidence`. This is a local,
+SQLite-only USDT `BacktestPortfolioState` path. It creates additive
+`backtest_source_runs` and `backtest_source_events` tables only when selected;
+normal initialization, PAPER and LIVE are unaffected. Existing runs cannot be
+backfilled. `backtest_source_evidence.json` is exported from a consistent SQL
+snapshot after lifecycle persistence and atomic finalization.
+
+The constructor records actual initial simulated capital before decisions, the
+flat opening inventory and its origin. Source identity binds the run/window,
+full git SHA, relevant source-file content digest, nonsecret resolved config/CLI
+(connection URLs are excluded because they can embed credentials),
+strategy and cost configuration, requested universe and exact source candles.
+Source capture observes the real simulator lifecycle before portfolio replay and
+records each canonical net-cash effect when `BacktestPortfolioState` closes it.
+Quantities reuse the same `filled_position_quantity` function as finalization;
+realized geometry and costs reuse `realized_accounting`. Fees and funding remain
+components of the net closure amount, never additional cash debits or deposits.
+External flows are unsupported. The owned close-only simulation mutation path,
+initialization and complete event population provide zero-flow coverage; an
+unexplained change invalidates conservation.
+
+Immutable event keys/sequence and payload hashes allow identical retries and
+reject conflicting retries. Finalization holds a SQLite writer reservation,
+reconciles source and SQL open/closed lifecycle populations, checks actual
+portfolio inventory and closing cash against the observed cash chain, and seals
+the SQL snapshot and event population. An interrupted run has no completion
+watermark. Export rejects subsequent SQL snapshot drift. Independent replay uses
+`validate_source_packet` with identity/completion hashes obtained from canonical
+SQL or an independently retained receipt, never trusted solely from the packet.
+Hashes establish integrity relative to that source; they do not authenticate an
+arbitrarily supplied file. Consumers still ignore capital manifest assertions.
+
+Coverage is `[start, end)`, with the opening before all interval events and the
+closing after events strictly before `end`. Valuations retain stable position
+IDs, side, quantity, fill and source candle hashes. Candle-close gross unrealized
+P&L is diagnostic; a mark is available only at its exact candle-close boundary
+(no stale carry or future quote). Complete source bars are required across the
+requested universe and schedule. Empty input is not proof of a flat portfolio.
+Flat snapshots reconcile marked equity to attributable simulated cash.
+
+Limitations are explicit: the legacy eager simulator uses candle-label event
+times, can process future closures before another candidate, and supplies no
+observed accrued open-position costs or executable quote marks. Any legacy eager trade retains
+`CANDLE_LABEL_EVENT_TIME_ONLY`; open inventory additionally retains
+`OPEN_POSITION_ACCRUED_COSTS_UNAVAILABLE`, with marked equity null. Gaps in bars,
+unknown closure costs/cash, population mismatch, negative cash and unexplained
+capital changes cannot become complete evidence. A fully covered flat run can
+have COMPLETE **source** evidence; this is never a historical-validation PASS.
+Source budgets are 100,000 candles/events/position-valuation pairs and 10,000
+scheduled intervals. Unsupported or excessive scope is rejected before qualification.
+
+Capital return and drawdown remain null, including for complete source packets.
+No source record is presented as historical account settlement or actual market
+execution: the product basis is the existing legacy notional/P&L simulation.
+Deterministic fixtures and offline CLI runs prove implementation behavior only.
+The separate candle-boundary path below supplies declared modeled timing and
+cost/mark semantics without upgrading these legacy packets. Consumer admission
+remains a separate unimplemented contract. No Mac Mini, PAPER, physical calibration or LIVE action is required.
+
+
+### Chronological candle-boundary execution (v1)
+
+`alphaforge.backtest_chronology` supplies one separately versioned production
+execution path on the same immutable source tables, canonical BACKTEST lifecycle
+SQL and `BacktestPortfolioState`. It accepts a strict frozen intent tape, not a
+new strategy or an upgrade of eager simulator output. Example deterministic run:
+
+```bash
+PYTHONPATH=src python -m alphaforge.backtest_chronology \
+  --input tests/fixtures/candle_boundary_backtest.json \
+  --output-dir /private/tmp/alphaforge-boundary-demo
+```
+
+The checked-in input is explicitly **synthetic simulation data**, not evidence of
+actual historical market execution or causally selected strategy signals. A
+standalone CLI run produces attributable simulation evidence (input, code/config,
+run identity, SQL, independent replay pins and JSON); pytest success alone is not
+that run. Input `data_origin` preserves the supplied source declaration, without
+authenticating external strategy selection or data delivery.
+
+Supported scope: one USDT linear P&L simulation with no principal transfers or
+funding, explicit fee rate and adverse slippage basis points, full MARKET fills
+and full scheduled closes. Intent IDs, times, symbols, side, notional and reference
+risk stops are bound at initialization before stepping. The reference stop is an
+accounting risk denominator, **not an executable intrabar stop**. Stop/limit,
+partial fills and partial closes emit unsupported-source diagnostics and keep the
+packet INCOMPLETE; they are never approximated with full fills. Unsupported product
+or missing/invalid model policy is rejected before initialization.
+
+Timing and assumptions are part of the source version `backtest-boundary-v1`:
+
+- Every scheduled boundary first records a snapshot before that boundary's events.
+  The opening is flat immediately before `start`; the closing includes all events
+  strictly before `end`. No execution occurs at `end`.
+- Full closes execute before opens at each boundary; ties use immutable intent ID
+  order. This is the declared discrete simulation convention, not a claim about
+  actual intrabar order. Stable lifecycle IDs include run and intent identity.
+- Execution references the current candle's open only, adjusted adversely by the
+  explicit slippage model. High/low/close of that candle cannot affect its fill.
+  Marks use exactly the prior completed candle's close, whose modeled availability
+  is the snapshot boundary. Missing bars/marks are never carried forward.
+- Observed timestamps remain actual producer wall time. Effective boundary times
+  and availability are explicitly **simulated**, never historical delivery or
+  observed exact fill timestamps. OHLC cannot establish those facts.
+
+`realized_accounting.candle_boundary_costs` owns the model's cost components.
+Entry fees accrue at the opening source event as a liability. Cash remains the
+existing close-only realized balance; full closure recognizes gross P&L minus
+both entry and exit fees exactly once. Slippage is embedded in fills, with no
+second cash debit. Zero funding/spread/latency cash components are explicit model
+assumptions of this supported non-funding product, not inferred market observations.
+Exit fees are unknown until exit and are not reserved as an opening liability.
+`marked_portfolio_equity` owns book equity: realized cash plus open gross mark P&L
+minus incurred open costs. It is **not estimated liquidation equity**.
+
+Every scheduled snapshot binds all open IDs, quantities, entry facts, accrued-cost
+source events and exact symbol/time/field mark hashes. The runner compares its
+position inventory to canonical portfolio state; independent event replay checks
+complete schedules, deterministic causal ordering, frozen-intent fills, accrued
+costs, canonical closure cash and snapshot conservation. Finalization additionally
+reconciles SQL facts/populations and seals their snapshot. Interrupted/unsupported,
+missing, negative-cash or mismatched evidence cannot produce COMPLETE equity.
+Exact retries are idempotent; interrupted deterministic capture can replay without
+double realization, while conflicting source/config identities are refused.
+Budgets additionally cap intent count and potential position/valuation pairs.
+
+A supported traded window may now produce COMPLETE **modeled source equity**.
+Legacy eager/traded packets retain all existing INCOMPLETE restrictions. Capital
+return/drawdown and historical consumer admission remain disabled for both paths;
+no historical PASS, OOS waiver, PAPER qualification or LIVE authority follows.
+Consumer admission is a separate future contract, including explicit acceptance
+of this model's limited scope and schedule rather than unobserved intrabar truth.
+
+### Causal native-strategy adapter (admission remains incomplete)
+
+#### Prospective breakout input receipts (observation only)
+
+The public kline scanner now retains `breakout_input_receipt` with the actual
+two decoded source rows, original open/inclusive-close timestamps, requested
+URL/symbol/timeframe, canonical-JSON pair hash and measured local read time.
+As in the archive receipt convention, `local_read_observed_ms` is separate
+from `remote_retrieval_observed_ms`; the latter stays null. This is a local
+observation of decoded rows, not a raw HTTP byte checksum, independently
+authenticated publisher receipt or proof of historical availability. Missing
+close times, malformed OHLC or an unverifiable source pair produce UNAVAILABLE
+receipt evidence while preserving existing geometry/decision behavior.
+
+The source snapshot copies the canonical prior-high/prior-low reference,
+side/setup and actual crossing flag. Runtime binds the snapshot to the existing
+signal ID and recorded decision timestamp, checking source scope, type-sensitive
+geometry identity, source hash and input observation time. It does not substitute
+persistence time for decision time. Existing legacy/shadow and accepted payload
+projections preserve the same source object; observation metrics and decision
+diagnostics store a single equivalent `breakout_provenance` envelope using the
+existing JSON writers. Guided candidates retain legacy receipts explicitly as
+LEGACY_SCANNER_SHADOW_CANDIDATE; they cannot inherit breakout provenance as their
+own geometry. Legacy candidates without receipts remain explicitly unavailable.
+
+`BOUND_LOCAL_OBSERVATION` describes only that binding. Research eligibility is
+still NOT_EVALUABLE and probability UNAVAILABLE: independent provenance,
+configuration identity, label-policy/window requirements and calibration remain
+separate. The sole label/seed authority remains `freeze_breakout`; the receipt
+does not introduce another economic gate, horizon or score. No source/schema
+migration, old-row backfill or historical dataset admission follows. Existing
+INSUFFICIENT / eligible0 and unresolved original archive matching are unchanged.
+
+The scanner cannot know the eventual canonical runtime signal ID. Runtime
+associates its existing ID when assigned, copying the cached receipt rather than
+mutating shared source data. A previously different candidate association is
+retained and refused; it is never silently rebound to the new candidate.
+
+#### Native BACKTEST semantics
+
+`alphaforge.backtest_strategy_adapter` reuses the existing BACKTEST selector,
+`scan_symbol_backtest`, AIBrain score and shared `evaluate_signal_decision` /
+`run_order_cycle` parity boundary. It does not replace signal generation, tune
+thresholds or convert native protective orders into a scheduled exit.
+
+The adapter reads bounded, publisher-checksum-bound Binance public BTCUSDT 1m
+spot ZIP archives and exact quote-turnover fields offline. Archive URLs, byte
+SHA256, normalized data/quote hashes, UTC open/inclusive-close timestamps,
+coverage, configuration and strategy/code identity are retained. Local receipt
+files are declared provenance, not self-authenticating signatures; collection
+must independently verify the publisher/TLS source. Local-read observation time
+is recorded; an unavailable remote retrieval timestamp stays null. Spot OHLC is
+not evidence of futures funding, spread, fees, latency or actual fills.
+
+At each scheduled minute, only rows whose close is available at that boundary
+reach the native selector, scorer and MTF path. A full prior 24-hour quote-volume
+population is required. Warmup is feature-only, outside the execution interval;
+no warmup decisions or outcomes enter the run. Every decision is retained, not a
+retrospective subset. Stable IDs bind run, symbol, time and exact closed-prefix
+hash. Source signal label, close availability, native scoring label, decision
+boundary, earliest next execution boundary, actual execution (null when refused)
+and wall observation time are distinct. Optional native `causal_decision_ms`
+must equal the signal candle's release boundary; it supplies the order/risk clock
+without changing the original signal label or legacy callers.
+
+Current native candidates require protective SL/TP semantics and do not supply
+the boundary executor's scheduled full-close contract. LIMIT/STOP orders cannot
+be MARKET fills; SL/TP cannot become a fixed holding period. These candidates are
+explicitly refused, with canonical sizing proposals preserved diagnostically.
+Native missing-execution and risk rejections remain authoritative. No funding or
+other unavailable execution inputs are supplied as favorable zeros.
+
+The current adapter therefore captures a complete decision audit while executing
+**no native intents**. Only because admission is closed may its prefix audit be
+frozen before the unchanged accounting executor runs. This is not a general
+precomputed-intent route for a traded portfolio; future admitted decisions must
+consume the then-current chronological portfolio state. `strategy_evidence`
+input records are independently reproducible through native scoring, bound into
+the source strategy identity, and persisted as immutable `STRATEGY_DECISION`
+events. SQL/JSON replay checks their full schedule, prefix binding and identity.
+Each `observed_ms` must be an integer at or after that record's
+`source_available_ms`, including during recomputed replay. It remains the local
+capture time, not proof of historical publication time or client latency.
+Impossible observation times are refused before output/database creation;
+replay's exclusion of this wall-clock field from deterministic equality does
+not waive its temporal sanity checks.
+The source packet remains INCOMPLETE with
+`NO_SUPPORTED_CAUSAL_STRATEGY_EXECUTION`; a flat diagnostic run never supplies
+COMPLETE traded capital evidence. Consumer metrics and historical PASS remain
+unavailable. A successful archive replay proves the observed decisions only,
+not historical execution accuracy, OOS admissibility or LIVE readiness.
+
+Example using independently collected archives plus `receipts.json` and their
+publisher `.CHECKSUM` files (all outputs go to a new isolated directory):
+
+```bash
+PYTHONPATH=src python -m alphaforge.backtest_strategy_adapter \
+  --archives /path/to/verified-archives --output-dir /private/tmp/causal-backtest \
+  --start-ms 1704153600000 --end-ms 1704160800000 --run-id unique-causal-run
+```
+
+Inspect `strategy_run_summary.json`, `input.json`, `backtest.sqlite` and
+`backtest_source_evidence.json`. Independent native verification is
+`validate_strategy_evidence(input, recompute=True)`; source verification must use
+identity/completion pins read independently from primary SQL or retained receipts.
+Exact existing packet replay is distinct from collecting a fresh observation.
+Conflicting same-run identities remain refused; no old historical record is
+upgraded or backfilled.
+
+Native MTF execution contexts expose `unavailable_market_fields` for the existing
+mandatory numeric prerequisites: spread, expected slippage, market-data latency
+and liquidity. This is a diagnostic of that gate, not source authentication or
+permission to fill missing values. The canonical scanner measures market-data
+latency as client HTTP RTT; order acknowledgement latency and orderbook imbalance
+are separate fields. Neither OHLC nor exchange event/transaction timestamps prove
+historical client RTT. A publisher-checksummed USD-M depth archive cannot supply
+that measurement or establish compatibility with a SPOT candle run. Existing
+BACKTEST spread/slippage/liquidity estimates remain model inputs, not observed
+microstructure. Without compatible, decision-time source observations, retain
+`MTF_EXECUTION_UNAVAILABLE`; do not introduce a provider that cannot satisfy the
+gate. Native protective SL/TP representation and consumer admission remain
+separately blocked.
+
+### Opt-in historical execution scenarios
+
+`historical_execution_scenario` is a separate research evaluator. Default
+`OBSERVED_NATIVE` verifies and preserves the frozen native audit without modeled
+records. Only an explicit `--scenario` JSON enables `MODELED_HISTORICAL_V1`.
+It calls the canonical closed-1m aggregation and MTF predicate/geometry builders;
+it never reroutes native strategy, PAPER/LIVE, risk, orders or accounting.
+
+The first version evaluates **MTF only**, retaining earlier native rejections.
+`MTF_ALIGNED` is not full strategy ACCEPT: downstream scoring/risk/cost gates are
+`NOT_EVALUATED`. All original native reasons/diagnostics remain in a separate
+`observed_native` population. Fee is declared but not booked; no simulated fill,
+SL/TP execution, marked equity or capital consumer admission is produced.
+
+The strict `ExecutionScenario` JSON requires every field in its typed contract:
+`schema=historical-execution-scenario-v1`, name, source_provider, venue, product,
+instrument, input_hash, native_config_hash, start_ms, end_ms,
+assumptions_effective_from_ms, market_data_latency_ms, order_latency_ms,
+spread_pct, expected_slippage_pct, liquidity_score and fee_pct. Hashes are SHA256
+canonical `digest(input)` and `digest(input['strategy_evidence']['profile'])`.
+Only the existing Binance SPOT BTCUSDT 1m adapter scope is supported. Rates are
+fractions, timestamps UTC epoch milliseconds, latencies integer milliseconds
+less than one minute each. Missing, unknown, nonfinite, negative, mismatched or
+out-of-range parameters are rejected; no assumption defaults to zero.
+
+Assumptions are explicit, uncalibrated counterfactual inputs. Their effective
+start is a modeled coverage domain, not a claimed historical declaration time.
+For the native decision at `t`, the evaluator consumes exactly the already-closed
+prefix through `t`; assumed availability and modeled decision are
+`t + market_data_latency_ms`. It admits no later candle from that shift.
+The earliest hypothetical execution is the strictly subsequent minute boundary
+after modeled decision plus order latency. Out-of-window boundaries are labeled;
+no execution takes place. RTT is conservatively used as an explicit availability
+delay, not inferred one-way latency or measured publication/receive timing.
+
+Separate JSON artifacts retain source provenance, full populations, input/config/
+code/scenario identities, assumptions, timing policy and limitations. Modeled MTF
+execution status is `MODELED_NOT_OBSERVED`; measured latency fields remain null.
+Funding, orderbook and submit/ack observations remain unsupported. Unknown native
+inputs are never overwritten. Reusing that modeled context at the observed native
+gate fails closed. Replay requires separately supplied frozen input and scenario,
+checks an external input hash pin, recomputes native and modeled decisions, and
+rejects rehashed tampering. Hashes bind content; they do not authenticate a provider
+or prove a real historical receipt. Verify archive checksums independently.
+
+```bash
+PYTHONPATH=src python -m alphaforge.historical_execution_scenario \
+  --input /path/to/native/input.json --scenario /path/to/explicit-scenario.json \
+  --output /private/tmp/new-scenario.json
+```
+
+Omit `--scenario` for observed-only verification. Output uses exclusive creation;
+keep native input and scenario artifacts separately. No scenario-only result may
+be imported as capital evidence, historical-validation PASS or LIVE readiness.
+
+### Isolated downstream scenario evaluation
+
+`historical_downstream_scenario` adds a separate
+`historical-downstream-scenario-v1` research envelope; the v1 MTF contract and
+native behavior remain unchanged. It accepts the same frozen input and explicit
+scenario JSON. Default observed-only mode has no modeled/downstream population.
+Only MTF_ALIGNED entries enter canonical BACKTEST stateless AIBrain scoring,
+confirmation, `order.evaluate_signal_decision` (pure pre-submit quality/execution
+cost), portfolio risk and sizing. It never calls order-cycle, fill or accounting
+functions. Upstream/MTF decisions, reasons and source IDs are retained intact.
+
+Scoring/confirmation precede shared quality/cost, requested notional, portfolio
+risk and final sizing. Requested notional needs attributable current balance
+before the portfolio snapshot; its authority is `BacktestPortfolioState.notional_for`.
+Without source state this call is unavailable, rather than constructing a flat
+portfolio from the opening seed.
+Independent later diagnostics may still be computed, but cannot override an
+earlier unsupported gate. Final outcomes are UPSTREAM_REJECT, MTF_REJECT,
+DOWNSTREAM_REJECT, NOT_EVALUABLE or SCENARIO_DOWNSTREAM_ALIGNED. The last is
+research eligibility only; it never authorizes an order or native admission.
+
+Native predicates sometimes compute aggregate numbers with missing-input
+fallbacks. Such numbers are not evidence: missing scorer funding/fakeout inputs
+suppress aggregate score/expectancy/confirmation; missing execution-cost inputs
+suppress effective RR and total/residual cost feasibility. Native diagnostic
+flags remain explicitly unqualified. Known canonical features, candidate and
+expected-fill RR geometry, and separate scenario fee/slippage/spread/latency/
+liquidity components remain inspectable. Funding stays null, fees are not booked,
+and expected fill is a model estimate with actual fill null. No duplicated cost
+or accounting formula is introduced.
+
+Observed-native flat snapshots do not establish a counterfactual portfolio
+sequence. This version supplies no fabricated equity, balance, position count,
+notional or risk history. Canonical portfolio risk receives an explicitly
+incomplete snapshot and sizing an unavailable original notional; both remain
+NOT_EVALUABLE even if a diagnostic policy were fail-open. Opening capital must
+not substitute for current sizing balance. Full eligibility cannot be established
+without supported scoring/cost inputs and source-owned chronological state.
+Native SL/TP representation and capital consumer admission remain blocked.
+
+```bash
+PYTHONPATH=src python -m alphaforge.historical_downstream_scenario \
+  --input /path/to/frozen/input.json --scenario /path/to/same-scenario.json \
+  --output /private/tmp/new-downstream.json
+```
+
+The separate output is exclusively created. Replay takes independently retained
+input hash and scenario, re-evaluates canonical native/MTF/downstream gates and
+rejects rehashed promotion. Artifacts carry prefix/time/config/source/model/code
+identities and full populations. They are not historical fills, realized costs,
+marked-equity evidence, historical-validation PASS or LIVE readiness.
+
+### Optional historical scoring assumptions
+
+`historical-downstream-scenario-v1` accepts a separate, explicit
+`--scoring-assumptions` JSON contract (`historical-scoring-assumptions-v1`).
+Without it, funding and fakeout remain UNAVAILABLE, with null values and exact
+reasons. Native decisions and the MTF scenario are unchanged.
+
+Required keys: `schema`, `scenario_id`, `effective_from_ms`,
+`funding_rate_fraction`, `fakeout_risk`, `rationale`. Both numeric fields are
+nullable, but at least one must be explicitly supplied. Funding is a **signed
+fraction**, strictly between -1 and 1 (0.0001 means 0.01%, not 0.0001%). Fakeout
+is a finite probability in [0,1]. No numeric defaults are applied. The exact
+parent scenario binds venue/product/instrument, original input/config hashes and
+window; assumptions must be available by the window start. A deterministic policy
+hash and per-field kind/source/availability/units accompany each evaluated prefix.
+JSON replay requires the independently supplied policy and rejects promotion.
+
+Canonical AIBrain consumes `funding_rate` and `funding_rate_pct` as fractions
+against the same configured funding threshold. This research policy explicitly
+feeds the same signed assumption to both names. AIBrain applies its existing score
+penalties; execution-cost authority applies its existing absolute-rate RR penalty
+once. These are quality/economics predicates, not cash deductions or funding
+settlement accounting. No fee or funding expense is booked.
+
+The existing historical funding loader uses Binance **USD-M** `/fapi/v1/fundingRate`;
+the scanner uses `premiumIndex`. Neither is SPOT evidence. There is no canonical
+SPOT exemption for mandatory native funding predicates, so NOT_APPLICABLE is not
+accepted as a substitute for missing funding. A funding assumption for SPOT is an
+explicit counterfactual research penalty, never a claim of actual SPOT funding.
+The canonical code has no candle-derived fakeout producer; AIBrain's 0.25 fallback
+is not an observation or a forward-outcome label. It can only become an explicit
+MODELED input through this opt-in contract. No new fakeout formula is introduced.
+OBSERVED and NOT_APPLICABLE inputs are intentionally unsupported until their
+source/product authority exists; they cannot be injected through this schema.
+
+Complete declared assumptions permit canonical score, confirmation and effective-RR
+calculations. Remaining missing inputs keep affected gates NOT_EVALUABLE.
+Portfolio state, sizing, protective SL/TP execution and capital consumers retain
+all existing restrictions. Research rejection does not authorize execution.
+
+Research scenario/downstream replay compares the entire packet through the
+existing canonical JSON digest, including its result hash. Python dictionary
+equality is insufficient: booleans and numerically equal integer/float values
+can otherwise hide type-changing edits under an unchanged hash. JSON key order
+does not affect canonical identity; changing a value/type or rehashing a promoted
+result cannot match the independently recomputed expected packet. This check
+authenticates deterministic replay identity, not the original data publisher.
+
+### Breakout-only failure labels (research, uncalibrated)
+
+`breakout_failure_labels` is a standalone label producer, with no scorer/runtime
+hook. Owner decision A limits it to failed breakouts. `freeze_breakout` reuses
+canonical `signal_geometry` and freezes the known previous high for LONG or low
+for SHORT, side/setup, decision, source/config and both source candles. It also
+requires an actual close beyond that level: the legacy geometry's setup name
+alone does not prove a crossing. Other setups are refused. Seed inputs must be
+complete, contiguous, current and available by the prediction instant. Explicit
+RECORDED, declared-boundary-model and synthetic availability bases remain distinct;
+caller hashes bind evidence but do not authenticate its publisher.
+
+No inspected canonical rule defines a fakeout lifetime or wick-vs-close
+invalidation. `LabelPolicy` therefore requires an explicit research hypothesis
+and horizon (or explicit `None`, yielding HORIZON_UNSET). RETURN_TO_LEVEL labels
+the first forward low <= level for LONG or high >= level for SHORT;
+CLOSE_BACK_INSIDE instead uses the corresponding completed close. These are
+separate versioned/pinned research targets, not defaults or calibrated choices.
+Equality is a return; no buffer/threshold is invented. Entry timeout is not
+borrowed as a fakeout horizon. Synthetic test intervals/horizons are not policy.
+
+Prediction starts at the frozen candidate decision. The prediction candle is
+excluded; aligned forward intervals cover [decision, decision+horizon*interval).
+A non-aligned prediction yields AMBIGUOUS_PREDICTION_BOUNDARY, never an inferred
+OHLC ordering. Both candidate and forward prices require scoped, strict OHLC and
+recorded/declared availability. Only completed candles available by the explicit
+as-of cutoff may resolve a label. Failure may mature on a contiguous prefix;
+absence of failure requires the entire horizon. Missing/late data is PENDING or
+INCOMPLETE_WINDOW; conflicting duplicates are AMBIGUOUS_DUPLICATE_SOURCE; neither
+becomes a binary label. Identical duplicates are idempotent. Out-of-window or
+future-unavailable prices cannot alter an earlier label.
+
+There is one frozen return event and no competing TP/success barrier, so a fully
+observed post-decision candle needs no invented TP/SL order. Wick recovery has
+different deterministic labels under the two explicit hypotheses; it does not
+select one hypothesis as authoritative. NO_FAILURE_WITHIN_HORIZON is observed
+survival under that definition, not profitability or trade success.
+
+Packets bind seed/policy/source-prefix and algorithm byte hashes; independent
+seed-pinned replay uses canonical JSON identity. No Git identity is queried.
+The producer always returns probability=null/UNAVAILABLE, dependent evaluation
+NOT_EVALUABLE and runtime admission DISABLED. Calibration, representative market
+data, immutable train/calibration splits, horizon/policy selection and untouched
+OOS remain separate pending gates. No fitted probability or runtime integration
+is implemented, and no future outcome is supplied to decision-time features.
