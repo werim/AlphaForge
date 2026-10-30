@@ -92,6 +92,8 @@ jobs:
             --head HEAD \
             --output artifacts/system-verification-plan.json
           cat artifacts/system-verification-plan.json
+      - name: Codex delivery verifier regressions
+        run: python -m pytest -q tests/test_verify_codex_delivery.py
 
       - name: Cross-surface invariant gate
         if: github.event_name == 'pull_request'
