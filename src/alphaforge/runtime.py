@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from alphaforge.breakout_provenance import associate_breakout_receipt, bind_breakout_provenance
+
 import asyncio
 import contextlib
 from collections import deque
@@ -1550,6 +1552,7 @@ class RuntimeOrchestrator:
             self._burnin_evidence_incomplete = True
             return
         try:
+            breakout_provenance = bind_breakout_provenance(payload)
             execution_ctx = dict(payload.get("execution_ctx") or {})
             canonical_regime = self._canonical_market_regime(payload)
             source_regime = payload.get("regime")
@@ -1608,6 +1611,7 @@ class RuntimeOrchestrator:
                         "primary_reject_reason": payload.get("primary_reject_reason"),
                         "reject_reasons": payload.get("reject_reasons"),
                     })
+                metrics["breakout_provenance"] = breakout_provenance
                 setup_identity = payload.get("setup_identity")
                 reject_decision_id = payload.get("reject_decision_id")
                 observation_id = (
@@ -1637,6 +1641,7 @@ class RuntimeOrchestrator:
                     else {}
                 )
                 diagnostics = {
+                    "breakout_provenance": breakout_provenance,
                     "observation_id": observation_id,
                     "campaign_id": campaign_id,
                     "candidate_rr": payload.get("candidate_rr"),
@@ -3422,6 +3427,9 @@ class RuntimeOrchestrator:
                 )
 
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
+        if "breakout_input_receipt" in market_ctx:
+            market_ctx["breakout_input_receipt"] = associate_breakout_receipt(
+                market_ctx["breakout_input_receipt"], signal_id)
         finalized = self._canonical_final_decision_recorded(signal_id)
         if finalized is not False:
             if finalized:
@@ -3435,7 +3443,7 @@ class RuntimeOrchestrator:
         market_ctx["execution_ctx"] = execution_ctx
         legacy_candidate = {key: market_ctx.get(key) for key in (
             "side", "entry", "sl", "tp", "rr", "setup_type", "setup_reason",
-            "geometry_status", "geometry_reason", "geometry_source",
+            "geometry_status", "geometry_reason", "geometry_source", "breakout_input_receipt",
         )}
         geometry_required = (
             self.config.execution_mode is ExecutionMode.PAPER
@@ -4504,6 +4512,7 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         accepted_burnin_payload = {
+            "breakout_input_receipt": market_ctx.get("breakout_input_receipt"),
             "signal_id": signal_id,
             "decision_time": market_ctx["decision_timestamp"],
             "setup_identity": market_ctx.get("setup_identity"),
@@ -5977,7 +5986,7 @@ class RuntimeOrchestrator:
                 "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
                 "effective_rr", "execution_cost_semantics", "score", "score_components",
                 "expectancy", "expectancy_after_costs", "expectancy_bucket", "confidence",
-                "setup_type", "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
+                "setup_type", "setup_reason", "geometry_status", "geometry_reason", "geometry_source", "breakout_input_receipt",
             )}
             shadow_evidence = {
                 **shadow_geometry,

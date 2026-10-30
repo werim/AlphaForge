@@ -243,6 +243,8 @@ def validate_strategy_evidence(data, *, recompute=False):
                 or record['decision_id']!=digest([data['run_id'],'BTCUSDT',t,digest(prefix)])
                 or record['mapped_intent_id'] is not None or type(record['observed_ms']) is not int):
             raise ValueError('noncausal/cross-scoped strategy decision')
+        if record['observed_ms'] < record['source_available_ms']:
+            raise ValueError('strategy observation precedes source availability')
         if record['native_status']=='ACCEPT':
             candidate = record['candidate']
             if not candidate or not record['adapter_reasons'] or 'MISSING_NATIVE_SCHEDULED_EXIT_CONTRACT' not in record['adapter_reasons']:

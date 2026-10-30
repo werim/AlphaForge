@@ -197,7 +197,8 @@ def replay_downstream(packet,data,*,expected_input_hash,scenario=None,scoring_as
         raise ValueError('downstream input pin mismatch')
     mode=OBSERVED_NATIVE if scenario is None else MODELED_HISTORICAL_V1
     expected=evaluate_downstream(data,mode=mode,scenario=scenario,scoring_assumptions=scoring_assumptions)
-    if packet!=dict(result=expected,result_hash=digest(expected)):
+    # Python equality aliases JSON booleans/numbers; artifact types are identity.
+    if digest(packet)!=digest(dict(result=expected,result_hash=digest(expected))):
         raise ValueError('downstream replay mismatch/promotion')
     return expected
 

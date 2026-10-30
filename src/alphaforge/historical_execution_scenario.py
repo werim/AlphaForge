@@ -192,7 +192,8 @@ def replay_scenario(packet, data, *, expected_input_hash, scenario=None):
         raise ValueError('independent scenario input pin mismatch')
     mode = OBSERVED_NATIVE if scenario is None else MODELED_HISTORICAL_V1
     expected = evaluate_scenario(data, mode=mode, scenario=scenario)
-    if packet != dict(result=expected, result_hash=digest(expected)):
+    # Python equality aliases JSON booleans/numbers; artifact types are identity.
+    if digest(packet) != digest(dict(result=expected, result_hash=digest(expected))):
         raise ValueError('scenario replay mismatch/promotion')
     return expected
 
