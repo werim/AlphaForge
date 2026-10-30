@@ -186,7 +186,7 @@ def mutations() -> list[Mutation]:
                  "order_admission='ENABLED', capital_source_status='NOT_PRODUCED'",
                  "tests/test_historical_execution_scenario.py::test_modeled_tags_and_causality_never_promote_orders"),
         Mutation("scenario_replay_rejects_promotion", "src/alphaforge/historical_execution_scenario.py",
-                 "if packet != dict(result=expected, result_hash=digest(expected)):", "if False:",
+                 "if digest(packet) != digest(dict(result=expected, result_hash=digest(expected))):", "if False:",
                  "tests/test_historical_execution_scenario.py::test_rehashed_packet_tamper_and_promotion_fail_independent_replay"),
         Mutation("mtf_market_data_rtt_required", "src/alphaforge/multi_timeframe.py",
                  '        "market_data_latency_ms",\n', '',
