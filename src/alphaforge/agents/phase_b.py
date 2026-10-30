@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from alphaforge.order import OrderCandidate, evaluate_trade_quality
+from alphaforge.regime_authority import REGIME_STATES
 
 from .contracts import (AgentStage, DecisionEnvelope, DecisionStatus, StageInput,
                         stable_hash, utc_now_iso)
 
 VERSION = "phase-b-1"
-_REGIMES = {"TRENDING", "MEAN_REVERTING", "CHOPPY", "PANIC", "LOW_LIQUIDITY",
-            "BREAKOUT", "SHORT_SQUEEZE", "RANGE_COMPRESSION", "NEWS_DRIVEN"}
+_REGIMES = set(REGIME_STATES) - {"UNKNOWN"}
 
 
 def _number(value: Any) -> float | None:

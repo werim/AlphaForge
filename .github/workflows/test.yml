@@ -13,13 +13,46 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  dispatch-dedupe:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+
+    steps:
+      - name: Reuse successful exact-SHA qualification
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          match="$(
+            gh api --method GET \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/test.yml/runs" \
+              -f branch="${GITHUB_REF_NAME}" \
+              -f status=success \
+              -F per_page=50 \
+              --jq ".workflow_runs[] | select(.head_sha == \"${GITHUB_SHA}\" and (.event == \"push\" or .event == \"workflow_dispatch\")) | .id" \
+              | head -n 1
+          )"
+          if [ -n "$match" ]; then
+            echo "Found successful full qualification for ${GITHUB_SHA}: run ${match}"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No successful full qualification found for ${GITHUB_SHA}"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: dispatch-dedupe
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.dispatch-dedupe.outputs.should_run == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -50,6 +83,15 @@ jobs:
       - name: Compile
         run: python -m compileall -q src
 
+      - name: System verification routing gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue437_system_verification_router.py
+          PYTHONPATH=src python -m alphaforge.system_verification plan \
+            --base "origin/${GITHUB_BASE_REF}" \
+            --head HEAD \
+            --output artifacts/system-verification-plan.json
+          cat artifacts/system-verification-plan.json
       - name: Codex delivery verifier regressions
         run: python -m pytest -q tests/test_verify_codex_delivery.py
 
@@ -61,34 +103,54 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
 
-      - name: SQLite contention regression gate
+      - name: Routed PR verification
         if: github.event_name == 'pull_request'
         run: |
-          pytest -q tests/test_runtime_heartbeat.py
-          pytest -q tests/test_reconciliation_sqlite_contention.py
-          pytest -q tests/test_issue450_sqlite_concurrency.py
-          pytest -q tests/test_phase8_burnin_campaign.py -k "lock"
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
 
-      - name: Terminal cause regression gate
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -q tests/test_issue419_terminal_cause.py
-          pytest -q tests/test_phase9_burnin_ops.py -k "terminal_cause or backlog_growth or sustained_overdue or running_without_worker or manual_terminalization_event_failure"
-
-      - name: Public market-data safety gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_exchange_market_scanner.py tests/test_issue438_market_data_supervision.py
-
-      - name: SOAK decision evidence gate
-        if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441 or fast_qualification_is_isolated_complete_and_machine_readable"
+          plan = json.loads(
+              Path("artifacts/system-verification-plan.json").read_text()
+          )
+          always_covered = {
+              "tests/test_ci_branch_contract.py",
+              "tests/test_issue421_decision_invariant.py",
+              "tests/test_issue498_cross_component_mutations.py",
+          }
+          selected = [
+              path
+              for path in plan.get("selected_tests", [])
+              if path not in always_covered
+          ]
+          print(
+              "verification route:",
+              plan["risk_level"],
+              ",".join(plan["required_tiers"]),
+          )
+          print(
+              "routed tests:",
+              " ".join(selected) if selected else "<always-on guards only>",
+          )
+          if selected:
+              subprocess.run(
+                  [sys.executable, "-m", "pytest", "-q", *selected],
+                  check=True,
+              )
+          PY
 
       - name: Full regression suite
         if: github.event_name != 'pull_request'
         run: pytest -q
 
       - name: Protected safety mutation gate
-        run: python scripts/run_safety_mutations.py
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            pytest -q tests/test_issue498_cross_component_mutations.py
+          fi
+          python scripts/run_safety_mutations.py
 
       - name: Run offline backtest
         run: |
@@ -107,3 +169,4 @@ jobs:
             artifacts/backtest/backtest_orders.csv
             artifacts/backtest/order_backtest_summary.csv
           if-no-files-found: warn
+          retention-days: 14

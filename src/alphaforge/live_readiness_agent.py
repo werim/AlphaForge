@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from alphaforge.release_identity import valid_git_commit
 from alphaforge.release_gates import (
     rollback_verification_evidence_valid,
     runbook_verification_evidence_valid,
@@ -73,8 +74,13 @@ class DB:
     def tables(self): return {x["name"] for x in self.rows("SELECT name FROM sqlite_master WHERE type='table'")}
 def git(repo):
     def r(*a):
-        p=subprocess.run(["git",*a],cwd=repo,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False); return p.stdout.strip() if p.returncode==0 else None
-    return {"commit":r("rev-parse","HEAD"),"branch":r("branch","--show-current"),"dirty":bool(r("status","--porcelain"))}
+        try:
+            p=subprocess.run(["git",*a],cwd=repo,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False)
+        except OSError:
+            return None
+        return p.stdout.strip() if p.returncode==0 else None
+    status=r("status","--porcelain")
+    return {"commit":r("rev-parse","HEAD"),"branch":r("branch","--show-current"),"dirty":None if status is None else bool(status)}
 class LiveReadinessAgent:
     def __init__(self,db_path,campaign_id,*,repo=None,now=None,git_metadata=git,heartbeat_max_age_seconds=300): self.path=Path(db_path); self.cid=campaign_id; self.repo=Path(repo or Path.cwd()); self.now=now or datetime.now(timezone.utc).replace(microsecond=0); self.gm=git_metadata; self.age=heartbeat_max_age_seconds; self.scope={"campaign_id":campaign_id,"burnin_run_id":None,"release_id":None}
     def g(self,i,s,r,src,o,e): return Gate(i,s,r,src,o,e,ts(self.now),dict(self.scope))
@@ -90,8 +96,10 @@ class LiveReadinessAgent:
             tabs=db.tables(); c=db.one("SELECT * FROM burnin_campaigns WHERE campaign_id=?",(self.cid,)) if "burnin_campaigns" in tabs else None
             if c:self.scope.update(burnin_run_id=c.get("active_run_id"),release_id=c.get("release_id"))
             m=self.gm(self.repo); src="git metadata + campaign provenance"
-            g1=self.miss("GIT_IDENTITY",src,"campaign commit equals evaluator commit") if not c or not m.get("commit") else self.g("GIT_IDENTITY",PASS if c.get("git_commit")==m["commit"] else BLOCKED,"COMMIT_MATCH" if c.get("git_commit")==m["commit"] else "CAMPAIGN_COMMIT_MISMATCH",src,{"campaign":c.get("git_commit"),"checkout":m["commit"]},"campaign commit equals evaluator commit")
-            g2=self.g("WORKTREE_CLEAN",PASS if not m.get("dirty") else BLOCKED,"CLEAN" if not m.get("dirty") else "WORKTREE_DIRTY","git status --porcelain",{"dirty":m.get("dirty")},"evaluator worktree is clean")
+            g1=self.miss("GIT_IDENTITY",src,"campaign commit equals evaluator commit") if not c or not valid_git_commit(m.get("commit")) or not valid_git_commit(c.get("git_commit")) else self.g("GIT_IDENTITY",PASS if c.get("git_commit")==m["commit"] else BLOCKED,"COMMIT_MATCH" if c.get("git_commit")==m["commit"] else "CAMPAIGN_COMMIT_MISMATCH",src,{"campaign":c.get("git_commit"),"checkout":m["commit"]},"campaign commit equals evaluator commit")
+            dirty=m.get("dirty")
+            g2=(self.g("WORKTREE_CLEAN",PASS if not dirty else BLOCKED,"CLEAN" if not dirty else "WORKTREE_DIRTY","git status --porcelain",{"dirty":dirty},"evaluator worktree is clean")
+                if isinstance(dirty,bool) else self.miss("WORKTREE_CLEAN","git status --porcelain","evaluator worktree is clean"))
             absent=sorted(TABLES-tabs); g3=self.g("SCHEMA_VALID",PASS if not absent else NOT_OBSERVABLE,"CANONICAL_SCHEMA_PRESENT" if not absent else "REQUIRED_TABLES_MISSING","sqlite_master + schema_migrations",{"missing":absent},"canonical schema exists")
             g4=self.status(db,"PREFLIGHT_PASS","burnin_preflight_reports","campaign_id=?",(self.cid,),"generated_at","latest preflight PASS")
             h=at(c.get("last_heartbeat_at")) if c else None; healthy=c and str(c.get("campaign_status")).upper() in {"RUNNING","COMPLETED"} and not c.get("last_error")
@@ -114,9 +122,31 @@ class LiveReadinessAgent:
                 if decision_id: counts[decision_id]=counts.get(decision_id,0)+1
             du=[{"decision_id":decision_id,"n":count} for decision_id,count in counts.items() if count>1]
             g9=self.miss("DUPLICATE_EXECUTION","burnin_observations + order_decisions","scoped decision identity exists") if not scoped_signal_ids else self.g("DUPLICATE_EXECUTION",BLOCKED if du else PASS,"DUPLICATE_EXECUTION_DETECTED" if du else "NO_DUPLICATES","burnin_observations + order_decisions",du,"no duplicate decision IDs in active run")
+            provenance=obj((c or {}).get("source_provenance_json"))
+            dynamic_universe=str(provenance.get("universe_scope_mode") or "").upper()=="CANONICAL_DYNAMIC_V1"
             try: declared={str(x).upper() for x in json.loads(c.get("symbols_json") or "[]")} if c else set()
-            except (TypeError,ValueError): declared=set()
-            outside=sorted({str(x["symbol"]).upper() for x in obs if x.get("symbol")}-declared); g10=self.miss("CONTAMINATION","campaign universe + burnin_observations","no out-of-universe observations") if not obs else self.g("CONTAMINATION",BLOCKED if outside else PASS,"OUT_OF_UNIVERSE_OBSERVATION" if outside else "NO_CONTAMINATION","campaign universe + burnin_observations",outside,"no out-of-universe observations")
+            except (TypeError,ValueError,json.JSONDecodeError): declared=set()
+            if dynamic_universe:
+                selected_rows=db.rows(
+                    """SELECT DISTINCT UPPER(usc.symbol) AS symbol
+                       FROM burnin_universe_selection_links l
+                       JOIN universe_selection_candidates usc ON usc.cycle_id=l.cycle_id
+                       WHERE l.campaign_id=? AND l.burnin_run_id=? AND usc.selected=1""",
+                    (self.cid,self.scope["burnin_run_id"]),
+                ) if {"burnin_universe_selection_links","universe_selection_candidates"}.issubset(tabs) else []
+                declared={str(row.get("symbol") or "").upper() for row in selected_rows if row.get("symbol")}
+            outside=sorted({str(x["symbol"]).upper() for x in obs if x.get("symbol")}-declared)
+            contamination_source=("burnin_universe_selection_links + universe_selection_candidates + burnin_observations"
+                                  if dynamic_universe else "campaign universe + burnin_observations")
+            if not obs:
+                g10=self.miss("CONTAMINATION",contamination_source,"no out-of-universe observations")
+            elif dynamic_universe and not declared:
+                g10=self.g("CONTAMINATION",BLOCKED,"DYNAMIC_UNIVERSE_EVIDENCE_MISSING",contamination_source,{"outside":outside,"selected_symbols":[]},"every observed symbol has campaign-scoped canonical selection evidence")
+            else:
+                g10=self.g("CONTAMINATION",BLOCKED if outside else PASS,"OUT_OF_UNIVERSE_OBSERVATION" if outside else "NO_CONTAMINATION",contamination_source,{"outside":outside,"selected_symbols":sorted(declared) if dynamic_universe else None},"no out-of-universe observations")
+            archived=db.one("SELECT archive_path,state FROM storage_archives WHERE campaign_id=? AND state IN ('REMOVING','ARCHIVED')",(self.cid,)) if "storage_archives" in tabs else None
+            if archived:
+                g10=self.g("CONTAMINATION",NOT_OBSERVABLE,"ARCHIVED_UNIVERSE_EVIDENCE_REQUIRES_REPLAY","storage_archives",archived,"verified archive replay required")
             lifecycle_rows=db.rows("SELECT signal_id,lifecycle_state,mode FROM trade_lifecycle_events WHERE UPPER(mode)='PAPER'") if "trade_lifecycle_events" in tabs else []
             scoped_lifecycle=scoped_rows(lifecycle_rows,scoped_signal_ids)
             lifecycle_errors=[x for x in scoped_lifecycle if str(x.get("lifecycle_state") or "").upper() in {"ERROR","EXECUTION_ERROR"}]
@@ -181,7 +211,7 @@ class LiveReadinessAgent:
             )
             g20=self.miss("RUNBOOK_EVIDENCE","runbook_evidence","contract-verified runbook PASS") if not run else self.g("RUNBOOK_EVIDENCE",PASS if run_ok else BLOCKED,"RUNBOOK_EVIDENCE_PASS" if run_ok else "RUNBOOK_EVIDENCE_INVALID","runbook_evidence",{"row":run,"evidence":run_evidence},"contract-verified runbook PASS")
         gs=[g1,g2,g3,g4,g5,g6,g7,g8,g9,g10,g11,g12,g13,g14,g15,g16,g17,g18,g19,g20]; blockers=[x.data() for x in gs if x.status in {BLOCKED,NEEDS_FIX}]; gaps=[x.data() for x in gs if x.status==NOT_OBSERVABLE]
-        return {"overall_status":BLOCKED if blockers else "READINESS_INCOMPLETE","generated_at":ts(self.now),"git_commit":self.gm(self.repo).get("commit"),"campaign_id":self.cid,"burnin_run_id":self.scope["burnin_run_id"],"release_id":self.scope["release_id"],"gates":[x.data() for x in gs],"blockers":blockers,"not_observable":gaps,"next_required_evidence":[f"{x.gate_id}:{x.reason}" for x in gs if x.status!=PASS],"authorization":"OBSERVATIONAL_ONLY_NOT_A_LIVE_AUTHORIZATION"}
+        return {"overall_status":BLOCKED if blockers else "READINESS_INCOMPLETE","generated_at":ts(self.now),"git_commit":m.get("commit"),"campaign_id":self.cid,"burnin_run_id":self.scope["burnin_run_id"],"release_id":self.scope["release_id"],"gates":[x.data() for x in gs],"blockers":blockers,"not_observable":gaps,"next_required_evidence":[f"{x.gate_id}:{x.reason}" for x in gs if x.status!=PASS],"authorization":"OBSERVATIONAL_ONLY_NOT_A_LIVE_AUTHORIZATION"}
 def summary(r): return "LIVE readiness observer v1: "+r["overall_status"]+"\n"+"\n".join(f"- {x['gate_id']}: {x['status']} ({x['reason']})" for x in r["gates"] if x["status"]!=PASS)+"\nObservational only; not a LIVE authorization mechanism or execution controller.\n"
 def main(argv=None):
     p=argparse.ArgumentParser(); p.add_argument("--db",required=True); p.add_argument("--campaign-id",required=True); p.add_argument("--json",action="store_true"); p.add_argument("--output-dir"); a=p.parse_args(argv); r=LiveReadinessAgent(a.db,a.campaign_id).evaluate(); raw=json.dumps(r,indent=2,sort_keys=True,default=str); text=summary(r)

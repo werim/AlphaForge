@@ -6,7 +6,7 @@ from alphaforge.live_readiness_agent import BLOCKED, NEEDS_FIX, NOT_OBSERVABLE, 
 from alphaforge.release_gates import ROLLBACK_VERIFICATION_CONTRACT, RUNBOOK_REQUIRED_MARKERS, RUNBOOK_VERIFICATION_CONTRACT
 
 NOW=datetime(2026,9,20,18,14,tzinfo=timezone.utc)
-def meta(_): return {"commit":"abc","branch":"feat/live-readiness-agent-v1","dirty":False}
+def meta(_): return {"commit":"a"*40,"branch":"feat/live-readiness-agent-v1","dirty":False}
 def make_db(path:Path):
     c=sqlite3.connect(path); c.executescript("""
     CREATE TABLE schema_migrations(x); CREATE TABLE burnin_campaigns(campaign_id,release_id,campaign_status,active_run_id,git_commit,config_hash,strategy_config_hash,last_heartbeat_at,last_error,symbols_json,latest_qualification_id,qualification_status);
@@ -20,13 +20,13 @@ def make_db(path:Path):
     CREATE TABLE runbook_evidence(release_id,status,recorded_at,evidence_json);
     CREATE TABLE runtime_control_state(mode_requested,mode_running,updated_at); CREATE TABLE runtime_control_audit_events(action,success,event_ts,requested_mode); CREATE TABLE burnin_observations(burnin_run_id,symbol,decision,execution_mode,metrics_json);
     """)
-    c.execute("INSERT INTO burnin_campaigns VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",("camp","rel","RUNNING","run","abc","cfg","str","2026-09-20T18:13:59Z",None,'["BTCUSDT"]',None,None))
-    c.execute("INSERT INTO burnin_runs VALUES(?,?,?,?,?)",("run","RUNNING","abc","cfg","str")); c.execute("INSERT INTO burnin_campaign_runs VALUES(?,?,?)",("camp","run","RUNNING")); c.execute("INSERT INTO burnin_preflight_reports VALUES(?,?,?)",("camp","PASS","2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_state_snapshots VALUES(?,?,?,?,?,?,?)",("camp","run","CLEAN",0,0,None,"2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_control_state VALUES(?,?,?)",("PAPER","PAPER","2026-09-20T18:00:00Z")); c.execute("INSERT INTO burnin_observations VALUES(?,?,?,?,?)",("run","BTCUSDT",None,"PAPER","{}")); c.commit(); c.close()
+    c.execute("INSERT INTO burnin_campaigns VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",("camp","rel","RUNNING","run","a"*40,"cfg","str","2026-09-20T18:13:59Z",None,'["BTCUSDT"]',None,None))
+    c.execute("INSERT INTO burnin_runs VALUES(?,?,?,?,?)",("run","RUNNING","a"*40,"cfg","str")); c.execute("INSERT INTO burnin_campaign_runs VALUES(?,?,?)",("camp","run","RUNNING")); c.execute("INSERT INTO burnin_preflight_reports VALUES(?,?,?)",("camp","PASS","2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_state_snapshots VALUES(?,?,?,?,?,?,?)",("camp","run","CLEAN",0,0,None,"2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_control_state VALUES(?,?,?)",("PAPER","PAPER","2026-09-20T18:00:00Z")); c.execute("INSERT INTO burnin_observations VALUES(?,?,?,?,?)",("run","BTCUSDT",None,"PAPER","{}")); c.commit(); c.close()
 def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", release_id="rel"):
     rollback_evidence={
         "verification_contract":ROLLBACK_VERIFICATION_CONTRACT,
-        "git_commit":"abc",
-        "source_git_commit":"abc",
+        "git_commit":"a"*40,
+        "source_git_commit":"a"*40,
         "source":"DETERMINISTIC_VALIDATION",
         "validation_id":validation_id,
         "recorded_at":"2026-09-20T18:00:00Z",
@@ -40,7 +40,7 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
     }
     runbook_evidence={
         "verification_contract":RUNBOOK_VERIFICATION_CONTRACT,
-        "git_commit":"abc",
+        "git_commit":"a"*40,
         "file_name":"RUNBOOK.md",
         "sha256":"a"*64,
         "size_bytes":128,
@@ -50,7 +50,7 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
     }
     c=sqlite3.connect(path)
     c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?)",(
-        validation_id,"2026-09-20T18:00:00Z","COMPLETE","DETERMINISTIC_VALIDATION","abc",1,1,1,1,0,"[]",
+        validation_id,"2026-09-20T18:00:00Z","COMPLETE","DETERMINISTIC_VALIDATION","a"*40,1,1,1,1,0,"[]",
     ))
     c.execute("INSERT INTO rollback_verification_events VALUES(?,?,?,?)",(
         release_id,"PASS","2026-09-20T18:00:01Z",json.dumps(rollback_evidence),
@@ -177,7 +177,7 @@ def test_newer_unrelated_rollback_validation_cannot_contaminate_release_scope(tm
     db=tmp_path/"campaign.db"; make_db(db); seed_release_safety_evidence(db,validation_id="linked")
     c=sqlite3.connect(db)
     c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?)",(
-        "unrelated","2026-09-20T18:13:00Z","INCOMPLETE","DETERMINISTIC_VALIDATION","abc",0,0,0,0,4,'["UNRELATED_FAILURE"]',
+        "unrelated","2026-09-20T18:13:00Z","INCOMPLETE","DETERMINISTIC_VALIDATION","a"*40,0,0,0,0,4,'["UNRELATED_FAILURE"]',
     ))
     c.commit(); c.close()
     assert gate(report(db),"ROLLBACK_EVIDENCE")["status"]==PASS
@@ -242,3 +242,80 @@ def test_release_safety_evidence_from_different_commit_is_blocked(tmp_path):
     r=report(db)
     assert gate(r,"ROLLBACK_EVIDENCE")["status"]==BLOCKED
     assert gate(r,"RUNBOOK_EVIDENCE")["status"]==BLOCKED
+
+
+def test_unavailable_git_status_is_not_clean(monkeypatch, tmp_path):
+    """Git command failure must not be promoted to a clean checkout."""
+    from types import SimpleNamespace
+    import alphaforge.live_readiness_agent as module
+
+    def fake_run(cmd, **_):
+        if cmd[-2:] == ["status", "--porcelain"]:
+            return SimpleNamespace(returncode=128, stdout="")
+        if cmd[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="a"*40+"\n")
+        return SimpleNamespace(returncode=0, stdout="dev\n")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    meta = module.git(tmp_path)
+    assert meta["commit"] == "a"*40
+    assert meta["dirty"] is None
+
+    def missing_executable(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(module.subprocess, "run", missing_executable)
+    assert module.git(tmp_path) == {"commit": None, "branch": None, "dirty": None}
+
+
+def test_readiness_refuses_unknown_checkout_cleanliness(tmp_path):
+    db = tmp_path / "campaign.db"
+    make_db(db)
+    for unknown in (None, "", 0):
+        result = LiveReadinessAgent(
+            db, "camp", now=NOW,
+            git_metadata=lambda _repo, value=unknown: {
+                "commit": "a"*40, "branch": "dev", "dirty": value,
+            },
+        ).evaluate()
+        assert gate(result, "GIT_IDENTITY")["status"] == PASS
+        assert gate(result, "WORKTREE_CLEAN")["status"] == NOT_OBSERVABLE
+        assert result["overall_status"] != "READINESS_READY"
+
+    dirty_result = LiveReadinessAgent(
+        db, "camp", now=NOW,
+        git_metadata=lambda _: {"commit": "a"*40, "branch": "dev", "dirty": True},
+    ).evaluate()
+    assert gate(dirty_result, "WORKTREE_CLEAN")["status"] == BLOCKED
+    assert gate(report(db), "WORKTREE_CLEAN")["status"] == PASS
+
+
+def test_missing_or_invalid_git_identity_never_qualifies_even_when_equal(tmp_path):
+    from alphaforge.release_identity import valid_git_commit
+    db=tmp_path/'identity.db';make_db(db)
+    for identity in (None,'',True,123,'abc','not-a-sha','a'*39,'g'*40,'A'*40,'0'*40):
+        assert not valid_git_commit(identity)
+        with sqlite3.connect(db) as conn:
+            conn.execute('UPDATE burnin_campaigns SET git_commit=?',(identity,))
+        result=LiveReadinessAgent(db,'camp',now=NOW,
+            git_metadata=lambda _,x=identity:dict(commit=x,dirty=False)).evaluate()
+        assert gate(result,'GIT_IDENTITY')['status']==NOT_OBSERVABLE
+        assert gate(result,'WORKTREE_CLEAN')['status']==PASS
+        assert result['overall_status']!='READINESS_READY'
+    with sqlite3.connect(db) as conn:
+        conn.execute('UPDATE burnin_campaigns SET git_commit=?',('b'*40,))
+    result=LiveReadinessAgent(db,'camp',now=NOW,git_metadata=meta).evaluate()
+    assert gate(result,'GIT_IDENTITY')['status']==BLOCKED
+    with sqlite3.connect(db) as conn:
+        conn.execute('UPDATE burnin_campaigns SET git_commit=?',('a'*40,))
+    assert gate(report(db),'GIT_IDENTITY')['status']==PASS
+
+
+def test_readiness_report_uses_one_source_identity_snapshot(tmp_path):
+    db=tmp_path/'identity.db';make_db(db);calls=[]
+    def metadata(repo):
+        calls.append(repo)
+        return dict(commit='a'*40 if len(calls)==1 else 'b'*40,dirty=False)
+    result=LiveReadinessAgent(db,'camp',now=NOW,git_metadata=metadata).evaluate()
+    assert len(calls)==1
+    assert result['git_commit']==gate(result,'GIT_IDENTITY')['observed_value']['checkout']=='a'*40

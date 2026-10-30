@@ -17,7 +17,9 @@ def test_top_symbols_and_inactive_excluded(monkeypatch):
                 {"symbol": "AAAUSDT", "status": "TRADING", "contractType": "PERPETUAL", "quoteAsset": "USDT", "filters": [1]},
                 {"symbol": "BBBUSDT", "status": "BREAK", "contractType": "PERPETUAL", "quoteAsset": "USDT", "filters": [1]},
             ]}
-        return [{"symbol": "AAAUSDT", "quoteVolume": "100"}, {"symbol": "BBBUSDT", "quoteVolume": "200"}]
+        if "bookTicker" in url:
+            return [{"symbol": "AAAUSDT", "bidPrice": "99", "askPrice": "100"}]
+        return [{"symbol": "AAAUSDT", "quoteVolume": "100", "priceChangePercent": "1"}, {"symbol": "BBBUSDT", "quoteVolume": "200", "priceChangePercent": "1"}]
     monkeypatch.setattr(bo, "fetch_json", fake_fetch)
     u = bo.select_symbol_universe(100)
     assert [x["symbol"] for x in u] == ["AAAUSDT"]
@@ -28,6 +30,16 @@ def test_load_candles_between_start_end(tmp_path: Path):
     p.write_text("timestamp,open,high,low,close,volume\n1,1,2,1,2,1\n2,1,2,1,2,1\n3,1,2,1,2,1\n")
     out = bo.load_candles(str(p), 2, 3)
     assert len(out) == 2
+
+
+def test_backtest_discards_candles_not_closed_by_requested_end():
+    candles = [
+        bo.Candle(0, 1, 2, .5, 1.5, 1),
+        bo.Candle(60_000, 1.5, 2, 1, 1.8, 1),
+    ]
+
+    assert bo._closed_candles_at(candles, timeframe="1m", end_ms=119_998) == [candles[0]]
+    assert bo._closed_candles_at(candles, timeframe="1m", end_ms=119_999) == candles
 
 
 def test_scan_creates_virtual_candidate(monkeypatch):
@@ -43,9 +55,19 @@ def test_scan_creates_virtual_candidate(monkeypatch):
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
     monkeypatch.setattr(bo, "_historical_authoritative_score", lambda *_args, **_kwargs: {"score": .9, "expectancy": .2, "expectancy_bucket": "HIGH", "accepted": True, "reject_reason": "", "diagnostics": {}})
     candles = [bo.Candle(1, 104, 104, 103.6, 104.0, 100), bo.Candle(2, 104, 104, 103.6, 104.0, 100), bo.Candle(3, 100.0, 105.5, 104.5, 105.0, 100)]
-    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}})
+    context = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001,
+               "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
+               "latency_ms": 10.0, "latency_status": "MODEL_ESTIMATE", "latency_source": "TEST_LATENCY_MODEL"}}
+    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, context)
     assert c is not None
-    assert c.score > 0
+    assert c.score == pytest.approx(.9)
+    assert context["market_ctx"]["score"] == pytest.approx(.9)
+    assert context["market_ctx"]["expectancy"] == pytest.approx(.2)
+    assert context["market_ctx"]["legacy_geometry_score"] != pytest.approx(.9)
+    assert context["market_ctx"]["fee_pct"] == 0.0004
+    assert context["market_ctx"]["fee_source"] == "TEST_FEE_SCHEDULE"
+    assert context["market_ctx"]["latency_ms"] == 10.0
+    assert context["market_ctx"]["latency_source"] == "TEST_LATENCY_MODEL"
 
 
 def test_scan_with_portfolio_state_uses_shared_decision_candidate():
@@ -84,6 +106,11 @@ def test_offline_main_uses_decision_pipeline_without_network_or_manual_rows(tmp_
     assert all(row["reject_reason"] for row in rejected_rows)
     assert all("OFFLINE_FIXTURE" not in str(row) for row in lifecycle_rows + rejected_rows)
     assert all(row["funding_rate_pct"] != "0.0" for row in lifecycle_rows)
+    not_scored = [row for row in lifecycle_rows if row.get("event_flags") == "NOT_SCORED_MTF_REJECT"]
+    assert not_scored
+    assert all(row["score"] == "" for row in not_scored)
+    assert all(row["expectancy_available"].lower() in {"false", "0"} for row in not_scored)
+    assert any("NOT_SCORED_MTF_REJECT" in row["diagnostics"] for row in rejected_rows)
 
 
 def test_scan_routes_non_breakout_bar_through_order_cycle(monkeypatch):
@@ -194,10 +221,13 @@ def test_same_candle_ambiguity_is_conservative_sl():
     assert rows[-1].close_reason == "SL_HIT"
 
 
-def test_score_varies_by_market_conditions():
+def test_legacy_geometry_diagnostic_is_variable_but_not_decision_authority():
     low = bo._build_market_ctx(bo.Candle(3, 100, 101, 99.5, 100.2, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     high = bo._build_market_ctx(bo.Candle(3, 100, 105, 99.5, 104.8, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
-    assert high["score"] != low["score"]
+    assert high["legacy_geometry_score"] != low["legacy_geometry_score"]
+    assert high["legacy_geometry_expectancy"] != low["legacy_geometry_expectancy"]
+    assert "score" not in high and "score" not in low
+    assert "expectancy" not in high and "expectancy" not in low
 
 
 def test_build_market_ctx_can_emit_short_candidate():
@@ -757,6 +787,7 @@ def test_high_candle_range_alone_does_not_trigger_wide_spread():
     result = bo.select_symbol("AAAUSDT", out)
     assert out["candle_range_pct"] > 10.0
     assert out["spread_source"] == "ESTIMATED_BACKTEST"
+    assert out["spread_status"] == "MODEL_ESTIMATE"
     assert out["spread_pct"] <= 0.12
     assert "WIDE_SPREAD" not in result.reject_reasons
 
@@ -766,6 +797,7 @@ def test_explicit_high_actual_spread_triggers_wide_spread():
     out = bo._build_symbol_market_data({"quoteVolume": 80_000_000.0, "actual_spread_pct": 0.35}, candles, 2)
     result = bo.select_symbol("AAAUSDT", out)
     assert out["spread_source"] == "ACTUAL"
+    assert out["spread_status"] == "MEASURED"
     assert "WIDE_SPREAD" in result.reject_reasons
 
 
@@ -796,6 +828,7 @@ def test_spread_source_propagated_to_execution_context():
         recent=[bo.Candle(1, 99, 101, 98, 100, 1), bo.Candle(2, 100, 102, 99, 101, 1)],
     )
     assert ctx["spread_source"] == "ESTIMATED_BACKTEST"
+    assert ctx["spread_status"] == "MODEL_ESTIMATE"
 
 
 def test_lifecycle_export_reads_persisted_sql_events():
@@ -1352,7 +1385,9 @@ def test_rescue_enabled_only_backtest_and_marks_reduced_size_exports():
     candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
     stats = bo.RescueStats()
     cand = bo.process_backtest_result(
-        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0,
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), {**_rescue_mctx(), "realized_cost_source": "TEST_EXPLICIT_ZERO_COST",
+            "realized_costs_usd": dict(entry_spread=0, entry_slippage=0, entry_fee=0,
+                exit_spread=0, exit_slippage=0, exit_fee=0, funding=0, latency_impact_penalty=0)}, 1000, 1.0,
         lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
         rescue_config=bo.RescueConfig(enabled=True), rescue_stats=stats, mode="BACKTEST",
     )
@@ -1513,7 +1548,10 @@ def test_short_breakdown_breakout_normal_stop_gate_counts_enabled_backtest_only(
     assert summary["quality_gate_accepted_count"] == 1
     assert summary["quality_gate_would_tp_count"] == 1
     assert summary["quality_gate_reason_breakdown"] == {"LOW_SCORE": 1}
-    assert summary["baseline_plus_quality_gate_net_pnl"] > 4.0
+    assert summary["baseline_plus_quality_gate_net_pnl"] is None
+    assert summary["quality_gate_baseline_realized_net_pnl_usdt"] == 4.0
+    assert summary["quality_gate_counterfactual_scaled_total_r"] == pytest.approx(.3)
+    assert summary["quality_gate_authority"] == "DIAGNOSTIC_ONLY"
 
 
 def test_short_breakdown_breakout_normal_stop_gate_live_and_paper_disabled():
@@ -1894,12 +1932,14 @@ def test_prune_stale_candle_artifacts_keeps_only_current_run_symbols(tmp_path):
     candles = tmp_path / "candles"
     candles.mkdir()
     (candles / "BTCUSDT_1h.json").write_text("{}")
+    (candles / "BTCUSDT_1m.json").write_text("{}")
     (candles / "ETHUSDT_1h.json").write_text("{}")
     (candles / "ETHUSDT_15m.json").write_text("{}")
 
-    bo._prune_stale_candle_artifacts(str(tmp_path), ["BTCUSDT"], "1h")
+    bo._prune_stale_candle_artifacts(str(tmp_path), ["BTCUSDT"], {"1h", "1m"})
 
     assert (candles / "BTCUSDT_1h.json").exists()
+    assert (candles / "BTCUSDT_1m.json").exists()
     assert not (candles / "ETHUSDT_1h.json").exists()
     assert not (candles / "ETHUSDT_15m.json").exists()
 

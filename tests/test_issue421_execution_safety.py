@@ -35,7 +35,7 @@ class _AlwaysAcceptBrain:
             limit_price = None
             stop_price = None
 
-        return {}, _Plan(), "ok"
+        return SimpleNamespace(total_score=9.0, components={}), _Plan(), "ok"
 
 
 def _execution_ctx(**overrides: Any) -> dict[str, Any]:
@@ -87,6 +87,9 @@ def _thresholds(**overrides: Any) -> dict[str, Any]:
 
 def test_none_volatility_value_cannot_be_promoted_to_measured_string_evidence() -> None:
     ctx = build_execution_context({
+        "fee_pct": 0.0004,
+        "fee_status": "CONFIGURED",
+        "fee_source": "TEST_FEE_SCHEDULE",
         "spread_pct": 0.0002,
         "spread_status": "MEASURED",
         "expected_slippage_pct": 0.0002,
@@ -406,6 +409,7 @@ def _market(**overrides: Any) -> dict[str, Any]:
         "sl": 99.0,
         "tp": 103.0,
         "rr": 3.0,
+        "expectancy": 0.2,
         "side": "LONG",
         "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0,
@@ -542,6 +546,7 @@ def test_paper_process_symbol_enforces_each_execution_safety_family(
 def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit() -> None:
     rejects: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
+    now = time.time()
     market = _market(
         latency_ms=50.0,
         latency_status="MODEL_ESTIMATE",
@@ -549,6 +554,21 @@ def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit
         expected_slippage_pct=0.0002,
         slippage_status="MODEL_ESTIMATE",
         slippage_source="MODEL",
+        orderbook_imbalance=0.10,
+        orderbook_status="MEASURED",
+        orderbook_source="FIXTURE",
+        spoof_risk=0.10,
+        spoof_status="MEASURED",
+        spoof_source="FIXTURE",
+        spoof_confirmed=False,
+        absorption_score=0.50,
+        absorption_status="MEASURED",
+        absorption_source="FIXTURE",
+        absorption_execution_ok=True,
+        liquidity_depth_usdt=1_000_000.0,
+        liquidity_depth_status="MEASURED",
+        liquidity_depth_source="FIXTURE",
+        microstructure_observed_at=now,
     )
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),
@@ -631,6 +651,11 @@ def test_multi_gate_execution_reject_persists_all_failed_threshold_evidence() ->
     config = RuntimeConfig(
         execution_mode=ExecutionMode.PAPER,
         paper_execution_latency_ms=3000.0,
+        max_latency_ms=2500,
+        max_spread_pct=0.0025,
+        min_liquidity_score=0.30,
+        max_abs_funding_rate_pct=0.001,
+        max_volatility_penalty_pct=0.20,
     )
     runtime, rejects = _run_paper(
         _market(
@@ -976,6 +1001,13 @@ def test_mode_parity_cannot_treat_unavailable_blocking_context_as_complete() -> 
         ai_brain=AIBrain.for_stateless_scoring(),
         market_scanner=lambda: asyncio.sleep(0, result=[]),
     )
+    samples = [dict(row) for row in runtime._qualification_samples]
+    samples[-1].update({
+        "latency_ms": None,
+        "latency_status": "UNAVAILABLE",
+        "latency_source": "UNAVAILABLE",
+    })
+    runtime._qualification_samples = tuple(samples)
 
     parity = runtime._build_mode_parity_evidence(min_sample_count=3)
 

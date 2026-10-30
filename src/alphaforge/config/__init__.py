@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset, managed_config_value
+from alphaforge.config_registry import canonical_field_default, decision_filter_config, effective_config_values, effective_config_subset, managed_config_value
 from alphaforge.env_contract import dotenv_status, repository_root, resolve_binance_environment
 from alphaforge.database_defaults import resolve_runtime_database_url
 
@@ -73,89 +73,123 @@ def _resolve_database_url(env: Mapping[str, str]) -> str:
 
 @dataclass(slots=True)
 class RuntimeSettings:
-    execution_mode: str = "PAPER"
-    paper_enabled: bool = True
-    live_enabled: bool = False
-    min_signal_score: float = 0.62
-    scan_interval_sec: float = 1.0
-    heartbeat_interval_sec: float = 30.0
-    reject_forward_horizon_bars: int = 240
-    reject_resolver_interval_sec: float = 60.0
-    max_symbols_per_scan: int = 5
-    max_reject_log_entries: int = 1000
-    max_concurrent_positions: int = 3
-    symbol_cooldown_sec: float = 120.0
-    max_notional_exposure: float = 100_000.0
-    max_symbol_notional: float = 50_000.0
-    max_daily_loss_pct: float = 0.03
-    stale_market_data_sec: float = 15.0
-    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
-    min_rr: float = 1.20
-    min_effective_rr: float = 1.10
-    max_spread_pct: float = 0.0025
-    max_expected_slippage_pct: float = 0.0020
-    max_total_cost_pct: float = 0.20
-    min_liquidity_score: float = 0.30
-    max_volatility_penalty_pct: float = 0.20
-    reject_unknown_execution_context: bool = True
-    paper_fee_bps: float = 4.0
-    paper_execution_latency_ms: float = 50.0
-    market_data_base_url: str = "https://fapi.binance.com"
-    regime_timeframe: str = "1h"
-    setup_timeframe: str = "15m"
-    execution_timeframe: str = "1m"
-    mtf_guided_signal_generation_enabled: bool = True
-    mtf_execution_confirmation_mode: str = "ENFORCE"
-    regime_direction_threshold: float = 0.0005
-    setup_direction_threshold: float = 0.0003
-    execution_direction_threshold: float = 0.0005
-    enable_state_direction_resolution: bool = False
-    paper_decision_timeframe: str = "1m"  # deprecated compatibility mirror
-    max_abs_funding_rate_pct: float = 0.0010
-    min_liquidity_usd: float = 5_000_000.0
-    max_trades_global_per_day: int = 10
-    max_trades_symbol_per_day: int = 2
-    symbol_loss_streak_limit: int = 3
-    global_loss_streak_limit: int = 5
-    min_sl_pct: float = 0.15
-    max_sl_pct: float = 1.5
-    min_atr_pct: float = 0.25
-    max_atr_pct: float = 3.0
-    block_unknown_expectancy: bool = True
-    block_chop_market: bool = True
-    require_regime_alignment: bool = True
-    enable_orderbook_filter: bool = False
-    stop_too_wide_hard_reject: bool = True
-    stop_too_wide_soft_score_min: float = 9.0
-    stop_too_wide_soft_effective_rr_min: float = 1.75
-    stop_too_wide_max_risk_scale: float = 0.50
-    stop_too_wide_extreme_mult: float = 1.50
-    max_latency_ms: int = 2500
-    global_kill_switch: bool = False
-    require_live_qualification: bool = True
-    enable_shadow_mode: bool = False
-    agent_graph_enabled: bool = False
-    agent_graph_shadow: bool = True
-    agent_graph_max_steps: int = 12
-    agent_graph_max_reflection_retries: int = 1
-    agent_graph_stage_timeout_seconds: float = 5.0
-    agent_graph_persist_traces: bool = True
-    agent_graph_max_pending_runs: int = 64
-    agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
-    enable_canary_mode: bool = False
-    operator_live_acknowledged: bool = False
-    allow_live_orders: bool = False
-    reconciliation_interval_sec: float = 5.0
-    reconciliation_timeout_sec: float = 2.0
-    provider_transient_outage_grace_seconds: float = 300.0
-    require_exchange_connectivity_for_live: bool = True
-    required_live_exchanges: tuple[str, ...] = ("binance",)
-    exchange_connectivity_timeout_sec: float = 2.0
-    enable_binance_readonly_reconciliation: bool = False
-    binance_reconciliation_recv_window_ms: int = 5000
-    binance_reconciliation_trade_lookback_ms: int = 3_600_000
-    reconciliation_position_epsilon: str = "0.00000001"
-    reconciliation_max_fill_symbols: int = 10
+    storage_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_enabled"))
+    storage_high_bytes: int= field(default_factory=lambda: canonical_field_default("storage_high_bytes"))
+    storage_low_bytes: int= field(default_factory=lambda: canonical_field_default("storage_low_bytes"))
+    storage_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_min_age_sec"))
+    storage_check_interval_sec: float= field(default_factory=lambda: canonical_field_default("storage_check_interval_sec"))
+    storage_batch_rows: int= field(default_factory=lambda: canonical_field_default("storage_batch_rows"))
+    storage_batch_seconds: float= field(default_factory=lambda: canonical_field_default("storage_batch_seconds"))
+    storage_free_reserve_bytes: int= field(default_factory=lambda: canonical_field_default("storage_free_reserve_bytes"))
+    storage_growth_budget_bytes_per_sec: int= field(default_factory=lambda: canonical_field_default("storage_growth_budget_bytes_per_sec"))
+    storage_archive_dir: str= field(default_factory=lambda: canonical_field_default("storage_archive_dir"))
+    storage_stats_only_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_stats_only_enabled"))
+    storage_stats_only_start_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_start_bytes"))
+    storage_stats_only_target_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_target_bytes"))
+    storage_stats_only_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_stats_only_min_age_sec"))
+    storage_stats_only_recent_cycles: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_recent_cycles"))
+    execution_mode: str= field(default_factory=lambda: canonical_field_default("execution_mode"))
+    paper_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_enabled"))
+    live_enabled: bool= field(default_factory=lambda: canonical_field_default("live_enabled"))
+    min_signal_score: float= field(default_factory=lambda: canonical_field_default("min_signal_score"))
+    scan_interval_sec: float= field(default_factory=lambda: canonical_field_default("scan_interval_sec"))
+    heartbeat_interval_sec: float= field(default_factory=lambda: canonical_field_default("heartbeat_interval_sec"))
+    reject_forward_horizon_bars: int= field(default_factory=lambda: canonical_field_default("reject_forward_horizon_bars"))
+    reject_resolver_interval_sec: float= field(default_factory=lambda: canonical_field_default("reject_resolver_interval_sec"))
+    max_symbols_per_scan: int= field(default_factory=lambda: canonical_field_default("max_symbols_per_scan"))
+    universe_min_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_min_market_cap_usd"))
+    universe_max_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_max_market_cap_usd"))
+    universe_min_volume_24h_usd: float= field(default_factory=lambda: canonical_field_default("universe_min_volume_24h_usd"))
+    universe_candidate_pool_top_n_volume: int= field(default_factory=lambda: canonical_field_default("universe_candidate_pool_top_n_volume"))
+    universe_excluded_symbols: str= field(default_factory=lambda: canonical_field_default("universe_excluded_symbols"))
+    universe_max_evidence_age_sec: float= field(default_factory=lambda: canonical_field_default("universe_max_evidence_age_sec"))
+    max_reject_log_entries: int= field(default_factory=lambda: canonical_field_default("max_reject_log_entries"))
+    max_concurrent_positions: int= field(default_factory=lambda: canonical_field_default("max_concurrent_positions"))
+    symbol_cooldown_sec: float= field(default_factory=lambda: canonical_field_default("symbol_cooldown_sec"))
+    max_notional_exposure: float= field(default_factory=lambda: canonical_field_default("max_notional_exposure"))
+    max_symbol_notional: float= field(default_factory=lambda: canonical_field_default("max_symbol_notional"))
+    max_correlation_group_exposure: float= field(default_factory=lambda: canonical_field_default("max_correlation_group_exposure"))
+    max_correlated_positions: int= field(default_factory=lambda: canonical_field_default("max_correlated_positions"))
+    max_daily_loss_pct: float= field(default_factory=lambda: canonical_field_default("max_daily_loss_pct"))
+    stale_market_data_sec: float= field(default_factory=lambda: canonical_field_default("stale_market_data_sec"))
+    max_clock_skew_ms: int= field(default_factory=lambda: canonical_field_default("max_clock_skew_ms"))
+    min_rr: float= field(default_factory=lambda: canonical_field_default("min_rr"))
+    min_effective_rr: float= field(default_factory=lambda: canonical_field_default("min_effective_rr"))
+    max_spread_pct: float= field(default_factory=lambda: canonical_field_default("max_spread_pct"))
+    max_expected_slippage_pct: float= field(default_factory=lambda: canonical_field_default("max_expected_slippage_pct"))
+    max_total_cost_pct: float= field(default_factory=lambda: canonical_field_default("max_total_cost_pct"))
+    min_liquidity_score: float= field(default_factory=lambda: canonical_field_default("min_liquidity_score"))
+    max_volatility_penalty_pct: float= field(default_factory=lambda: canonical_field_default("max_volatility_penalty_pct"))
+    reject_unknown_execution_context: bool= field(default_factory=lambda: canonical_field_default("reject_unknown_execution_context"))
+    paper_fee_bps: float= field(default_factory=lambda: canonical_field_default("paper_fee_bps"))
+    paper_execution_latency_ms: float= field(default_factory=lambda: canonical_field_default("paper_execution_latency_ms"))
+    paper_candidate_notional: float= field(default_factory=lambda: canonical_field_default("paper_candidate_notional"))
+    paper_position_sizing_mode: str= field(default_factory=lambda: canonical_field_default("paper_position_sizing_mode"))
+    risk_pct_per_trade: float= field(default_factory=lambda: canonical_field_default("risk_pct_per_trade"))
+    paper_max_leverage: float= field(default_factory=lambda: canonical_field_default("paper_max_leverage"))
+    paper_max_liquidity_participation_pct: float= field(default_factory=lambda: canonical_field_default("paper_max_liquidity_participation_pct"))
+    paper_min_notional: float= field(default_factory=lambda: canonical_field_default("paper_min_notional"))
+    market_data_base_url: str = field(default_factory=lambda: str(canonical_field_default("binance_market_data_base_url")))
+    regime_timeframe: str= field(default_factory=lambda: canonical_field_default("regime_timeframe"))
+    setup_timeframe: str= field(default_factory=lambda: canonical_field_default("setup_timeframe"))
+    execution_timeframe: str= field(default_factory=lambda: canonical_field_default("execution_timeframe"))
+    mtf_guided_signal_generation_enabled: bool= field(default_factory=lambda: canonical_field_default("mtf_guided_signal_generation_enabled"))
+    mtf_execution_confirmation_mode: str= field(default_factory=lambda: canonical_field_default("mtf_execution_confirmation_mode"))
+    paper_position_management_shadow_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_position_management_shadow_enabled"))
+    regime_direction_threshold: float= field(default_factory=lambda: canonical_field_default("regime_direction_threshold"))
+    setup_direction_threshold: float= field(default_factory=lambda: canonical_field_default("setup_direction_threshold"))
+    execution_direction_threshold: float= field(default_factory=lambda: canonical_field_default("execution_direction_threshold"))
+    enable_state_direction_resolution: bool= field(default_factory=lambda: canonical_field_default("enable_state_direction_resolution"))
+    paper_decision_timeframe: str = field(default_factory=lambda: str(canonical_field_default("execution_timeframe")))  # deprecated compatibility mirror
+    max_abs_funding_rate_pct: float= field(default_factory=lambda: canonical_field_default("max_abs_funding_rate_pct"))
+    min_liquidity_usd: float= field(default_factory=lambda: canonical_field_default("min_liquidity_usd"))
+    max_trades_global_per_day: int= field(default_factory=lambda: canonical_field_default("max_trades_global_per_day"))
+    max_trades_symbol_per_day: int= field(default_factory=lambda: canonical_field_default("max_trades_symbol_per_day"))
+    symbol_loss_streak_limit: int= field(default_factory=lambda: canonical_field_default("symbol_loss_streak_limit"))
+    global_loss_streak_limit: int= field(default_factory=lambda: canonical_field_default("global_loss_streak_limit"))
+    min_sl_pct: float= field(default_factory=lambda: canonical_field_default("min_sl_pct"))
+    max_sl_pct: float= field(default_factory=lambda: canonical_field_default("max_sl_pct"))
+    min_atr_pct: float= field(default_factory=lambda: canonical_field_default("min_atr_pct"))
+    max_atr_pct: float= field(default_factory=lambda: canonical_field_default("max_atr_pct"))
+    block_unknown_expectancy: bool= field(default_factory=lambda: canonical_field_default("block_unknown_expectancy"))
+    block_chop_market: bool= field(default_factory=lambda: canonical_field_default("block_chop_market"))
+    require_regime_alignment: bool= field(default_factory=lambda: canonical_field_default("require_regime_alignment"))
+    enable_orderbook_filter: bool= field(default_factory=lambda: canonical_field_default("enable_orderbook_filter"))
+    stop_too_wide_hard_reject: bool= field(default_factory=lambda: canonical_field_default("stop_too_wide_hard_reject"))
+    stop_too_wide_soft_score_min: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_soft_score_min"))
+    stop_too_wide_soft_effective_rr_min: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_soft_effective_rr_min"))
+    stop_too_wide_max_risk_scale: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_max_risk_scale"))
+    stop_too_wide_extreme_mult: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_extreme_mult"))
+    max_latency_ms: int= field(default_factory=lambda: canonical_field_default("max_latency_ms"))
+    global_kill_switch: bool= field(default_factory=lambda: canonical_field_default("global_kill_switch"))
+    require_live_qualification: bool= field(default_factory=lambda: canonical_field_default("require_live_qualification"))
+    enable_shadow_mode: bool= field(default_factory=lambda: canonical_field_default("enable_shadow_mode"))
+    agent_graph_enabled: bool= field(default_factory=lambda: canonical_field_default("agent_graph_enabled"))
+    agent_graph_shadow: bool= field(default_factory=lambda: canonical_field_default("agent_graph_shadow"))
+    agent_graph_max_steps: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_steps"))
+    agent_graph_max_reflection_retries: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_reflection_retries"))
+    agent_graph_stage_timeout_seconds: float= field(default_factory=lambda: canonical_field_default("agent_graph_stage_timeout_seconds"))
+    agent_graph_persist_traces: bool= field(default_factory=lambda: canonical_field_default("agent_graph_persist_traces"))
+    agent_graph_max_pending_runs: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_pending_runs"))
+    agent_graph_database_url: str= field(default_factory=lambda: canonical_field_default("agent_graph_database_url"))
+    enable_canary_mode: bool= field(default_factory=lambda: canonical_field_default("enable_canary_mode"))
+    operator_live_acknowledged: bool= field(default_factory=lambda: canonical_field_default("operator_live_acknowledged"))
+    allow_live_orders: bool= field(default_factory=lambda: canonical_field_default("allow_live_orders"))
+    execution_account_scope: str= field(default_factory=lambda: canonical_field_default("execution_account_scope"))
+    paper_account_model: str= field(default_factory=lambda: canonical_field_default("paper_account_model"))
+    execution_lease_ttl_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_ttl_sec"))
+    execution_lease_min_validity_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_min_validity_sec"))
+    reconciliation_interval_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_interval_sec"))
+    reconciliation_timeout_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_timeout_sec"))
+    provider_transient_outage_grace_seconds: float= field(default_factory=lambda: canonical_field_default("provider_transient_outage_grace_seconds"))
+    require_exchange_connectivity_for_live: bool= field(default_factory=lambda: canonical_field_default("require_exchange_connectivity_for_live"))
+    required_live_exchanges: tuple[str, ...] = field(default_factory=lambda: tuple(part.strip() for part in str(canonical_field_default("required_live_exchanges")).split(",") if part.strip()))
+    exchange_connectivity_timeout_sec: float= field(default_factory=lambda: canonical_field_default("exchange_connectivity_timeout_sec"))
+    enable_binance_readonly_reconciliation: bool= field(default_factory=lambda: canonical_field_default("enable_binance_readonly_reconciliation"))
+    binance_reconciliation_recv_window_ms: int = field(default_factory=lambda: int(canonical_field_default("binance_recv_window_ms")))
+    binance_reconciliation_trade_lookback_ms: int= field(default_factory=lambda: canonical_field_default("binance_reconciliation_trade_lookback_ms"))
+    reconciliation_position_epsilon: str= field(default_factory=lambda: canonical_field_default("reconciliation_position_epsilon"))
+    reconciliation_max_fill_symbols: int= field(default_factory=lambda: canonical_field_default("reconciliation_max_fill_symbols"))
 
 @dataclass(slots=True)
 class BinanceSettings:
@@ -374,6 +408,10 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "ENABLE_STATE_DIRECTION_RESOLUTION": getattr(runtime, "enable_state_direction_resolution", False),
         "SYMBOL_COOLDOWN_MINUTES": runtime.symbol_cooldown_sec / 60.0,
         "STALE_MARKET_DATA_SEC": runtime.stale_market_data_sec,
+        # LIVE/LIVE_PRECHECK always require authoritative measured microstructure.
+        # PAPER may remain estimated/optional but is explicitly non-LIVE-equivalent.
+        "REQUIRE_LIVE_MICROSTRUCTURE": mode_value in {"LIVE", "LIVE_PRECHECK"},
+        "MICROSTRUCTURE_MAX_AGE_SEC": runtime.stale_market_data_sec,
         "MAX_CONCURRENT_POSITIONS": runtime.max_concurrent_positions,
         "MIN_LIQUIDITY_USD": runtime.min_liquidity_usd,
         "min_volume_24h_usdt": runtime.min_liquidity_usd,
@@ -383,8 +421,20 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
     if mode_value == "PAPER":
         cfg.update({
             "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
-            "PAPER_CANDIDATE_NOTIONAL": getattr(runtime, "paper_candidate_notional", 10.0),
+            "PAPER_CANDIDATE_NOTIONAL": runtime.paper_candidate_notional,
+            "PAPER_POSITION_SIZING_MODE": runtime.paper_position_sizing_mode,
+            "RISK_PCT_PER_TRADE": runtime.risk_pct_per_trade,
+            "PAPER_MAX_LEVERAGE": runtime.paper_max_leverage,
+            "PAPER_MAX_LIQUIDITY_PARTICIPATION_PCT": runtime.paper_max_liquidity_participation_pct,
+            "PAPER_MIN_NOTIONAL": runtime.paper_min_notional,
+            "PAPER_ACCOUNT_MODEL": runtime.paper_account_model,
+            "MAX_CORRELATION_GROUP_EXPOSURE": runtime.max_correlation_group_exposure,
+            "MAX_CORRELATED_POSITIONS": runtime.max_correlated_positions,
         })
+        if getattr(runtime, "paper_position_management_shadow_enabled", False):
+            # Preserve legacy OFF hashes/surfaces; enabling the experiment must
+            # become part of prospective campaign identity.
+            cfg["PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED"] = True
     return cfg
 
 def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> AlphaForgeConfig:
@@ -392,6 +442,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     process_env = os.environ if env is None else env
     managed = effective_config_values(env=process_env, root=root, include_files=False)
     val = lambda name: managed[name]["value"]
+    optional_float = lambda name: None if val(name) in (None, "") else float(val(name))
     # Executable entry points bootstrap dotenv once. The library loader itself
     # remains deterministic and resolves process values plus typed defaults.
     env = process_env
@@ -409,7 +460,31 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     if (mtf_execution_confirmation_mode == "SHADOW"
             and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
         raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
+    paper_position_management_shadow_enabled = bool(
+        val("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED")
+    )
+    if (paper_position_management_shadow_enabled
+            and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
+        raise ValueError("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED is PAPER-only")
+    from alphaforge.storage_policy import StoragePolicy
+    StoragePolicy.from_values({name: record["value"] for name, record in managed.items()})
     runtime = RuntimeSettings(
+        storage_enabled=val("ALPHAFORGE_STORAGE_ENABLED"),
+        storage_high_bytes=val("ALPHAFORGE_STORAGE_HIGH_BYTES"),
+        storage_low_bytes=val("ALPHAFORGE_STORAGE_LOW_BYTES"),
+        storage_min_age_sec=val("ALPHAFORGE_STORAGE_MIN_AGE_SEC"),
+        storage_check_interval_sec=val("ALPHAFORGE_STORAGE_CHECK_INTERVAL_SEC"),
+        storage_batch_rows=val("ALPHAFORGE_STORAGE_BATCH_ROWS"),
+        storage_batch_seconds=val("ALPHAFORGE_STORAGE_BATCH_SECONDS"),
+        storage_free_reserve_bytes=val("ALPHAFORGE_STORAGE_FREE_RESERVE_BYTES"),
+        storage_growth_budget_bytes_per_sec=val("ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC"),
+        storage_archive_dir=val("ALPHAFORGE_STORAGE_ARCHIVE_DIR"),
+        storage_stats_only_enabled=val("ALPHAFORGE_STORAGE_STATS_ONLY_ENABLED"),
+        storage_stats_only_start_bytes=val("ALPHAFORGE_STORAGE_STATS_ONLY_START_BYTES"),
+        storage_stats_only_target_bytes=val("ALPHAFORGE_STORAGE_STATS_ONLY_TARGET_BYTES"),
+        storage_stats_only_min_age_sec=val("ALPHAFORGE_STORAGE_STATS_ONLY_MIN_AGE_SEC"),
+        storage_stats_only_recent_cycles=val("ALPHAFORGE_STORAGE_STATS_ONLY_RECENT_CYCLES"),
+
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
         live_enabled=val("ALPHAFORGE_ENABLE_LIVE_TRADING"),
@@ -418,12 +493,20 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         heartbeat_interval_sec=val("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC"),
         reject_forward_horizon_bars=val("ALPHAFORGE_REJECT_FORWARD_HORIZON_BARS"),
         reject_resolver_interval_sec=val("ALPHAFORGE_REJECT_RESOLVER_INTERVAL_SEC"),
-        max_symbols_per_scan=val("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN"),
+        max_symbols_per_scan=val("ALPHAFORGE_UNIVERSE_MAX_ACTIVE_SYMBOLS"),
+        universe_min_market_cap_usd=optional_float("ALPHAFORGE_UNIVERSE_MIN_MARKET_CAP_USD"),
+        universe_max_market_cap_usd=optional_float("ALPHAFORGE_UNIVERSE_MAX_MARKET_CAP_USD"),
+        universe_min_volume_24h_usd=val("ALPHAFORGE_UNIVERSE_MIN_VOLUME_24H_USD"),
+        universe_candidate_pool_top_n_volume=val("ALPHAFORGE_UNIVERSE_CANDIDATE_POOL_TOP_N_VOLUME"),
+        universe_excluded_symbols=str(val("ALPHAFORGE_UNIVERSE_EXCLUDED_SYMBOLS")),
+        universe_max_evidence_age_sec=val("ALPHAFORGE_UNIVERSE_MAX_EVIDENCE_AGE_SEC"),
         max_reject_log_entries=val("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES"),
         max_concurrent_positions=val("ALPHAFORGE_MAX_CONCURRENT_POSITIONS"),
         symbol_cooldown_sec=val("ALPHAFORGE_SYMBOL_COOLDOWN_SEC"),
         max_notional_exposure=val("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE"),
         max_symbol_notional=val("ALPHAFORGE_MAX_SYMBOL_NOTIONAL"),
+        max_correlation_group_exposure=val("ALPHAFORGE_MAX_CORRELATION_GROUP_EXPOSURE"),
+        max_correlated_positions=val("ALPHAFORGE_MAX_CORRELATED_POSITIONS"),
         max_daily_loss_pct=val("ALPHAFORGE_MAX_DAILY_LOSS_PCT"),
         stale_market_data_sec=val("ALPHAFORGE_STALE_MARKET_DATA_SEC"),
         max_clock_skew_ms=int(val("ALPHAFORGE_MAX_CLOCK_SKEW_MS")),
@@ -437,12 +520,19 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         reject_unknown_execution_context=val("ALPHAFORGE_REJECT_UNKNOWN_EXECUTION_CONTEXT"),
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
         paper_execution_latency_ms=val("ALPHAFORGE_PAPER_EXECUTION_LATENCY_MS"),
+        paper_candidate_notional=val("ALPHAFORGE_PAPER_CANDIDATE_NOTIONAL"),
+        paper_position_sizing_mode=val("ALPHAFORGE_PAPER_POSITION_SIZING_MODE"),
+        risk_pct_per_trade=val("ALPHAFORGE_RISK_PCT_PER_TRADE"),
+        paper_max_leverage=val("ALPHAFORGE_PAPER_MAX_LEVERAGE"),
+        paper_max_liquidity_participation_pct=val("ALPHAFORGE_PAPER_MAX_LIQUIDITY_PARTICIPATION_PCT"),
+        paper_min_notional=val("ALPHAFORGE_PAPER_MIN_NOTIONAL"),
         market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
         regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
         execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         mtf_guided_signal_generation_enabled=val("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED"),
         mtf_execution_confirmation_mode=mtf_execution_confirmation_mode,
+        paper_position_management_shadow_enabled=paper_position_management_shadow_enabled,
         regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
         setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
         execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),
@@ -476,6 +566,10 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         enable_canary_mode=val("ALPHAFORGE_ENABLE_CANARY_MODE"),
         operator_live_acknowledged=val("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"),
         allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),
+        execution_account_scope=val("ALPHAFORGE_EXECUTION_ACCOUNT_SCOPE"),
+        paper_account_model=val("ALPHAFORGE_PAPER_ACCOUNT_MODEL"),
+        execution_lease_ttl_sec=val("ALPHAFORGE_EXECUTION_LEASE_TTL_SEC"),
+        execution_lease_min_validity_sec=val("ALPHAFORGE_EXECUTION_LEASE_MIN_VALIDITY_SEC"),
         reconciliation_interval_sec=val("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC"),
         reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
         provider_transient_outage_grace_seconds=val("ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS"),
@@ -487,6 +581,22 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
         reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
         reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
+    )
+    # Cross-field universe constraints are validated once at canonical config
+    # resolution so no execution mode can invent a different repair/default.
+    from alphaforge.symbol_selector import UniverseConstraints
+    UniverseConstraints(
+        min_market_cap_usd=runtime.universe_min_market_cap_usd,
+        max_market_cap_usd=runtime.universe_max_market_cap_usd,
+        min_volume_24h_usd=runtime.universe_min_volume_24h_usd,
+        candidate_pool_top_n_volume=runtime.universe_candidate_pool_top_n_volume,
+        max_active_symbols=runtime.max_symbols_per_scan,
+        excluded_symbols=tuple(part for part in runtime.universe_excluded_symbols.replace(",", " ").split() if part),
+        max_evidence_age_sec=runtime.universe_max_evidence_age_sec,
+        max_spread_pct=runtime.max_spread_pct,
+        max_expected_slippage_pct=runtime.max_expected_slippage_pct,
+        max_abs_funding_rate_pct=runtime.max_abs_funding_rate_pct,
+        min_liquidity_score=runtime.min_liquidity_score,
     )
     binance = BinanceSettings(
         base_url=resolved_binance.rest_base_url,

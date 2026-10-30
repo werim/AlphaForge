@@ -23,6 +23,46 @@ def _run(e):
             c.execute(text("INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version) VALUES (:id,'r','rel','2026-01-01T00:00:00Z','PAPER','BTCUSDT','REJECTED',1,'[]','{}','{}','v')"), {"id": f"obs-r-{i}"})
 
 
+def _persist_measured_drawdown(
+    e,
+    *,
+    event_id="dd",
+    peak=1000.0,
+    trough=1000.0,
+    drawdown=0.0,
+    consecutive_losses=0,
+    resolved=1,
+    rolling_expectancy=0.1,
+    payload=None,
+):
+    evidence_payload = payload if payload is not None else {
+        "evidence_status": "COMPLETE",
+        "evidence_source": "TEST_MEASURED_LEDGER",
+        "risk_state_complete": True,
+    }
+    with e.begin() as c:
+        c.execute(text("""
+            INSERT INTO burnin_drawdown_events(
+                drawdown_event_id,burnin_run_id,release_id,
+                peak_equity,trough_equity,drawdown_pct,
+                consecutive_losses,rolling_expectancy,resolved,
+                payload_json,schema_version
+            ) VALUES (
+                :id,'r','rel',:peak,:trough,:drawdown,
+                :losses,:rolling,:resolved,:payload,'v'
+            )
+        """), {
+            "id": event_id,
+            "peak": peak,
+            "trough": trough,
+            "drawdown": drawdown,
+            "losses": consecutive_losses,
+            "rolling": rolling_expectancy,
+            "resolved": resolved,
+            "payload": json.dumps(evidence_payload, sort_keys=True),
+        })
+
+
 def _qualifying_evidence(e):
     with e.begin() as c:
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
@@ -31,7 +71,8 @@ def _qualifying_evidence(e):
             c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"rej{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
-        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE','now','v')"))
+        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,stale_data_count,execution_rejects,reconciliation_quality,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE',1,1,1,1,1,1,.9,.9,0,0,0,'CLEAN','now','v')"))
+    _persist_measured_drawdown(e)
 
 
 def _qualifying_thresholds():
@@ -90,11 +131,115 @@ def test_missing_costs_block_qualification():
 
 def test_qualification_emits_legacy_and_explicit_recovery_status():
     e=_engine(); _run(e)
+    _persist_measured_drawdown(e)
 
     snap=BurnInQualificationEngine(e, BurnInThresholds(require_operator_ack=False,require_phase1_6_gates=False)).evaluate("r")
 
     assert snap.metrics["recovery_status"] == "RECOVERED"
     assert snap.metrics["drawdown_recovery_status"] == "RECOVERED"
+
+
+def test_no_drawdown_rows_are_insufficient_evidence():
+    e=_engine(); _run(e)
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1, minimum_total_decisions=1,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+    assert snap.drawdown_status == "INSUFFICIENT_EVIDENCE"
+    assert "DRAWDOWN_INSUFFICIENT_EVIDENCE" in snap.blockers
+    assert snap.metrics["max_drawdown_pct"] is None
+    assert snap.metrics["drawdown_recovery_status"] == "INSUFFICIENT"
+
+
+def test_synthetic_zero_drawdown_placeholder_is_insufficient():
+    e=_engine(); _run(e)
+    with e.begin() as c:
+        c.execute(text("""
+            INSERT INTO burnin_drawdown_events(
+                drawdown_event_id,burnin_run_id,release_id,
+                peak_equity,trough_equity,drawdown_pct,
+                consecutive_losses,rolling_expectancy,resolved,
+                payload_json,schema_version
+            ) VALUES ('synthetic','r','rel',NULL,NULL,0,0,NULL,1,'{}','v')
+        """))
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1, minimum_total_decisions=1,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+    assert snap.drawdown_status == "INSUFFICIENT_EVIDENCE"
+    assert any(b.startswith("DRAWDOWN_INSUFFICIENT_EVIDENCE:") for b in snap.blockers)
+    assert snap.metrics["drawdown_recovery_status"] == "INSUFFICIENT"
+
+
+def test_measured_zero_drawdown_can_pass_drawdown_gate():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(e)
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(e)._compute_drawdown(rows, blockers, metrics)
+    assert status == "PASS"
+    assert blockers == []
+    assert metrics["max_drawdown_pct"] == 0.0
+    assert metrics["drawdown_recovery_status"] == "RECOVERED"
+    assert metrics["drawdown_missing_fields"] == []
+
+
+def test_drawdown_peak_trough_must_match_reported_percentage():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(e, peak=1000, trough=900, drawdown=0.01)
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(e)._compute_drawdown(rows, blockers, metrics)
+    assert status == "INSUFFICIENT_EVIDENCE"
+    assert any("drawdown_pct_consistency" in b for b in blockers)
+
+
+def test_unresolved_measured_drawdown_blocks():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(
+        e, peak=1000, trough=950, drawdown=0.05,
+        consecutive_losses=2, resolved=0,
+    )
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(e)._compute_drawdown(rows, blockers, metrics)
+    assert status == "FAIL"
+    assert "DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER" in blockers
+    assert metrics["unresolved_drawdown_events"] == 1
+
+
+def test_measured_drawdown_breach_blocks():
+    e=_engine(); _run(e)
+    _persist_measured_drawdown(
+        e, peak=1000, trough=500, drawdown=0.5,
+        consecutive_losses=0, resolved=1,
+    )
+    blockers=[]; metrics={}
+    with e.connect() as c:
+        rows=c.execute(text(
+            "SELECT * FROM burnin_drawdown_events WHERE burnin_run_id='r'"
+        )).mappings().all()
+    status=BurnInQualificationEngine(
+        e, BurnInThresholds(max_drawdown_pct=0.08)
+    )._compute_drawdown(rows, blockers, metrics)
+    assert status == "FAIL"
+    assert "DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER" in blockers
+    assert metrics["max_drawdown_pct"] == 0.5
 
 
 def test_positive_lcb_can_qualify_but_live_not_enabled():
@@ -103,6 +248,55 @@ def test_positive_lcb_can_qualify_but_live_not_enabled():
     snap=BurnInQualificationEngine(e, _qualifying_thresholds()).evaluate("r")
     assert snap.status == "CANARY_QUALIFIED"
     assert snap.status not in {"LIVE_REAL_ORDERS_READY","LIVE_ENABLED","PROMOTED_TO_LIVE"}
+
+def test_execution_metrics_missing_measurements_are_insufficient():
+    e=_engine()
+    engine=BurnInQualificationEngine(e, _qualifying_thresholds())
+    blockers=[]; metrics={}
+    status=engine._compute_execution({
+        "status":"STABLE",
+        "spread_baseline":None, "spread_current":None,
+        "slippage_baseline":None, "slippage_current":None,
+        "latency_baseline":None, "latency_current":None,
+        "fill_probability_baseline":None, "fill_probability_current":None,
+        "timeout_rate":None, "stale_data_count":0, "execution_rejects":0,
+        "reconciliation_quality":"CLEAN",
+    }, blockers, metrics)
+    assert status == "INSUFFICIENT_EVIDENCE"
+    assert any(b.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:") for b in blockers)
+    assert "spread_baseline" in metrics["execution_missing_fields"]
+    assert metrics["execution_status"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_execution_metrics_one_missing_mandatory_field_blocks_canary():
+    e=_engine(); _run(e); _qualifying_evidence(e)
+    with e.begin() as c:
+        c.execute(text("UPDATE burnin_execution_metrics SET latency_current=NULL WHERE burnin_run_id='r'"))
+    snap=BurnInQualificationEngine(e, _qualifying_thresholds()).evaluate("r")
+    assert snap.status != "CANARY_QUALIFIED"
+    assert snap.execution_status == "INSUFFICIENT_EVIDENCE"
+    assert any("latency_current" in b for b in snap.blockers if b.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:"))
+
+
+def test_execution_metrics_measured_zero_baseline_and_current_are_not_missing():
+    e=_engine()
+    engine=BurnInQualificationEngine(e, _qualifying_thresholds())
+    blockers=[]; metrics={}
+    status=engine._compute_execution({
+        "status":"STABLE",
+        "spread_baseline":0, "spread_current":0,
+        "slippage_baseline":0, "slippage_current":0,
+        "latency_baseline":1, "latency_current":1,
+        "fill_probability_baseline":1, "fill_probability_current":1,
+        "timeout_rate":0, "stale_data_count":0, "execution_rejects":0,
+        "reconciliation_quality":"CLEAN",
+    }, blockers, metrics)
+    assert status == "PASS"
+    assert blockers == []
+    assert metrics["spread_degradation_ratio"] == 1.0
+    assert metrics["slippage_degradation_ratio"] == 1.0
+    assert metrics["execution_missing_fields"] == []
+
 
 
 def test_persisted_lifecycle_error_blocks_qualification():
@@ -295,7 +489,8 @@ def test_all_required_phase7_and_phase6_evidence_canary_qualified(tmp_path):
             c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"all-r{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
-        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,stale_data_count,execution_rejects,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE',1,1,1,1,1,1,.9,.9,0,0,'now','v')"))
+        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,stale_data_count,execution_rejects,reconciliation_quality,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE',1,1,1,1,1,1,.9,.9,0,0,0,'CLEAN','now','v')"))
+    _persist_measured_drawdown(e)
     th=BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=1,minimum_regime_sample=1,minimum_calibration_sample=1,max_symbol_concentration=.99,max_trade_contribution=.99,max_regime_concentration=1.0,min_lower_confidence_bound_expectancy=.01)
     snap=BurnInQualificationEngine(e, th).evaluate("r")
     assert snap.status == "CANARY_QUALIFIED"
@@ -337,3 +532,177 @@ def test_non_attributable_shadow_and_infrastructure_outcomes_are_diagnostic_only
     assert snap.metrics["reject_value_by_reason"] == {"LOW_EFFECTIVE_RR": 1.0}
     assert snap.reject_quality_status == "PASS"
     assert "REJECT_QUALITY_INSUFFICIENT" not in snap.blockers
+
+
+
+def _guided_geometry_metrics(*, stop_pct, min_stop=0.15, max_stop=1.5,
+                             executable_rr=0.0, primary="STOP_TOO_TIGHT"):
+    entry = 100.0
+    stop = entry * (1.0 - stop_pct / 100.0)
+    candidate_rr = 1.2
+    return {
+        "signal_id": f"guided-{stop_pct}",
+        "entry": entry,
+        "sl": stop,
+        "tp": entry + candidate_rr * (entry - stop),
+        "rr": candidate_rr,
+        "candidate_rr": candidate_rr,
+        "executable_raw_rr": executable_rr,
+        "effective_rr": max(executable_rr - 0.03, 0.0),
+        "remaining_execution_penalty": 0.03,
+        "stop_distance_pct": stop_pct,
+        "min_stop_pct": min_stop,
+        "max_stop_pct": max_stop,
+        "primary_reject_reason": primary,
+        "all_failed_gates": (
+            ["STOP_TOO_TIGHT", "RR_TOO_LOW", "LOW_EFFECTIVE_RR"]
+            if primary == "STOP_TOO_TIGHT"
+            else ["LOW_SCORE"]
+        ),
+        "mtf": {
+            "generation": {
+                "mode": "REGIME_GUIDED",
+                "evidence_status": "COMPLETE",
+                "candidate": {
+                    "side": "LONG", "entry": entry, "sl": stop,
+                    "tp": entry + candidate_rr * (entry - stop),
+                    "rr": candidate_rr,
+                },
+            },
+        },
+    }
+
+
+def test_guided_geometry_structural_suppression_blocks_qualification():
+    e = _engine()
+    _run(e)
+    with e.begin() as c:
+        for index, stop_pct in enumerate((0.01, 0.04, 0.10)):
+            c.execute(
+                text("UPDATE burnin_observations SET metrics_json=:metrics "
+                     "WHERE observation_id=:id"),
+                {
+                    "id": f"obs-r-{index}",
+                    "metrics": json.dumps(
+                        _guided_geometry_metrics(stop_pct=stop_pct),
+                        sort_keys=True,
+                    ),
+                },
+            )
+
+    thresholds = BurnInThresholds(
+        minimum_duration_seconds=0,
+        minimum_total_decisions=0,
+        minimum_accepted_trades=0,
+        minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0,
+        minimum_regime_coverage=0,
+        minimum_calibration_sample=0,
+        minimum_geometry_viability_sample=3,
+        require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )
+    engine = BurnInQualificationEngine(e, thresholds)
+    snap = engine.evaluate("r")
+
+    assert snap.metrics["guided_candidate_decisions"] == 3
+    assert snap.metrics["guided_geometry_evaluable_decisions"] == 3
+    assert snap.metrics["guided_below_min_stop_count"] == 3
+    assert snap.metrics["guided_below_min_stop_rate"] == 1.0
+    assert snap.metrics["guided_above_max_stop_count"] == 0
+    assert snap.metrics["guided_within_stop_policy_count"] == 0
+    assert snap.metrics["guided_executable_rr_zero_count"] == 3
+    assert snap.metrics["guided_executable_rr_zero_rate"] == 1.0
+    assert snap.metrics["guided_failed_gate_counts"]["STOP_TOO_TIGHT"] == 3
+    assert snap.metrics["guided_failed_gate_counts"]["LOW_EFFECTIVE_RR"] == 3
+    assert snap.metrics["guided_primary_reject_reason_counts"]["STOP_TOO_TIGHT"] == 3
+    assert snap.metrics["guided_fill_geometry_loss_r_avg"] == 1.2
+    assert snap.metrics["guided_residual_execution_penalty_r_avg"] == 0.03
+    assert snap.metrics["guided_geometry_viability_status"] == "FAIL"
+    blocker = next(
+        item for item in snap.blockers
+        if item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:")
+    )
+    assert blocker == "GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:3/3"
+    assert "GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION" in engine.suspension_reasons(snap)
+
+
+def test_guided_geometry_viability_reports_below_above_and_valid_without_false_fail():
+    e = _engine()
+    _run(e)
+    payloads = [
+        _guided_geometry_metrics(stop_pct=0.10, executable_rr=0.5),
+        _guided_geometry_metrics(
+            stop_pct=0.50, executable_rr=1.1, primary="LOW_SCORE",
+        ),
+        _guided_geometry_metrics(
+            stop_pct=2.00, executable_rr=1.0, primary="LOW_SCORE",
+        ),
+    ]
+    with e.begin() as c:
+        for index, payload in enumerate(payloads):
+            c.execute(
+                text("UPDATE burnin_observations SET metrics_json=:metrics "
+                     "WHERE observation_id=:id"),
+                {"id": f"obs-r-{index}",
+                 "metrics": json.dumps(payload, sort_keys=True)},
+            )
+
+    snap = BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=0,
+        minimum_total_decisions=0,
+        minimum_accepted_trades=0,
+        minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0,
+        minimum_regime_coverage=0,
+        minimum_calibration_sample=0,
+        minimum_geometry_viability_sample=3,
+        require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+
+    assert snap.metrics["guided_geometry_viability_status"] == "PASS"
+    assert snap.metrics["guided_below_min_stop_count"] == 1
+    assert snap.metrics["guided_below_min_stop_rate"] == 1 / 3
+    assert snap.metrics["guided_above_max_stop_count"] == 1
+    assert snap.metrics["guided_above_max_stop_rate"] == 1 / 3
+    assert snap.metrics["guided_within_stop_policy_count"] == 1
+    assert snap.metrics["guided_within_stop_policy_rate"] == 1 / 3
+    assert snap.metrics["guided_post_mtf_funnel_reach_rate"] == 3 / 10
+    assert not any(
+        item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:")
+        for item in snap.blockers
+    )
+
+
+def test_guided_geometry_small_sample_is_warning_not_failure():
+    e = _engine()
+    _run(e)
+    with e.begin() as c:
+        c.execute(
+            text("UPDATE burnin_observations SET metrics_json=:metrics "
+                 "WHERE observation_id='obs-r-0'"),
+            {"metrics": json.dumps(
+                _guided_geometry_metrics(stop_pct=0.01), sort_keys=True
+            )},
+        )
+
+    snap = BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=0,
+        minimum_total_decisions=0,
+        minimum_accepted_trades=0,
+        minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0,
+        minimum_regime_coverage=0,
+        minimum_calibration_sample=0,
+        minimum_geometry_viability_sample=3,
+        require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+
+    assert snap.metrics["guided_geometry_viability_status"] == "INSUFFICIENT"
+    assert "GUIDED_GEOMETRY_VIABILITY_SAMPLE_INSUFFICIENT:1<3" in snap.warnings
+    assert not any(
+        item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:")
+        for item in snap.blockers
+    )

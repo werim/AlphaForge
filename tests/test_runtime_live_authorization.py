@@ -7,6 +7,7 @@ import pytest
 
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.order import validate_live_order_authorization
+from alphaforge.persistence import init_db
 
 
 class _Adapter:
@@ -35,10 +36,12 @@ def _runtime() -> tuple[RuntimeOrchestrator, _Adapter, _ControlStore]:
             live_trading_enabled=True,
             allow_live_orders=True,
             operator_live_acknowledged=True,
+            execution_account_scope="test-live-account",
         ),
         ai_brain=None,
         market_scanner=None,
         real_execution_adapter=adapter,
+        execution_ownership_engine=init_db("sqlite+pysqlite:///:memory:"),
         control_store=control,  # type: ignore[arg-type]
     )
     return runtime, adapter, control
@@ -76,6 +79,11 @@ async def _runtime_live_authorization_scenario(monkeypatch):
     assert adapter.calls == 0
 
     runtime._reconciliation_status = "CLEAN"
+    with pytest.raises(RuntimeError, match="derivatives_contract_passed"):
+        await _submit(runtime)
+    assert adapter.calls == 0
+
+    runtime._derivatives_contract_live_eligible = True
     control.active = True
     with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
         await _submit(runtime)

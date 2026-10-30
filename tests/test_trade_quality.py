@@ -7,7 +7,8 @@ def base_candidate():
 
 
 def base_market():
-    return {"regime": "TREND", "volatility_regime": "normal", "spread_pct": 0.01, "expected_slippage_pct": 0.01, "atr_pct": 1.0, "timestamp": 1_000_000}
+    # Canonical execution context uses fractional rates; 0.0002 = 2 bps.
+    return {"regime": "TREND", "volatility_regime": "normal", "spread_pct": 0.01, "expected_slippage_pct": 0.0002, "atr_pct": 1.0, "timestamp": 1_000_000}
 
 
 def test_low_score_rejected():
@@ -136,7 +137,15 @@ def test_stop_too_wide_high_score_softened_with_risk_scale():
 def test_stop_too_wide_high_score_low_effective_rr_stays_rejected():
     c = base_candidate(); c.score = 10.0; c.rr = 2.5; c.sl = 98.0
     d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 1.5}, {}, {"MIN_EFFECTIVE_RR":1.6})
-    assert d.reject_reason == "RR_TOO_LOW"
+    assert d.reject_reason == "LOW_EFFECTIVE_RR"
+
+
+def test_canonical_mtf_regime_vocabulary_is_accepted_by_shared_quality():
+    c = base_candidate()
+    c.setup_type = "TREND_CONTINUATION"
+    c.regime = "TRENDING"
+    d = evaluate_trade_quality(c, base_market(), {}, {"REQUIRE_REGIME_ALIGNMENT": True})
+    assert d.reject_reason != "REGIME_MISMATCH"
 
 
 def test_stop_too_wide_extreme_stays_rejected_when_hard_reject_enabled():

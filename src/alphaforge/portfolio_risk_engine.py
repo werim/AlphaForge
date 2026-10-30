@@ -1,7 +1,18 @@
+"""Experimental portfolio-risk research model.
+
+Production BACKTEST/PAPER/LIVE_PRECHECK authority is ``alphaforge.portfolio_risk``.
+This module is retained only for isolated research/tests. Importing or calling it
+does not prove that its adaptive sizing semantics are active in RuntimeOrchestrator.
+Do not use it for readiness, campaign qualification, or capital authorization.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+AUTHORITY_STATUS = "EXPERIMENTAL_NON_AUTHORITATIVE"
+PRODUCTION_AUTHORITY = "alphaforge.portfolio_risk"
 
 
 @dataclass

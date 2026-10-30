@@ -1,3 +1,104 @@
+# #612 causal shadow replay idempotency — 2026-10-06
+
+### Changed
+- PAPER position-management shadow proposals keep terminal-candle diagnostic compatibility fields at proposal-time unknown values; later terminal/post-terminal observations cannot enter an earlier immutable payload.
+### Fixed
+- `POSITION_MANAGEMENT_SHADOW_PROPOSAL_ID_CONFLICT` when a stable causal proposal ID was replayed after later terminal evidence changed the full payload hash.
+### Validation
+- Added direct persist-before-terminal/replay-after-terminal coverage and runner-level restart coverage proving identical IDs/hashes, `inserted=0/idempotent=4`, no `RESOLVER_BATCH_FAILED`, canonical TP resolution, and no shadow authoritative-management event or state mutation.
+### Breaking Changes
+- None. Existing field shape and pre-terminal payload hashes are preserved; no schema or migration change.
+### Known Issues
+- Issue #612 still requires fresh PAPER evidence on the exact merged dev SHA/config. The paused reproduction campaign remains evidence only and must not be resumed. LIVE NOT READY.
+
+# #354 Telegram Control Center read-only diagnostics — 2026-10-01
+
+### Added
+- Real Telegram read-only handlers for `/report`, `/rejects`, `/labels`, and `/errors`.
+- Trusted campaign/run identity checks and SQLite read-only/query-only access for Telegram diagnostics.
+- Regression coverage for stale identity, bounded structured output, no database mutation, and command routing.
+### Changed
+- `/help` now advertises only commands that are executable end-to-end: `/status`, `/health`, `/report`, `/rejects`, `/labels`, `/errors`, and `/help`.
+- #354 scope is Telegram-only; email/Gmail and SSH-tunnel control are no longer roadmap requirements.
+### Fixed
+- Removed the mismatch where the Telegram adapter accepted read-only diagnostic commands that the controller rejected as unsupported.
+### Removed
+- No production code removed in this slice; legacy email helpers remain inert compatibility code and are outside the revised #354 roadmap.
+### Breaking Changes
+- None. No runtime, campaign, strategy, threshold, execution, persistence authority, or LIVE behavior changes.
+### Known Issues
+- Mac launchd service, confirmed PAPER control actions, and scheduled/deduplicated Telegram alerts remain later #354 phases. LIVE NOT READY.
+
+# #455 BACKTEST ↔ PAPER MTF candidate parity — 2026-09-28
+
+### Added
+- Pure timestamp-bounded MTF candidate builder shared by PAPER and BACKTEST.
+- Deterministic complete-candle 1m aggregation for BACKTEST 1h/15m/1m evidence.
+- Explicit `NOT_SCORED_MTF_REJECT` null-score evidence for pre-scoring MTF rejects.
+### Changed
+- BACKTEST canonical side, setup, entry, stop, target, raw RR, and normalized scoring MTF context now come from PAPER's regime-guided generation semantics.
+- Non-1m simulations load one additional 1m historical evidence stream for MTF generation.
+### Fixed
+- Candidate-generation divergence despite shared AIBrain scoring.
+- Future source candles influencing an earlier historical MTF decision.
+- Missing pre-score evidence appearing as numeric score zero.
+### Removed
+- Same-timeframe reconstructed MTF scoring context when canonical shared MTF context exists.
+### Breaking Changes
+- BACKTEST can reject earlier for incomplete MTF or historical execution evidence; this is fail-closed alignment, not a threshold change. No schema/API migration.
+### Known Issues
+- Provider-specific native-candle versus 1m-aggregation boundary comparison remains an external qualification item. LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
+# #455 BACKTEST score authority isolation — 2026-09-28
+
+### Added
+- Explicit `legacy_geometry_*` diagnostic names for the raw breakout heuristic.
+### Changed
+- Canonical BACKTEST `score`, `expectancy`, and bucket now appear only after historical AIBrain scoring.
+### Fixed
+- A raw geometry-builder contract that exposed a non-authoritative heuristic under canonical decision-evidence names.
+### Removed
+- Canonical-looking `score` and `expectancy` fields from the pre-AIBrain market context.
+### Breaking Changes
+- Direct callers of the private `_build_market_ctx(...)` helper must use `legacy_geometry_*` for diagnostics; production scanner consumers remain unchanged.
+### Known Issues
+- #455 pure 1h/15m/1m MTF candidate-generation parity remains open. LIVE NOT READY.
+
+# #455 BACKTEST spread provenance — 2026-09-28
+
+### Added
+- Explicit `MODEL_ESTIMATE` versus `MEASURED` spread status at both BACKTEST market-context boundaries.
+### Changed
+- Estimated BACKTEST spread retains numeric model input while carrying non-measured authority.
+### Fixed
+- Contradictory `MEASURED` status paired with `ESTIMATED_BACKTEST` source.
+### Removed
+- None.
+### Breaking Changes
+- No schema/API break. Consumers that treated estimated spread as measured will now receive the correct `MODEL_ESTIMATE` status.
+### Known Issues
+- #455 MTF signal/geometry parity and legacy score isolation remain open. LIVE NOT READY.
+
+# #498 cross-component safety mutation gate — 2026-09-28
+
+### Added
+- Six cross-component mutations covering expected-fill stop risk, missing execution and drawdown evidence, RR-stage persistence, protected sizing parity, and semantic-validation bypass; together with the existing risk-scale mutation, all seven #498 cases are CI-enforced.
+- A manifest regression that binds every required mutation to its production source and focused production-path test.
+### Changed
+- The protected mutation CI step now verifies the #498 manifest before running disposable mutations.
+### Fixed
+- False confidence where local-guard mutations passed while economic/evidence relationships between components were not mutation-tested.
+### Removed
+- None.
+### Breaking Changes
+- None. Production runtime, lifecycle, schema, persistence, exports, thresholds, campaigns, and historical evidence are unchanged.
+### Known Issues
+- Mutation coverage is targeted, not exhaustive. Exact-head CI remains required; LIVE NOT READY.
+
 # #421 P2-D/P2-E completion and P2-F current-state cleanup — 2026-09-24
 
 ### Added
@@ -15,10 +116,6 @@
 - None. No production threshold, lifecycle, schema, export, migration, cost or LIVE-authorization change.
 ### Known Issues
 - Fresh FAST and public six-hour SOAK must pass on the exact final `dev` SHA before #421 is complete. LIVE NOT READY.
-
-## Historical changelog entries
-
-Entries below preserve the repository state at the time of each change.
 
 # #421 P2-D full-chain replay expansion — 2026-09-24
 

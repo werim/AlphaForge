@@ -21,11 +21,27 @@ def finite_numeric(*candidates: tuple[str, Any]) -> tuple[float | None, str | No
 
 
 def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_id: str,
-                         default_mode: str, regime_fallback: Any = None) -> dict[str, Any]:
+                         default_mode: str, regime_fallback: Any = None,
+                         decision_filters: Mapping[str, Any] | None = None) -> dict[str, Any]:
     execution_ctx = build_execution_context(market_ctx)
     raw_rr = market_ctx.get("rr")
     rr = float(raw_rr) if raw_rr is not None else None
-    expected_slippage_pct = execution_ctx.get("expected_slippage_pct")
+    filters = dict(decision_filters or {})
+
+    def filter_number(name: str, fallback: float) -> float:
+        raw = filters.get(name, fallback)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be numeric") from exc
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and >= 0")
+        return value
+
+    max_spread_pct = filter_number("MAX_SPREAD_PCT", 0.0012)
+    max_slippage_pct = filter_number("MAX_EXPECTED_SLIPPAGE_PCT", 0.003)
+    max_latency_ms = filter_number("MAX_LATENCY_MS", 300.0)
+    max_funding_rate_pct = filter_number("MAX_ABS_FUNDING_RATE_PCT", 0.0008)
     signal = {
         "symbol": symbol, "signal_id": signal_id,
         "mode": str(market_ctx.get("mode", default_mode)).upper(),
@@ -35,9 +51,14 @@ def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_i
         "take_profit": market_ctx.get("tp", market_ctx.get("target")),
         "setup": market_ctx.get("setup", market_ctx.get("setup_type")),
         "regime": market_ctx.get("regime", regime_fallback), "risk_reward": rr,
-        "max_spread_bps": 12.0, "max_funding_rate": 0.0008,
-        "max_expected_slippage_pct": (
-            None if expected_slippage_pct is None else expected_slippage_pct * 1.2
+        "max_spread_bps": max_spread_pct * 10_000.0,
+        "max_funding_rate": max_funding_rate_pct,
+        "max_expected_slippage_pct": max_slippage_pct,
+        "max_latency_ms": max_latency_ms,
+        "max_funding_rate_pct": max_funding_rate_pct,
+        "execution_threshold_source": (
+            "CANONICAL_FILTER_CONFIG" if decision_filters is not None
+            else "LEGACY_MODEL_DEFAULTS"
         ),
         "execution_ctx": execution_ctx,
     }

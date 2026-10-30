@@ -54,8 +54,8 @@ def test_alembic_script_directory_loads_and_resolves_heads() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0009_timestamp_bounded_expectancy_evidence"]
-    assert script.get_current_head() == "0009_timestamp_bounded_expectancy_evidence"
+    assert script.get_heads() == ["0010_canonical_universe_selection"]
+    assert script.get_current_head() == "0010_canonical_universe_selection"
 
 
 def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Path) -> None:
@@ -185,13 +185,15 @@ def test_alembic_upgrade_head_is_idempotent_on_partially_initialized_sqlite_data
             "trg_config_snapshots_no_update", "trg_config_snapshots_no_delete",
             "trg_rejection_audit_no_update", "trg_rejection_audit_no_delete",
             "trg_order_decision_audit_no_update", "trg_order_decision_audit_no_delete",
+            "trg_universe_selection_cycles_no_update", "trg_universe_selection_cycles_no_delete",
+            "trg_universe_selection_candidates_no_update", "trg_universe_selection_candidates_no_delete",
         }
         empty_database_triggers = {
             row[0] for row in empty_conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
         }
         assert triggers == empty_database_triggers
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0009_timestamp_bounded_expectancy_evidence",
+            "0010_canonical_universe_selection",
         )
 
 

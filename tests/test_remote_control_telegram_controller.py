@@ -69,6 +69,10 @@ class FakeReadOnlyExecutor:
         return RemoteControlResult(command=command.name, returncode=0, stdout=f"{command.name.lower()} ok", stderr="")
 
 
+class FakeQueryExecutor(FakeReadOnlyExecutor):
+    pass
+
+
 class RemoteControlTelegramControllerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -90,7 +94,7 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertIsNotNone(adapter_result.request)
         return adapter_result.request
 
-    def test_help_returns_allowed_command_list(self):
+    def test_help_returns_only_executable_command_list(self):
         executor = FakeReadOnlyExecutor()
         result = process_telegram_request(self.request_for("/help"), executor=executor)
 
@@ -98,15 +102,15 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         for command in EXECUTABLE_TELEGRAM_COMMANDS:
             self.assertIn(command, result.stdout)
-        for planned_command in ("/report", "/rejects", "/labels", "/errors"):
-            self.assertNotIn(planned_command, result.stdout)
         self.assertEqual(result.stdout, build_telegram_help_text())
 
     def test_help_invokes_no_executor(self):
         executor = FakeReadOnlyExecutor()
-        process_telegram_request(self.request_for("/help"), executor=executor)
+        query_executor = FakeQueryExecutor()
+        process_telegram_request(self.request_for("/help"), executor=executor, query_executor=query_executor)
 
         self.assertEqual(executor.commands, [])
+        self.assertEqual(query_executor.commands, [])
 
     def test_status_calls_fake_executor_exactly_once_with_normalized_operation(self):
         executor = FakeReadOnlyExecutor()
@@ -126,6 +130,32 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertEqual(result.stdout, "health ok")
         self.assertEqual(executor.commands, [RemoteControlCommand(name="HEALTH", argv=HEALTH_ARGV)])
         self.assertEqual(executor.kwargs[0]["config"], TRUSTED_CONFIG_MAPPING)
+
+    def test_query_commands_use_readonly_query_executor_only(self):
+        runtime_executor = FakeReadOnlyExecutor()
+        query_executor = FakeQueryExecutor()
+        for index, command in enumerate(("/report", "/rejects", "/labels", "/errors"), start=1):
+            result = process_telegram_request(
+                self.request_for(command, update_id=2000 + index),
+                config=TRUSTED_CONFIG,
+                executor=runtime_executor,
+                query_executor=query_executor,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.command, command[1:].upper())
+
+        self.assertEqual(runtime_executor.commands, [])
+        self.assertEqual(
+            query_executor.commands,
+            [
+                RemoteControlCommand(name="REPORT", argv=("REPORT",)),
+                RemoteControlCommand(name="REJECTS", argv=("REJECTS",)),
+                RemoteControlCommand(name="LABELS", argv=("LABELS",)),
+                RemoteControlCommand(name="ERRORS", argv=("ERRORS",)),
+            ],
+        )
+        for kwargs in query_executor.kwargs:
+            self.assertEqual(kwargs["config"], TRUSTED_CONFIG_MAPPING)
 
     def test_telegram_request_data_cannot_alter_trusted_runtime_arguments(self):
         executor = FakeReadOnlyExecutor()
@@ -160,14 +190,23 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertEqual(result.stderr, "invalid remote control request")
         self.assertEqual(executor.commands, [])
 
-    def test_unsupported_command_never_reaches_executor(self):
+    def test_unsupported_verified_command_never_reaches_any_executor(self):
         executor = FakeReadOnlyExecutor()
-        result = process_telegram_request(self.request_for("/report", update_id=2001), config=TRUSTED_CONFIG, executor=executor)
+        query_executor = FakeQueryExecutor()
+        request = self.request_for("/status", update_id=2101)
+        tampered = replace(request, command=RemoteControlCommand(name="NOPE", argv=("NOPE",)))
+        result = process_telegram_request(
+            tampered,
+            config=TRUSTED_CONFIG,
+            executor=executor,
+            query_executor=query_executor,
+        )
 
         self.assertEqual(result.command, "UNSUPPORTED")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "UNSUPPORTED_COMMAND")
         self.assertEqual(executor.commands, [])
+        self.assertEqual(query_executor.commands, [])
 
     def test_executor_failure_fails_closed_safely(self):
         executor = FakeReadOnlyExecutor(fail=True)
@@ -176,6 +215,20 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertEqual(result.command, "STATUS")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "remote control executor failed safely")
+        self.assertNotIn("POSTM0FIX", result.formatted)
+        self.assertNotIn("/private/tmp", result.formatted)
+
+    def test_query_failure_fails_closed_safely(self):
+        query_executor = FakeQueryExecutor(fail=True)
+        result = process_telegram_request(
+            self.request_for("/report", update_id=2201),
+            config=TRUSTED_CONFIG,
+            query_executor=query_executor,
+        )
+
+        self.assertEqual(result.command, "REPORT")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "remote control query failed safely")
         self.assertNotIn("POSTM0FIX", result.formatted)
         self.assertNotIn("/private/tmp", result.formatted)
 

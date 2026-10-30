@@ -1,3 +1,97 @@
+# #612 causal shadow proposal replay repair — 2026-10-06
+
+## Why / root cause
+
+Fresh PAPER campaign `camp_5f5d0b543fde5848` on exact SHA `c415edd8b2446a88cf3f0b350dfcfece9b53f69f` persisted twelve counterfactual rows, then failed three resolver cycles with `POSITION_MANAGEMENT_SHADOW_PROPOSAL_ID_CONFLICT` and paused fail-closed. The proposal ID was derived from the causal closed-candle decision, but the payload hash also included terminal-candle diagnostics learned only later. The same causal proposal therefore retained its ID while its hash changed.
+
+## Change / behavior
+
+The compatibility terminal-diagnostic keys remain in the immutable proposal payload, but retain proposal-time unknown values (`null`, `null`, `false`). Terminal/post-terminal candles are still used to bound the causal candle set and by the authoritative resolver, but their later-discovered metadata cannot rewrite the earlier counterfactual decision. This preserves existing pre-terminal hashes and storage shape while making restart/replay idempotent. No threshold, action policy, authoritative stop/target/quantity/trailing rule, schema, migration, historical record, or LIVE surface changed.
+
+## Validation / risks / recommendation
+
+The regression first persists four pre-terminal proposals, adds terminal and adversarial post-terminal candles, then requires identical proposal IDs, payloads, and hashes with `inserted=0/idempotent=4`. Runner-level restart replay additionally proves no `RESOLVER_BATCH_FAILED`, no authoritative management event, unchanged shadow-owned management fields, and continued canonical `TP_HIT` closure. Thirty-seven focused #612, #505 management, and position-resolver tests pass; compile and diff checks pass. PR CI and exact merged-dev CI remain required, followed by fresh PAPER-only evidence on the merged SHA/config. Do not resume the paused reproduction campaign. LIVE remains NOT READY.
+
+# #354 Telegram Control Center — read-only diagnostics — 2026-10-01
+
+## Why / root cause
+
+The Telegram adapter already allowlisted `/report`, `/rejects`, `/labels`, and `/errors`, but the controller executed only `/status`, `/health`, and `/help`. That created a misleading control surface: commands could pass authorization/parsing and still be rejected by the controller. The old #354 roadmap also centered on email and SSH tunneling, which is no longer the operator choice.
+
+## Change / behavior
+
+#354 is now Telegram-only. A dedicated read-only query layer opens the trusted campaign database with SQLite `mode=ro` and `query_only`, verifies the configured campaign/run identity, rejects stale active-run bindings, and returns compact structured summaries for report counts, canonical reject reasons, reject-label pipeline state, and structured operational incidents. No Telegram text can supply paths or SQL.
+
+`/help` now lists exactly the executable read-only commands. Existing allowlist, replay/audit, durable offset, pending-response retry, bounded response, and token redaction semantics remain intact. No campaign table is modified by the new query path.
+
+## Validation / risks / recommendation
+
+Focused tests prove command routing, no runtime-executor use for query commands, stale/wrong identity rejection, read-only byte preservation, structured-error redaction, missing-schema handling, and help/transport parity. Full PR CI remains required on the final documentation SHA. The running PUBLIC SOAK on `dev` is intentionally untouched; this work stays on a separate branch until that evidence run finishes. Later #354 phases cover macOS launchd, confirmation-gated PAPER controls, and scheduled/deduplicated Telegram alerts. LIVE remains NOT READY.
+
+# #455 BACKTEST ↔ PAPER pure MTF candidate parity — 2026-09-28
+
+## Why / root cause
+
+PAPER built regime-guided candidates from closed 1h regime, 15m setup structure, and 1m execution confirmation inside `BinanceMTFProvider`, while BACKTEST independently generated breakout geometry from the current and previous simulation candle. Shared scoring could therefore evaluate different side, setup, entry, stop, target, and raw RR. The provider also combined exchange I/O with pure generation, preventing direct reuse.
+
+## Change / behavior
+
+`build_mtf_candidate_context(...)` is now the single exchange-independent MTF authority. The Binance PAPER provider performs only timestamp-bounded acquisition and delegates regime/setup/execution/alignment/structural geometry to it. BACKTEST aggregates complete 1m evidence into the configured layers, drops every candle closing after the decision instant, calls the same builder, and replaces legacy breakout geometry only when shared MTF evidence is aligned and complete. Historical AIBrain scoring preserves that exact MTF context instead of reconstructing a same-timeframe substitute.
+
+BACKTEST loads one 1m evidence stream when the simulation interval differs, avoiding three parallel historical fetches. Missing latency or other required historical execution evidence remains unavailable and fails closed at MTF alignment. Such pre-score rejects persist a null score with `NOT_SCORED_MTF_REJECT`, never fabricated zero, while retaining concrete reject lifecycle/export evidence. No threshold, cost formula, portfolio gate, parity guard, PAPER behavior, LIVE path, authorization, schema, migration, backfill, or campaign state changed.
+
+## Validation / risks / recommendation
+
+208 focused tests pass across MTF provider/pure equivalence, structural geometry, future/incomplete-candle exclusion, BACKTEST scanner, AIBrain scoring, shared pre-submit parity, offline lifecycle/reject persistence, and CSV/SQL export integrity. Compile and diff checks pass. External qualification should still compare exchange-native 1h/15m candles against deterministic 1m aggregation for provider-specific boundary anomalies; missing historical execution evidence intentionally lowers candidate availability. LIVE remains NOT READY.
+
+# #455 BACKTEST canonical score authority isolation — 2026-09-28
+
+## Why / root cause
+
+`_build_market_ctx(...)` published a local breakout-strength heuristic under the canonical `score` and derived `expectancy` names. `scan_symbol_backtest(...)` replaced both with historical AIBrain output before production decision evaluation, but the raw builder contract still made the diagnostic values look authoritative and allowed direct consumers or tests to treat them as decision evidence.
+
+## Change / behavior
+
+The raw builder now exposes those values only as `legacy_geometry_score`, `legacy_geometry_expectancy`, and `legacy_geometry_expectancy_bucket`. Canonical `score`, `expectancy`, and `expectancy_bucket` are absent until `_historical_authoritative_score(...)` returns AIBrain evidence, after which the scanner installs them before both `evaluate_signal_decision(...)` and `run_order_cycle(...)`. A scanner regression proves the runtime candidate and market context receive the AIBrain value, while raw-builder regressions prove the legacy diagnostic cannot masquerade as decision authority.
+
+No score threshold, scoring formula, geometry, RR, execution-cost gate, lifecycle transition, persistence/export shape, PAPER/LIVE path, or authorization behavior changed. No schema migration, backfill, active campaign access, or historical evidence mutation occurred.
+
+## Validation / risks / recommendation
+
+Focused builder, scanner, shared-boundary, and historical AIBrain scoring tests pass. Adjacent BACKTEST tests, compile/diff checks, PR CI, and exact merged-dev CI remain required. This resolves the legacy-score sub-scope of #455 but does not close it: shared pure 1h/15m/1m MTF candidate generation remains unresolved. LIVE remains NOT READY.
+
+# #455 BACKTEST estimated-spread provenance correction — 2026-09-28
+
+## Why / root cause
+
+BACKTEST supplied a numeric estimated spread and `spread_source=ESTIMATED_BACKTEST` without an explicit status. The shared execution-context builder interpreted any numeric spread as measured, producing the contradictory pair `spread_status=MEASURED` / `spread_source=ESTIMATED_BACKTEST`.
+
+## Change / behavior
+
+Both BACKTEST market-context builders now bind spread status at the source: explicit historical spread evidence is `MEASURED`, while the liquidity/volatility estimate is `MODEL_ESTIMATE`. The shared execution builder preserves that status instead of inferring measured authority from numeric presence. Missing funding, latency, and orderbook evidence remains unavailable/null.
+
+No spread value, cost formula, threshold, candidate geometry, score, lifecycle transition, PAPER/LIVE path, or authorization gate changed. Existing persistence/export shapes are unchanged; new prospective rows carry corrected status metadata. No migration, backfill, campaign access, or historical mutation occurred.
+
+## Validation / risks / recommendation
+
+Four focused provenance regressions and 177 adjacent BACKTEST, shared pre-submit, execution-cost, execution-layer, and scanner tests pass. Compile, diff checks, PR CI, and exact merged-dev CI remain required. This is a coherent execution-provenance slice of #455, not closure: pure 1h/15m/1m MTF candidate-generation parity and the legacy pre-authoritative score field remain unresolved. LIVE remains NOT READY.
+
+# #498 cross-component economic/evidence mutation protection — 2026-09-28
+
+## Why / root cause
+
+The existing mutation gate protected local guards but could remain green when relationships between production components regressed. The uncovered contracts were risk-scale consumption, expected-fill stop basis, missing execution and drawdown evidence, explicit RR stages, protected sizing parity, and internal semantic validation.
+
+## Change / behavior
+
+`scripts/run_safety_mutations.py` adds six missing mutations to the already-present risk-scale mutation, completing all seven #498 requirements. Each mutation changes a real production boundary in a disposable copy and is paired with a production-path regression. `tests/test_issue498_cross_component_mutations.py` protects the required manifest and source/test routing. The PR workflow runs that manifest test before the mutation runner.
+
+Production runtime behavior is unchanged. No thresholds, scoring, cost formulas, sizing rules, stop policy, decision authority, or LIVE gates changed. There is no lifecycle, schema, persistence, export, migration, compatibility, campaign, or historical-evidence impact.
+
+## Validation / risks / recommendation
+
+The mutation runner passed with 32 KILLED, 0 SURVIVED, 0 ERROR across 21 baseline nodes. Focused manifest, compile, diff, and exact-head CI are required before merge. The gate remains targeted rather than exhaustive; it proves the named relationships are test-detectable, not that every possible cross-component mutation is covered. LIVE remains NOT READY. Push recommendation: open a focused PR, qualify its exact SHA, and merge only when required checks pass.
+
 # #421 P2-D/P2-E completion and P2-F documentation consistency — 2026-09-24
 
 ## Why / root cause

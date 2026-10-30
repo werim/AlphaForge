@@ -59,7 +59,7 @@ def _seed_campaign_for_qualification(tmp_path):
     conn.execute("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,max_drawdown,cost_drag,slippage_distribution_json,reject_accuracy,execution_failure_count,status,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run['burnin_run_id'],'relq','TRENDING',3,2,1,0.5,0.1,0.01,0.01,'{}',1.0,0,'PASS','2026-01-01T00:00:00Z','test'))
     conn.execute("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,liquidity_depth_baseline,liquidity_depth_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,funding_cost,price_impact_proxy,status,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run['burnin_run_id'],'relq','campaign',1,1,1,1,1,1,1,1,1,1,0,0,0,'CLEAN',0,0,'PASS','2026-01-01T00:00:00Z','test'))
     conn.execute("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,brier_score,log_loss,calibration_error,expected_calibration_error,reliability_buckets_json,observed_vs_predicted_json,status,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",(run['burnin_run_id'],'relq','all',10,0.1,0.1,0.01,0.01,'{}','{}','PASS','2026-01-01T00:00:00Z','test'))
-    conn.execute("INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_start,drawdown_end,drawdown_pct,drawdown_duration_seconds,recovery_duration_seconds,consecutive_losses,rolling_loss_cluster_json,rolling_expectancy,rolling_cost_drag,rolling_slippage,rolling_reject_accuracy,resolved,payload_json,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",('dd1',run['burnin_run_id'],'relq',1,0.99,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z',0.01,3600,3600,1,'{}',0.1,0.01,0.01,1.0,1,'{}','test'))
+    conn.execute("INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_start,drawdown_end,drawdown_pct,drawdown_duration_seconds,recovery_duration_seconds,consecutive_losses,rolling_loss_cluster_json,rolling_expectancy,rolling_cost_drag,rolling_slippage,rolling_reject_accuracy,resolved,payload_json,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",('dd1',run['burnin_run_id'],'relq',1,0.99,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z',0.01,3600,3600,1,'{}',0.1,0.01,0.01,1.0,1,'{"evidence_status":"COMPLETE","evidence_source":"TEST_MEASURED_LEDGER","risk_state_complete":true}','test'))
     conn.commit(); conn.close()
     return db,camp.campaign_id
 
@@ -247,9 +247,71 @@ def test_campaign_bad_calibration_and_metric_rows_alone_block(tmp_path):
     _qualify(db,cid)
     assert 'CALIBRATION_QUALITY_INSUFFICIENT' in _latest_blockers(db)
 
+def test_campaign_aggregate_does_not_promote_missing_execution_measurements(tmp_path):
+    db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
+    conn.execute("UPDATE burnin_execution_metrics SET spread_current=NULL,status='STABLE'")
+    conn.commit(); conn.close()
+    result=_qualify(db,cid)
+    blockers=_latest_blockers(db)
+    conn=sqlite3.connect(db)
+    qualification_status=conn.execute(
+        "SELECT status FROM burnin_qualification_snapshots WHERE qualification_id=?",
+        (result["qualification_id"],),
+    ).fetchone()[0]
+    conn.close()
+    assert qualification_status != "CANARY_QUALIFIED"
+    assert any(
+        blocker.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:")
+        and "spread_current" in blocker
+        for blocker in blockers
+    )
+    conn=sqlite3.connect(db)
+    row=conn.execute(
+        "SELECT spread_current FROM burnin_execution_metrics "
+        "WHERE burnin_run_id=? ORDER BY id DESC LIMIT 1",
+        (f"{cid}__aggregate",),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] is None
+
+
+def test_campaign_aggregate_keeps_unknown_drawdown_fail_closed(tmp_path):
+    db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
+    conn.execute(
+        "UPDATE burnin_drawdown_events SET "
+        "peak_equity=NULL,trough_equity=NULL,drawdown_pct=0,"
+        "consecutive_losses=0,resolved=1,payload_json='{}'"
+    )
+    conn.commit(); conn.close()
+    result=_qualify(db,cid)
+    conn=sqlite3.connect(db)
+    qualification_status,blockers_json=conn.execute(
+        "SELECT status,blockers_json FROM burnin_qualification_snapshots "
+        "WHERE qualification_id=?",
+        (result["qualification_id"],),
+    ).fetchone()
+    aggregate_row=conn.execute(
+        "SELECT peak_equity,trough_equity,drawdown_pct,resolved "
+        "FROM burnin_drawdown_events WHERE burnin_run_id=?",
+        (f"{cid}__aggregate",),
+    ).fetchone()
+    conn.close()
+    blockers=json.loads(blockers_json)
+    assert qualification_status != "CANARY_QUALIFIED"
+    assert any(b.startswith("DRAWDOWN_INSUFFICIENT_EVIDENCE:") for b in blockers)
+    assert aggregate_row is not None
+    assert aggregate_row[0] is None
+    assert aggregate_row[1] is None
+
+
 def test_campaign_excessive_drawdown_blocks(tmp_path):
     db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
-    conn.execute("UPDATE burnin_drawdown_events SET drawdown_pct=0.5"); conn.commit(); conn.close()
+    conn.execute(
+        "UPDATE burnin_drawdown_events "
+        "SET peak_equity=1.0,trough_equity=0.5,drawdown_pct=0.5"
+    )
+    conn.commit(); conn.close()
     _qualify(db,cid)
     assert 'DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER' in _latest_blockers(db)
 
@@ -992,6 +1054,53 @@ def test_unexpected_normal_runtime_exit_fails_campaign_and_stops_siblings(tmp_pa
     assert sibling_stopped == {"resolver":True,"maintenance":True}
     assert runtime.shutdown_called
     with engine.connect() as sql: assert get_campaign(sql,camp.campaign_id)["campaign_status"] == "FAILED"
+    engine.dispose()
+
+
+@pytest.mark.parametrize("proof_case", ['valid', 'missing', 'wrong_run', 'report_unblocked'])
+def test_storage_pressure_exit_requires_scoped_persisted_recovery_proof(tmp_path, monkeypatch, proof_case):
+    from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
+    from alphaforge.burnin_campaign import get_terminal_cause
+    db=tmp_path/'pressure.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-pressure',duration_days=1,symbols=[],intervals=[])
+    run=start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close(); engine=_engine(db)
+
+    class PressureRuntime(_FakeRuntime):
+        runtime_instance_id = 'rt-pressure'
+        startup_id = 'startup-pressure'
+
+        async def start(self):
+            if proof_case == 'missing':
+                return
+            save_runtime_state_snapshot(self.persistence_engine, RuntimeStateSnapshot(
+                mode='PAPER', requested_mode='PAPER', actual_mode='PAPER',
+                runtime_status='RECOVERY_REQUIRED', instance_id=self.runtime_instance_id,
+                startup_id=self.startup_id, campaign_id=self.attached,
+                burnin_run_id=run['burnin_run_id'] if proof_case != 'wrong_run' else 'other-run', active_position_count=0,
+                pending_order_count=0, unknown_exchange_state=False,
+                reconciliation_status='CLEAN', recovery_action_required=True,
+                fail_closed_reason='STORAGE_PRESSURE_RECOVERY_REQUIRED',
+                diagnostics_json={'storage_policy': {'blocked': proof_case != 'report_unblocked',
+                                                     'status': 'STORAGE_DISK_PRESSURE',
+                                                     'reason': 'MAINTENANCE_TIME_BUDGET_EXHAUSTED',
+                                                     'blockers': ['UNRESOLVED_OUTCOME_WINDOW_PROTECTED']}},
+            ))
+
+    runtime=PressureRuntime(); runner=BurnInCampaignRunner(engine,camp.campaign_id,lambda *_: [],runtime_factory=lambda: runtime)
+    async def sibling(): await asyncio.Event().wait()
+    monkeypatch.setattr(runner,'_resolver_loop',sibling)
+    monkeypatch.setattr(runner,'_maintenance_loop',sibling)
+    valid_proof = proof_case == 'valid'
+    expected='STORAGE_PRESSURE_RECOVERY_REQUIRED' if valid_proof else 'RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING'
+    with pytest.raises(RuntimeError, match=expected):
+        asyncio.run(runner.run_foreground())
+    with engine.connect() as sql:
+        campaign=get_campaign(sql,camp.campaign_id)
+        cause=get_terminal_cause(sql,camp.campaign_id,run['burnin_run_id'])
+    assert campaign['campaign_status'] == ('RECOVERY_REQUIRED' if valid_proof else 'FAILED')
+    assert cause['terminal_cause'] == ('STORAGE_PRESSURE_RECOVERY_REQUIRED' if valid_proof else 'RUNTIME_SUPERVISION_FAILED')
+    if valid_proof:
+        assert json.loads(cause['details_json'])['storage_report']['blockers'] == ['UNRESOLVED_OUTCOME_WINDOW_PROTECTED']
     engine.dispose()
 
 

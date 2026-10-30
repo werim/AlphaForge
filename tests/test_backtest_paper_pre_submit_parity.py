@@ -76,7 +76,7 @@ def test_backtest_paper_parity_low_effective_rr():
     market["execution_ctx"] = build_execution_context(market)
     backtest, paper, backtest_ctx, paper_ctx = _pair(market, config={"MIN_RR": 1.1, "MIN_EFFECTIVE_RR": 1.6, "MAX_SPREAD_PCT": 0.02})
     assert backtest["status"] == paper["status"] == "rejected"
-    assert backtest["reject_reason"] == paper["reject_reason"] == "RR_TOO_LOW"
+    assert backtest["reject_reason"] == paper["reject_reason"] == "LOW_EFFECTIVE_RR"
 
 
 def test_backtest_paper_parity_expectancy_missing():
@@ -152,6 +152,8 @@ def test_backtest_offline_funding_unavailable_not_fake_zero():
     prev = bo.Candle(1, 100, 101, 99, 100, 10)
     now = bo.Candle(2, 100, 102, 99, 101, 10)
     ctx = bo._build_market_ctx(now, prev, {}, [prev, now])
+    assert ctx["spread_source"] == "ESTIMATED_BACKTEST"
+    assert ctx["spread_status"] == "MODEL_ESTIMATE"
     assert ctx["funding_rate_pct"] is None
     assert ctx["funding_status"] == "UNAVAILABLE_BACKTEST"
 
@@ -171,10 +173,9 @@ def test_accepted_shared_decision_does_not_emit_order_audit():
     assert storage["audit"] == []
 
 
-def test_shared_decision_boundary_score_varies_from_market_snapshot_shape():
+def test_raw_backtest_geometry_diagnostic_cannot_masquerade_as_decision_score():
     import importlib.util
     from pathlib import Path
-    from alphaforge.order import evaluate_signal_decision
 
     spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
     bo = importlib.util.module_from_spec(spec)
@@ -188,10 +189,67 @@ def test_shared_decision_boundary_score_varies_from_market_snapshot_shape():
     calm_ctx = bo._build_market_ctx(calm_now, calm_prev, {"quoteVolume": 100000000, "fundingRate": 0.00001}, [calm_prev, calm_now])
     breakout_ctx = bo._build_market_ctx(breakout_now, breakout_prev, {"quoteVolume": 100000000, "fundingRate": 0.00001}, [breakout_prev, breakout_now])
 
-    calm = evaluate_signal_decision(calm_ctx, {}, {"balance": 1000, "risk_pct": 1}, calm_ctx.get("execution_ctx"), TradingMode.BACKTEST)
-    breakout = evaluate_signal_decision(breakout_ctx, {}, {"balance": 1000, "risk_pct": 1}, breakout_ctx.get("execution_ctx"), TradingMode.BACKTEST)
-    assert calm_ctx["score"] != breakout_ctx["score"]
-    assert calm.score != breakout.score
+    assert calm_ctx["legacy_geometry_score"] != breakout_ctx["legacy_geometry_score"]
+    assert "score" not in calm_ctx and "score" not in breakout_ctx
+    assert "expectancy" not in calm_ctx and "expectancy" not in breakout_ctx
+
+
+def test_backtest_uses_shared_paper_mtf_geometry_without_lookahead():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
+    bo = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bo)
+
+    start = 3_600_000
+    source = []
+    for minute in range(24 * 60):
+        hour = minute // 60
+        if hour < 20:
+            close = 120.0 - hour * .8 - (minute % 60) * (.2 / 59)
+        else:
+            quarter = (minute - 20 * 60) // 15
+            close = 100.0 + quarter * .1 + (minute % 15) * (.04 / 14)
+        source.append(bo.Candle(
+            start + minute * 60_000, close, close + .08, close - .08, close, 100.0,
+        ))
+    for offset, close in enumerate([102.15, 102.05, 101.95, 101.85, 101.75, 101.65, 101.55, 101.45]):
+        candle = source[-8 + offset]
+        source[-8 + offset] = bo.Candle(
+            candle.timestamp, close + .02, close + .08, close - .08, close, 100.0,
+        )
+
+    canonical = {
+        "spread_pct": .0002, "expected_slippage_pct": .0004,
+        "market_data_latency_ms": 20.0, "liquidity_score": .9,
+    }
+    context = {
+        "symbol_meta": {"quoteVolume": 100_000_000.0},
+        "mtf_source_candles": source,
+        "mtf_execution_ctx": canonical,
+        "simulation_timeframe": "1m",
+        "regime_timeframe": "1h", "setup_timeframe": "15m", "execution_timeframe": "1m",
+    }
+    bo.scan_symbol_backtest("BTCUSDT", source, len(source) - 1, context)
+    market = context["market_ctx"]
+    paper_candidate = market["mtf"]["generation"]["candidate"]
+
+    assert market["mtf"]["provider"] == "BACKTEST_HISTORICAL_CLOSED_1M"
+    assert market["mtf"]["alignment"]["aligned"] is True
+    for field in ("side", "setup_type", "entry", "sl", "tp", "rr"):
+        assert market[field] == paper_candidate[field]
+
+    future = bo.Candle(
+        source[-1].timestamp + 60_000, 1.0, 2_000.0, .1, 1_900.0, 999_999.0,
+    )
+    future_context = {**context, "mtf_source_candles": [*source, future]}
+    bo.scan_symbol_backtest("BTCUSDT", source, len(source) - 1, future_context)
+    future_market = future_context["market_ctx"]
+    assert future_market["mtf"] == market["mtf"]
+    for field in ("side", "setup_type", "entry", "sl", "tp", "rr", "score", "expectancy"):
+        assert future_market[field] == market[field]
 
 
 def test_backtest_scan_fails_closed_when_runtime_would_ignore_boundary(monkeypatch):

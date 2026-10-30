@@ -11,6 +11,7 @@ from alphaforge.burnin import (BurnInRun, bootstrap_burnin_schema,
                                canonical_decision_sql, persist_burnin_run)
 from alphaforge.burnin_campaign import build_phase8_campaign_identity
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
+                                        build_mtf_candidate_context,
                                         build_regime_context, build_setup_context, closed_candles,
                                         evaluate_mtf_alignment)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
@@ -277,6 +278,46 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
     )
 
 
+def test_provider_and_pure_builder_share_exact_as_of_generation(monkeypatch):
+    decision_ms = 20_000_000
+    rows_by_tf = {
+        "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
+        "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
+        "1m": _provider_rows([102.15 - i * .1 for i in range(8)], decision_ms),
+    }
+    canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
+                 "market_data_latency_ms": 20.0, "liquidity_score": .9}
+    provider = BinanceMTFProvider()
+    monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
+    paper = asyncio.run(provider.build(
+        "BTCUSDT", canonical, execution_ctx=canonical,
+        decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
+        execution_timeframe="1m",
+    ))
+    layers = {
+        layer: closed_candles(rows_by_tf[timeframe], timeframe=timeframe, decision_ts_ms=decision_ms)
+        for layer, timeframe in (("regime", "1h"), ("setup", "15m"), ("execution", "1m"))
+    }
+    pure = build_mtf_candidate_context(
+        layers, execution_ctx=canonical, decision_ts_ms=decision_ms,
+        regime_timeframe="1h", setup_timeframe="15m", execution_timeframe="1m",
+        provider="BINANCE_FUTURES_CLOSED_KLINES",
+    )
+
+    assert pure == paper
+
+    future = {key: [*value] for key, value in layers.items()}
+    future["execution"].append({
+        "open_ts": decision_ms + 1, "close_ts": decision_ms + 60_000,
+        "open": 1.0, "high": 1_000.0, "low": .1, "close": 999.0, "volume": 999_999.0,
+    })
+    assert build_mtf_candidate_context(
+        future, execution_ctx=canonical, decision_ts_ms=decision_ms,
+        regime_timeframe="1h", setup_timeframe="15m", execution_timeframe="1m",
+        provider="BINANCE_FUTURES_CLOSED_KLINES",
+    ) == paper
+
+
 def test_provider_fails_closed_when_execution_entry_is_outside_setup_zone(monkeypatch):
     decision_ms = 20_000_000
     rows_by_tf = {
@@ -483,14 +524,20 @@ class _AlwaysAcceptBrain:
     def before_real_order(self, *_args, **_kwargs):
         plan = SimpleNamespace(decision="ACCEPTED", reason="", confidence=.9,
                                order_type="MARKET", limit_price=None, stop_price=None)
-        return SimpleNamespace(total_score=.9, components={}), plan, "accepted"
+        return SimpleNamespace(
+            total_score=.9,
+            components={},
+            probabilistic={"raw_expectancy": 0.2, "expectancy_after_costs": 0.2},
+        ), plan, "accepted"
 
 
 def _runtime_candidate():
     return {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+            "funding_rate_pct": .00005, "funding_status": "MEASURED", "funding_source": "TEST",
             "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
             "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
             "spread_pct": .0002, "market_data_latency_ms": 20.0,
+            "volatility_regime": "normal",
             "liquidity_score": .9, "volume_24h_usdt": 100_000_000,
             "market_ts": time.time(), "timeframe": "1m", "equity": 100_000.0,
             "available_balance": 100_000.0, "notional": 1_000.0}
@@ -895,3 +942,217 @@ def test_paper_coarse_selector_chop_can_reach_authoritative_mtf_reject():
         "TOO_CHOPPY": 1,
         "WEAK_TREND_AND_NO_RANGE_EDGE": 1,
     }
+
+
+class _Issue481GuidedGeometryProvider:
+    def __init__(self, *, side: str, stop: float, target: float, rr: float) -> None:
+        self.side = side
+        self.stop = stop
+        self.target = target
+        self.rr = rr
+
+    async def build(self, *_args, **_kwargs):
+        candidate = {
+            "side": self.side,
+            "entry": 100.0,
+            "sl": self.stop,
+            "tp": self.target,
+            "rr": self.rr,
+            "candidate_rr": self.rr,
+            "setup_type": f"{self.side}_PULLBACK",
+            "setup_phase": "PULLBACK",
+            "geometry_status": "COMPLETE",
+            "geometry_reason": None,
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "entry_source": "execution_close_within_setup_entry_zone",
+            "stop_source": "setup_window_support" if self.side == "LONG" else "setup_window_resistance",
+            "target_source": "setup_window_resistance" if self.side == "LONG" else "setup_window_support",
+            "setup_timeframe": "15m",
+            "execution_timeframe": "1m",
+            "structural_stop": self.stop,
+            "structural_target": self.target,
+        }
+        return {
+            "provider": "ISSUE481_CLOSED_CANDLES",
+            "regime": {
+                "timeframe": "1h", "regime": "TRENDING",
+                "direction": self.side, "evidence_status": "COMPLETE",
+            },
+            "setup": {
+                "timeframe": "15m", "phase": "PULLBACK",
+                "trade_side": self.side, "direction": self.side,
+                "evidence_status": "COMPLETE",
+                "structural_stop": self.stop, "structural_target": self.target,
+            },
+            "execution": {
+                "timeframe": "1m", "direction": self.side,
+                "trade_side": self.side, "confirmed_for_side": True,
+                "evidence_status": "COMPLETE",
+            },
+            "alignment": {
+                "aligned": True, "direction": self.side, "reasons": [],
+                "generation_mode": "REGIME_GUIDED", "setup_phase": "PULLBACK",
+                "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"},
+            },
+            "generation": {
+                "mode": "REGIME_GUIDED", "evidence_status": "COMPLETE",
+                "candidate": candidate, "reason": None,
+            },
+        }
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "target"),
+    [
+        ("LONG", 99.99, 100.012),
+        ("SHORT", 100.01, 99.988),
+    ],
+)
+def test_issue481_guided_sub_min_stop_rejects_before_ai_scoring(side, stop, target):
+    class BrainMustNotRun:
+        def before_real_order(self, *_args, **_kwargs):
+            raise AssertionError("sub-min guided geometry must reject before AIBrain")
+
+    rejects = []
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            min_sl_pct=0.15,
+            min_rr=1.5,
+            paper_fee_bps=0.0,
+            paper_execution_latency_ms=0.0,
+        ),
+        BrainMustNotRun(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_Issue481GuidedGeometryProvider(
+            side=side, stop=stop, target=target, rr=1.2,
+        ),
+        on_reject_persist=lambda payload: rejects.append(payload),
+        paper_slippage_bps=2.0,
+    )
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    reject = rejects[-1]
+    assert reject["reason"] == "STOP_TOO_TIGHT"
+    assert reject["primary_reject_reason"] == "STOP_TOO_TIGHT"
+    assert reject["score"] is None
+    assert reject["candidate_rr"] == pytest.approx(1.2)
+    assert reject["executable_raw_rr"] == pytest.approx(0.0)
+    expected_fill = 100.02 if side == "LONG" else 99.98
+    expected_stop_pct = abs(expected_fill - stop) / expected_fill * 100.0
+    assert reject["planned_stop_distance_pct"] == pytest.approx(0.01)
+    assert reject["executable_stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_basis"] == "EXPECTED_FILL"
+    assert "STOP_TOO_TIGHT" in reject["all_failed_gates"]
+    assert "RR_TOO_LOW" in reject["all_failed_gates"]
+    assert "LOW_EFFECTIVE_RR" in reject["all_failed_gates"]
+    assert runtime.metrics.executions == 0
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "target"),
+    [
+        ("LONG", 99.85, 100.30),
+        ("SHORT", 100.15, 99.70),
+    ],
+)
+def test_issue481_min_stop_boundary_reaches_scoring_unchanged(side, stop, target):
+    class CountingRejectBrain:
+        def __init__(self):
+            self.calls = 0
+
+        def before_real_order(self, *_args, **_kwargs):
+            self.calls += 1
+            score = SimpleNamespace(
+                total_score=0.1, components={}, reason_flags=["low_score"],
+            )
+            plan = SimpleNamespace(
+                decision="REJECTED", reason="LOW_SCORE", confidence=0.1,
+                order_type="MARKET", limit_price=None, stop_price=None,
+            )
+            return score, plan, "boundary-scored"
+
+    brain = CountingRejectBrain()
+    rejects = []
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            min_sl_pct=0.15,
+            paper_fee_bps=0.0,
+            paper_execution_latency_ms=0.0,
+        ),
+        brain,
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_Issue481GuidedGeometryProvider(
+            side=side, stop=stop, target=target, rr=2.0,
+        ),
+        on_reject_persist=lambda payload: rejects.append(payload),
+        paper_slippage_bps=2.0,
+    )
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert brain.calls == 1
+    reject = rejects[-1]
+    expected_fill = 100.02 if side == "LONG" else 99.98
+    expected_stop_pct = abs(expected_fill - stop) / expected_fill * 100.0
+    assert reject["planned_stop_distance_pct"] == pytest.approx(0.15)
+    assert reject["executable_stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_pct"] == pytest.approx(expected_stop_pct)
+    assert reject["stop_distance_basis"] == "EXPECTED_FILL"
+    assert reject["sl"] == pytest.approx(stop)
+    assert reject["tp"] == pytest.approx(target)
+    assert reject["primary_reject_reason"] != "STOP_TOO_TIGHT"
+    assert "STOP_TOO_TIGHT" not in reject["all_failed_gates"]
+
+
+def test_neutral_regime_is_distinct_from_unavailable_regime_evidence():
+    regime = {
+        "timeframe": "1h",
+        "regime": "CHOPPY",
+        "direction": "NEUTRAL",
+        "last_closed_candle_ms": NOW,
+        "evidence_status": "INCOMPLETE",
+    }
+    setup = {
+        "timeframe": "15m",
+        "direction": "NONE",
+        "trade_side": None,
+        "phase": "INVALID",
+        "generation_mode": "REGIME_GUIDED",
+        "last_closed_candle_ms": NOW,
+        "evidence_status": "INCOMPLETE",
+    }
+    execution = {
+        "timeframe": "1m",
+        "direction": "NEUTRAL",
+        "trigger": None,
+        "confirmed_for_side": False,
+        "last_closed_candle_ms": NOW,
+        "evidence_status": "COMPLETE",
+    }
+
+    result = evaluate_mtf_alignment(
+        regime, setup, execution, decision_ts_ms=NOW,
+    )
+
+    assert result["aligned"] is False
+    assert result["final_direction"] == "NO_TRADE"
+    assert result["reasons"][0] == "MTF_REGIME_NEUTRAL"
+    assert "MTF_REGIME_UNAVAILABLE" not in result["reasons"]
+    assert result["regime_alignment"] == "FAIL"
+
+
+def test_missing_regime_context_remains_unavailable():
+    _, setup, execution = aligned()
+
+    result = evaluate_mtf_alignment(
+        None, setup, execution, decision_ts_ms=NOW,
+    )
+
+    assert "MTF_REGIME_UNAVAILABLE" in result["reasons"]
+    assert "MTF_REGIME_NEUTRAL" not in result["reasons"]

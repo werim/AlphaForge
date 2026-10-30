@@ -30,20 +30,25 @@ def _seed_valid(session: Session) -> None:
     session.execute(text("""
         INSERT INTO decision_evidence (
             evidence_id, mode, timestamp, symbol, side, lifecycle_state_before, lifecycle_state_after,
-            decision, score, raw_rr, effective_rr, min_effective_rr, expectancy_bucket, reject_reason,
+            decision, score, raw_rr, candidate_raw_rr, executable_raw_rr,
+            remaining_execution_penalty, rr_basis, execution_cost_semantics,
+            effective_rr, min_effective_rr, expectancy_bucket, reject_reason,
             cost_penalty, total_cost_pct, total_explicit_cost_pct, spread_pct, expected_slippage_pct, liquidity_score,
             diagnostics_json, portfolio_equity, open_position_count, max_open_positions, total_notional_exposure, max_notional_exposure,
             symbol_notional_exposure, max_symbol_notional, daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct,
             correlation_group, correlation_group_exposure, correlated_position_count, portfolio_reject_reason,
             portfolio_risk_state, portfolio_diagnostics_json, signal_id, lifecycle_seq, created_at
         ) VALUES
-            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 1.6, 'LOW', 'HIGH_SPREAD',
+            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.4, 1.4, 0.2, 'EXPECTED_FILL_RUNTIME_PARITY', 'EXPECTED_FILL_PLUS_REMAINING_PENALTY',
+             1.2, 1.6, 'LOW', 'HIGH_SPREAD',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 4000, 5000, 1000, 2000, 0.01, 0.05, 0.02, 'CRYPTO_MAJOR_BTC', 4000, 1, 'MAX_NOTIONAL_EXPOSURE', 'MAX_NOTIONAL_EXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-1', 2, '2026-01-01T00:00:01Z'),
-            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 1.6, 'HIGH', '',
+            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 2.0, 2.0, 0.2, 'EXPECTED_FILL_RUNTIME_PARITY', 'EXPECTED_FILL_PLUS_REMAINING_PENALTY',
+             1.8, 1.6, 'HIGH', '',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.8, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 1000, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_MAJOR_ETH', 500, 1, '', 'ACCEPTED', '{"engine":"evaluate_portfolio_risk"}', 's-2', 2, '2026-01-01T00:00:01Z'),
-            ('de-3', 'BACKTEST', '2026-01-01T00:00:01Z', 'SOLUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.1, 1.5, 1.2, 1.6, 'LOW', 'CORRELATION_OVEREXPOSURE',
+            ('de-3', 'BACKTEST', '2026-01-01T00:00:01Z', 'SOLUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.1, 1.5, 1.5, NULL, 0.3, 'PLANNED_ENTRY_LEGACY_BACKTEST', 'BACKTEST_PLANNED_ENTRY_LEGACY',
+             1.2, 1.6, 'LOW', 'CORRELATION_OVEREXPOSURE',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 4500, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_HIGH_BETA_ALT', 4500, 2, 'CORRELATION_OVEREXPOSURE', 'CORRELATION_OVEREXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-3', 2, '2026-01-01T00:00:01Z')
         ON CONFLICT(evidence_id) DO NOTHING
@@ -60,11 +65,113 @@ def _seed_valid(session: Session) -> None:
 
 
 def _parity() -> dict[str, object]:
-    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True, "effective_rr_penalty_breakdown_complete": True}
+    return {
+        "evidence_status": "COMPLETE",
+        "sample_count": 5,
+        "min_sample_count": 3,
+        "mismatch_count": 0,
+        "missing_field_count": 0,
+        "semantic_violation_count": 0,
+        "no_order_submission_verified": True,
+        "no_submit_verified": True,
+        "execution_context_complete": True,
+        "execution_evidence_status": "COMPLETE",
+        "microstructure_evidence_status": "COMPLETE_MEASURED",
+        "microstructure_live_equivalent": True,
+        "effective_rr_penalty_breakdown_complete": True,
+        "modes_compared": ["BACKTEST", "PAPER", "LIVE_PRECHECK"],
+        "comparison_fields": [
+            "decision",
+            "primary_reject_reason",
+            "failed_gates",
+            "score",
+            "candidate_rr",
+            "executable_raw_rr",
+            "remaining_execution_penalty",
+            "effective_rr",
+            "rr_basis",
+            "execution_cost_semantics",
+            "threshold_provenance",
+            "execution_evidence_status",
+            "portfolio_decision",
+            "original_notional",
+            "risk_scale",
+            "effective_notional",
+            "stop_distance_basis",
+            "geometry_status",
+            "geometry_source",
+            "lifecycle_pre_submit_terminal_state",
+        ],
+    }
+
+
+def test_mode_parity_rejects_legacy_weak_contract() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    weak = _parity()
+    weak.pop("modes_compared")
+    weak.pop("comparison_fields")
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(weak, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert "MODE_PARITY_REQUIRED_MODES_MISSING" in checks["mode_parity"].details
+
+
+def test_mode_parity_rejects_missing_protected_field_contract() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    incomplete = _parity()
+    incomplete["comparison_fields"] = [
+        field
+        for field in incomplete["comparison_fields"]
+        if field != "risk_scale"
+    ]
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(incomplete, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert "MODE_PARITY_PROTECTED_FIELDS_MISSING:risk_scale" in checks["mode_parity"].details
+
+
+def test_mode_parity_rejects_non_measured_microstructure() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    parity = _parity()
+    parity["microstructure_evidence_status"] = "PARTIAL_ESTIMATED"
+    parity["microstructure_live_equivalent"] = False
+    checks = {
+        item.name: item
+        for item in evaluator._check_runtime(parity, _reconciliation())
+    }
+    assert checks["mode_parity"].passed is False
+    assert checks["microstructure_evidence_measured"].passed is False
+    assert checks["microstructure_live_equivalent"].passed is False
+    assert "LIVE_PRECHECK_MICROSTRUCTURE_NOT_MEASURED" in checks["mode_parity"].details
 
 
 def _reconciliation() -> dict[str, object]:
-    return {"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0, "exchange_connectivity_healthy": True, "authenticated": True}
+    return {
+        "provider_configured": True,
+        "evidence_status": "COMPLETE",
+        "orphan_positions": 0,
+        "orphan_orders": 0,
+        "duplicate_fills": 0,
+        "fail_closed_findings": 0,
+        "exchange_connectivity_healthy": True,
+        "authenticated": True,
+        "derivatives_contract": {
+            "account_model": "NOTIONAL_ONLY_1X",
+            "account_model_status": "PASS",
+            "leveraged_live_supported": False,
+            "funding_accrual_status": "COMPLETE_MEASURED_HOLD_AWARE",
+            "funding_live_equivalent": True,
+            "live_eligible": True,
+            "blocking_reasons": [],
+        },
+    }
 
 
 def _operational() -> dict[str, object]:
@@ -473,6 +580,26 @@ def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
         assert checks[check_name].passed is False
         assert gates["phase3_execution_realism_complete"].passed is False
         assert report.verdict == "NOT_LIVE_READY"
+
+
+def test_phase3_readiness_rejects_legacy_ambiguous_raw_rr_as_execution_evidence() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text(
+            """UPDATE decision_evidence
+               SET candidate_raw_rr=NULL,
+                   executable_raw_rr=NULL,
+                   remaining_execution_penalty=NULL,
+                   rr_basis='LEGACY_AMBIGUOUS_RAW_RR'
+               WHERE mode='PAPER'"""
+        ))
+    with engine.connect() as conn:
+        checks = {
+            check.name: check
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+        }
+    assert checks["effective_rr_available"].passed is False
+    assert checks["no_accepted_trade_with_missing_critical_execution_context"].passed is False
 
 
 def test_phase3_readiness_recognizes_canonical_execution_safety_reject_names() -> None:

@@ -1,13 +1,60 @@
+# AlphaForge 0.1.0 — #612 causal shadow replay idempotency — 2026-10-06
+
+- Current phase: repair the fresh PAPER replay conflict reproduced on exact SHA `c415edd8b2446a88cf3f0b350dfcfece9b53f69f`; fresh fixed-SHA PAPER acceptance remains required before issue closure.
+- Runtime maturity/alignment: later terminal/post-terminal discovery no longer rewrites an already-produced causal PAPER shadow proposal. Compatibility terminal-diagnostic fields remain present but fixed to their proposal-time unknown values. Thresholds, authoritative position management, BACKTEST, LIVE_PRECHECK, and LIVE behavior are unchanged.
+- Lifecycle/persistence: proposal ID and full payload hash now stay stable across persist-before-terminal and replay-after-terminal. Replay is idempotent while canonical position resolution continues independently; no schema, migration, backfill, historical rewrite, or paused-campaign mutation.
+- Validation: 37 focused #612, authoritative position-management, and resolver tests pass, including `inserted=0/idempotent=4`, no resolver failure event, canonical TP closure, restart replay, and shadow immutability. PR CI and exact merged-dev CI remain required. LIVE NOT READY.
+
+# AlphaForge 0.1.0 — #354 Telegram Control Center read-only diagnostics — 2026-10-01
+
+- Current phase: first Telegram-only control-center slice. Existing allowlist/replay/offset/delivery safety is extended with real `/report`, `/rejects`, `/labels`, and `/errors` handlers.
+- Runtime maturity/alignment: diagnostics use trusted campaign/run identity and SQLite `mode=ro` + `query_only`; stale trusted run identity fails closed. Trading runtime, decision semantics, thresholds, PAPER execution, and LIVE authorization are unchanged.
+- Lifecycle/persistence: Telegram query handlers do not write the campaign database. Transport/replay state remains isolated. Missing optional evidence is explicit `UNAVAILABLE_IN_SCHEMA`, not fabricated zero.
+- Validation: focused controller/query/transport regressions cover routing, stale identity, redaction, no-mutation, replay boundaries, and executable-help parity. PR CI is the final gate before merge.
+- Known critical risks: macOS launchd deployment, confirmation-gated PAPER controls, and scheduled/deduplicated alerts remain open in #354. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
+# AlphaForge 0.1.0 — #455 shared MTF candidate generation — 2026-09-28
+
+- Current phase: BACKTEST and PAPER now share one pure, exchange-independent 1h/15m/1m candidate builder. BACKTEST supplies only complete closed 1m-derived layers at or before the decision timestamp; future candles are discarded.
+- Runtime maturity/alignment: regime, setup phase, execution confirmation, structural entry/SL/TP/raw RR, normalized MTF scoring inputs, and AIBrain authority now share the PAPER path. Historical latency/orderbook evidence is not invented: incomplete MTF evidence rejects before scoring with null score and explicit `NOT_SCORED_MTF_REJECT`. PAPER/LIVE authorization and thresholds are unchanged.
+- Lifecycle/persistence: MTF rejects retain canonical `SIGNAL_CREATED -> SIGNAL_REJECTED` evidence and concrete reasons; unscored rows persist null rather than fake zero. Existing schema/export shapes remain compatible; no migration, backfill, historical rewrite, or campaign mutation.
+- Validation: 208 focused MTF, BACKTEST scanner, lifecycle/export, no-look-ahead, scoring, and parity tests plus compile/diff checks pass. Known risk: exchange-native higher-timeframe candles should be compared against 1m aggregation in external qualification; unavailable historical execution evidence correctly reduces candidate availability. Last audit: 2026-09-28. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
+# AlphaForge 0.1.0 — #455 BACKTEST score authority isolation — 2026-09-28
+
+- Current phase: bounded #455 authority cleanup; BACKTEST/PAPER MTF candidate-generation parity remains open.
+- Runtime maturity/alignment: raw breakout geometry now exposes its heuristic only as `legacy_geometry_score` / `legacy_geometry_expectancy` diagnostics. Only historical AIBrain output populates canonical `score`, `expectancy`, and `expectancy_bucket` before the shared decision boundary. PAPER/LIVE behavior, thresholds, geometry, and authorization are unchanged.
+- Lifecycle/persistence: accepted/rejected lifecycle and export shapes are unchanged; canonical persisted decision evidence remains AIBrain-derived. No schema, migration, backfill, historical-row rewrite, or campaign mutation.
+- Validation: focused authority and historical-scoring regressions pass; adjacent BACKTEST verification and exact-head CI remain required. Known critical risk: BACKTEST still uses legacy breakout geometry rather than PAPER's pure 1h/15m/1m MTF candidate-generation semantics. Last audit: 2026-09-28. LIVE NOT READY.
+
+# AlphaForge 0.1.0 — #455 BACKTEST spread provenance — 2026-09-28
+
+- Current phase: smallest safe #455 execution-provenance slice; BACKTEST/PAPER MTF candidate-generation parity remains open.
+- Runtime maturity/alignment: estimated historical BACKTEST spread is now `MODEL_ESTIMATE` with source `ESTIMATED_BACKTEST`; explicit historical bid/ask-derived input remains `MEASURED`. PAPER/LIVE behavior, thresholds, scoring, geometry, and authorization are unchanged.
+- Lifecycle/persistence: existing decision/lifecycle/export fields carry the corrected prospective status. No schema, migration, backfill, historical-row rewrite, or campaign mutation.
+- Validation: 4 focused provenance regressions and 177 adjacent BACKTEST/execution tests pass; exact-head CI remains required. Known critical risk: BACKTEST still uses legacy breakout geometry rather than PAPER's pure 1h/15m/1m MTF candidate-generation semantics. Last audit: 2026-09-28. LIVE NOT READY.
+
+# AlphaForge 0.1.0 — #498 cross-component safety mutation gate — 2026-09-28
+
+- Current phase: P1 evidence-correctness hardening. The CI mutation gate now exercises 32 mutations, including all seven cross-component regressions required by #498.
+- Runtime maturity/alignment: no production runtime, threshold, sizing, execution-cost, stop-risk, qualification, parity, or authorization behavior changed. The gate proves that production-path tests detect dropped risk scaling, planned-entry stop checks, missing execution/drawdown evidence promotion, RR-stage swaps, sizing parity omissions, and semantic-validator bypass.
+- Lifecycle/persistence: no lifecycle, schema, export, migration, historical evidence, or campaign state changed. Mutations run only in disposable source/test copies.
+- Validation: 32/32 mutations killed with 0 survivors and 0 errors; 21 baseline nodes pass before mutation. Exact-head CI remains required. Last audit: 2026-09-28. LIVE NOT READY.
+
 # AlphaForge 0.1.0 — #421 P2-F current-state documentation — 2026-09-24
 
 - Current phase: implementation and regression work is complete through P2-E. All 23 P2-A golden scenarios replay deterministically through PAPER decision, scoped SQLite evidence, lifecycle, resolver, readiness and isolated audit surfaces. P2-E adds bounded decision persistence, resolver backlog, reconciliation volume, audit ingestion, repeated-outcome and concurrent read-only qualification.
 - Runtime maturity/alignment: the protected BACKTEST/PAPER/LIVE_PRECHECK invariant, execution and portfolio fail-closed gates, complete-window resolvers, future-time rejection, SQLite contention recovery, real SIGKILL restart recovery and macOS detached PAPER worker attachment fix are present in this lineage. Thresholds, cost policy and LIVE authorization are unchanged; LIVE stays disabled.
 - Lifecycle/persistence: restart replay consults durable accepted finality and resolver outcomes remain immutable/idempotent. Bounded load preserves exact row counts, unique reconciliation cycles, resolved queues and append-only audit identities while readiness/audit readers run against active PAPER writes. No schema/export migration, historical evidence rewrite or active campaign database change.
 - Validation: P2-D focused replay/crash tests passed 31 tests and exact-head CI run 35984711551 passed on `91b1f1b`; P2-E focused and adjacent load/contention/resolver/audit tests passed 50 tests and exact-head CI run 35986274853 passed on `21f0054`. P2-F marks obsolete point-in-time documents and synchronizes current guidance. Fresh FAST and public six-hour SOAK on the exact final `dev` SHA remain the #421 release gate. Last audit: 2026-09-24. LIVE NOT READY.
-
-## Historical version entries
-
-Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
 
 # AlphaForge 0.1.0 — #421 P2-D full-chain replay in progress — 2026-09-24
 

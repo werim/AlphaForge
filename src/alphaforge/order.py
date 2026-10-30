@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ from typing import Any, Callable, Literal, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+from alphaforge.execution import build_decision_rr_metrics, build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_cost_breakdown, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING, adverse_expected_fill_price, build_stop_risk_metrics, evaluate_stop_risk_policy, evaluate_execution_safety
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
@@ -47,8 +48,20 @@ def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
         "orderbook_status": str(base.get("orderbook_status", "") or ""),
         "volatility_status": str(base.get("volatility_status", "") or ""),
         "evidence_status": str(base.get("evidence_status", "") or ""),
-        "spoof_risk": float(base.get("spoof_risk", 0.0) or 0.0),
-        "absorption_score": float(base.get("absorption_score", 0.0) or 0.0),
+        "spoof_risk": _nullable_float(base.get("spoof_risk")),
+        "spoof_status": str(base.get("spoof_status", "") or ""),
+        "spoof_source": str(base.get("spoof_source", "") or ""),
+        "spoof_confirmed": base.get("spoof_confirmed") if isinstance(base.get("spoof_confirmed"), bool) else None,
+        "absorption_score": _nullable_float(base.get("absorption_score")),
+        "absorption_status": str(base.get("absorption_status", "") or ""),
+        "absorption_source": str(base.get("absorption_source", "") or ""),
+        "absorption_execution_ok": base.get("absorption_execution_ok") if isinstance(base.get("absorption_execution_ok"), bool) else None,
+        "liquidity_depth_usdt": _nullable_float(base.get("liquidity_depth_usdt")),
+        "liquidity_depth_status": str(base.get("liquidity_depth_status", "") or ""),
+        "liquidity_depth_source": str(base.get("liquidity_depth_source", "") or ""),
+        "microstructure_observed_at": _nullable_float(base.get("microstructure_observed_at")),
+        "microstructure_reference_ts": _nullable_float(base.get("microstructure_reference_ts")),
+        "trade_side": str(base.get("trade_side", "") or "").upper() or None,
     }
 
 
@@ -226,7 +239,25 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     expected_slippage_pct = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
     atr_pct = market_ctx.get("atr_pct", recent_stats.get("atr_pct"))
     atr_pct = float(atr_pct) if atr_pct not in (None, "") else None
-    sl_pct = abs(float(candidate.entry) - float(candidate.sl)) / float(candidate.entry) * 100 if getattr(candidate, "entry", 0) else 0.0
+    expected_fill_for_stop = _nullable_float(market_ctx.get("expected_fill"))
+    if expected_fill_for_stop is None:
+        raw_stop_slippage = _nullable_float(market_ctx.get("expected_slippage_pct"))
+        if raw_stop_slippage is not None:
+            try:
+                expected_fill_for_stop = adverse_expected_fill_price(
+                    entry=candidate.entry,
+                    side=side,
+                    slippage_pct=raw_stop_slippage,
+                )
+            except ValueError:
+                expected_fill_for_stop = None
+    stop_risk = build_stop_risk_metrics(
+        planned_entry=candidate.entry,
+        expected_fill=expected_fill_for_stop,
+        stop=candidate.sl,
+        allow_planned_fallback=(mode == "BACKTEST"),
+    )
+    sl_pct = stop_risk.get("stop_distance_pct")
     expectancy = candidate.expectancy
     if expectancy in (None, "UNKNOWN", ""):
         bucket = market_ctx.get("expectancy_bucket", getattr(candidate, "expectancy_bucket", None))
@@ -247,6 +278,8 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         effective_rr = rr
     min_trade_score = float(cfg["MIN_TRADE_SCORE"])
     score_eval = score if min_trade_score <= 1.0 else (score * 10.0 if 0.0 <= score < 1.0 else score)
+    score_gate_active = bool(cfg.get("SCORE_GATE_ACTIVE", True))
+    expectancy_gate_active = bool(cfg.get("EXPECTANCY_GATE_ACTIVE", True))
     pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
     orderbook_imbalance = _nullable_float(market_ctx.get("orderbook_imbalance"))
     spoof_risk = _nullable_float(market_ctx.get("spoof_risk"))
@@ -261,25 +294,26 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             return False
         return True
 
-    _check(score_eval >= min_trade_score, "score")
-    _check(rr >= float(cfg["MIN_RR"]) and effective_rr >= float(cfg["MIN_EFFECTIVE_RR"]), "rr")
-    _check((not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
-    _check(expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
+    _check((not score_gate_active) or score_eval >= min_trade_score, "score")
+    _check(rr >= float(cfg["MIN_RR"]), "rr")
+    _check(effective_rr >= float(cfg["MIN_EFFECTIVE_RR"]), "effective_rr")
+    _check((not expectancy_gate_active) or (not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
+    _check((not expectancy_gate_active) or expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
     _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
     regime_ok = True
     if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
-        regime_ok = regime == "TREND"
+        regime_ok = regime in {"TREND", "TRENDING"}
     elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
-        # BREAKOUT setup/regime alignment must not be blocked because a data
-        # source labels volatility as BREAKOUT instead of normal/high.
-        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
+        # Accept both legacy and canonical MTF regime vocabulary.  Regime
+        # naming must not create a second policy authority.
+        regime_ok = regime in {"TREND", "TRENDING", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
     elif "RANGE_MEAN_REVERSION" in setup_type:
-        regime_ok = regime == "RANGE"
+        regime_ok = regime in {"RANGE", "MEAN_REVERTING"}
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
     _check((not orderbook_filter_enabled) or (not orderbook_missing), "orderbook_present")
     _check((not orderbook_filter_enabled) or (not orderbook_risky), "orderbook_quality")
-    _check(sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
-    _check(sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
+    _check(sl_pct is not None and sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
+    _check(sl_pct is not None and sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
     _check(spread_pct <= float(cfg["MAX_SPREAD_PCT"]), "spread")
     _check(expected_slippage_pct <= float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]), "slippage")
     _check(atr_pct is None or atr_pct >= float(cfg["MIN_ATR_PCT"]), "min_atr")
@@ -311,13 +345,18 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
 
     if not candidate or not getattr(candidate, "symbol", None):
         reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
-    elif score_eval < min_trade_score and not _bypass("LOW_SCORE"):
+    elif score_gate_active and score_eval < min_trade_score and not _bypass("LOW_SCORE"):
         reject_reason, failed_filter = "LOW_SCORE", "score"
-    elif (rr < float(cfg["MIN_RR"]) or effective_rr < float(cfg["MIN_EFFECTIVE_RR"])) and not _bypass("RR_TOO_LOW"):
+    elif rr < float(cfg["MIN_RR"]) and not _bypass("RR_TOO_LOW"):
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
-    elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
+    elif effective_rr < float(cfg["MIN_EFFECTIVE_RR"]) and not _bypass("RR_TOO_LOW"):
+        # Raw structural RR and post-cost effective RR are distinct economic
+        # stages. Preserve the legacy BACKTEST RR_TOO_LOW bypass switch, but
+        # emit the canonical post-cost reason for evidence/readiness.
+        reject_reason, failed_filter = "LOW_EFFECTIVE_RR", "effective_rr"
+    elif expectancy_gate_active and cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
         reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
-    elif expectancy_val is not None and expectancy_val < float(cfg["MIN_EXPECTANCY"]):
+    elif expectancy_gate_active and expectancy_val is not None and expectancy_val < float(cfg["MIN_EXPECTANCY"]):
         reject_reason, failed_filter = "NEGATIVE_EXPECTANCY", "expectancy"
     elif cfg["BLOCK_CHOP_MARKET"] and any("CHOP" in f for f in pattern_flags):
         reject_reason, failed_filter = "CHOP_MARKET_BLOCK", "pattern_flags"
@@ -327,28 +366,31 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "ORDERBOOK_CONTEXT_MISSING", "orderbook_present"
     elif orderbook_filter_enabled and orderbook_risky:
         reject_reason, failed_filter = "ORDERBOOK_RISK", "orderbook_quality"
+    elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
+        # Excessive slippage is the causal execution failure.  Do not let the
+        # derived expected-fill stop distance mask the unsafe execution input.
+        reject_reason, failed_filter = "SLIPPAGE_TOO_HIGH", "expected_slippage_pct"
+    elif sl_pct is None:
+        reject_reason, failed_filter = "UNKNOWN_EXECUTION_CONTEXT", "stop_execution_basis"
     elif sl_pct < float(cfg["MIN_SL_PCT"]):
         reject_reason, failed_filter = "STOP_TOO_TIGHT", "sl_pct"
     elif sl_pct > float(cfg["MAX_SL_PCT"]):
         effective_rr_for_stop = _nullable_float(market_ctx.get("effective_rr"))
         if effective_rr_for_stop is None:
             effective_rr_for_stop = rr
-        stop_limit = float(cfg["MAX_SL_PCT"])
-        is_extreme_stop = sl_pct > stop_limit * float(cfg["STOP_TOO_WIDE_EXTREME_MULT"])
-        hard_reject_enabled = bool(cfg["STOP_TOO_WIDE_HARD_REJECT"])
-        soft_eligible = (
-            bool(cfg["STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE"])
-            and score_eval >= float(cfg["STOP_TOO_WIDE_SOFT_SCORE_MIN"])
-            and effective_rr_for_stop >= float(cfg["STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"])
+        stop_risk = evaluate_stop_risk_policy(
+            stop_risk,
+            score=score_eval,
+            effective_rr=effective_rr_for_stop,
+            config=cfg,
+            bypass_wide_reject=_bypass("STOP_TOO_WIDE"),
         )
-        if hard_reject_enabled and (is_extreme_stop or not soft_eligible) and not _bypass("STOP_TOO_WIDE"):
-            reject_reason, failed_filter = "STOP_TOO_WIDE", "sl_pct"
+        if not bool(stop_risk.get("accepted")):
+            reject_reason, failed_filter = str(stop_risk.get("reject_reason") or "STOP_TOO_WIDE"), "sl_pct"
         else:
             failed_filter = ""
     elif spread_pct > float(cfg["MAX_SPREAD_PCT"]):
         reject_reason, failed_filter = "SPREAD_TOO_HIGH", "spread_pct"
-    elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
-        reject_reason, failed_filter = "SLIPPAGE_TOO_HIGH", "expected_slippage_pct"
     elif atr_pct is not None and atr_pct < float(cfg["MIN_ATR_PCT"]):
         reject_reason, failed_filter = "VOLATILITY_TOO_LOW", "atr_pct"
     elif atr_pct is not None and atr_pct > float(cfg["MAX_ATR_PCT"]):
@@ -389,14 +431,14 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
                 reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
 
-    stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "min_raw_rr": float(cfg["MIN_RR"]), "min_score": min_trade_score, "reject_unknown_expectancy": bool(cfg["BLOCK_UNKNOWN_EXPECTANCY"]), "require_execution_context": False, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
+    stop_too_wide_softened = bool(stop_risk.get("stop_too_wide_softened")) and reject_reason == ""
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "min_raw_rr": float(cfg["MIN_RR"]), "min_score": min_trade_score, "reject_unknown_expectancy": bool(cfg["BLOCK_UNKNOWN_EXPECTANCY"]), "require_execution_context": False, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "planned_stop_distance_pct": stop_risk.get("planned_stop_distance_pct"), "executable_stop_distance_pct": stop_risk.get("executable_stop_distance_pct"), "stop_distance_basis": stop_risk.get("stop_distance_basis"), "stop_risk_evidence_status": stop_risk.get("stop_risk_evidence_status"), "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
     if stop_too_wide_softened:
         diagnostics.update({
             "stop_too_wide_softened": True,
             "original_reject_reason": "STOP_TOO_WIDE",
             "reject_reason_softened": "STOP_TOO_WIDE",
-            "risk_scale": min(float(cfg["STOP_TOO_WIDE_MAX_RISK_SCALE"]), 1.0),
+            "risk_scale": float(stop_risk.get("risk_scale", 1.0)),
             "stop_too_wide_hard_reject_enabled": bool(cfg["STOP_TOO_WIDE_HARD_REJECT"]),
         })
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
@@ -477,6 +519,8 @@ def validate_live_order_authorization(ctx: OrderExecutionContext) -> dict[str, b
         "operator_acknowledged": bool(authorization.get("operator_acknowledged", False)),
         "qualification_passed": bool(authorization.get("qualification_passed", False)),
         "reconciliation_passed": bool(authorization.get("reconciliation_passed", False)),
+        "derivatives_contract_passed": bool(authorization.get("derivatives_contract_passed", False)),
+        "execution_owner_valid": bool(authorization.get("execution_owner_valid", False)),
         "kill_switch_inactive": not bool(authorization.get("kill_switch_active", True)),
     }
     failed = [name for name, passed in gates.items() if not passed]
@@ -527,9 +571,94 @@ def _rejected_cycle_result(reject_reason: str, candidate: OrderCandidate | None,
     return result
 
 
+def _project_precomputed_portfolio_allocation(
+    market_ctx: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Apply a canonical batch allocation before any sizing/execution consumer."""
+    projected = dict(market_ctx)
+    allocation = projected.get("portfolio_allocation")
+    if not isinstance(allocation, Mapping):
+        return projected, ""
+    action = str(allocation.get("action") or "REJECT").upper()
+    reasons = list(allocation.get("reason_codes") or [])
+    if action not in {"APPROVE", "REDUCE_SIZE"}:
+        return projected, str(reasons[0] if reasons else "NO_PORTFOLIO_CAPACITY")
+    try:
+        allocated = float(allocation.get("allocated_notional"))
+    except (TypeError, ValueError):
+        return projected, "PORTFOLIO_ALLOCATION_INVALID"
+    if allocated <= 0:
+        return projected, "PORTFOLIO_ALLOCATION_INVALID"
+    original = next(
+        (
+            projected.get(key)
+            for key in ("notional", "notional_usdt", "order_notional", "effective_notional")
+            if projected.get(key) is not None
+        ),
+        None,
+    )
+    if original is None:
+        try:
+            original = abs(
+                float(projected.get("entry"))
+                * float(projected.get("quantity", projected.get("qty")))
+            )
+        except (TypeError, ValueError):
+            return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+    try:
+        original_value = float(original)
+    except (TypeError, ValueError):
+        return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+    if original_value <= 0:
+        return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+    downstream = min(original_value, allocated)
+    scale = downstream / original_value
+    allocated_risk = allocation.get("allocated_risk")
+    if allocated_risk is not None:
+        try:
+            allocated_risk = float(allocated_risk) * (downstream / allocated)
+        except (TypeError, ValueError):
+            return projected, "PORTFOLIO_ALLOCATION_INVALID"
+    projected.update(
+        allocation_action=action,
+        allocation_scale=scale,
+        allocation_requested_notional=allocation.get("requested_notional"),
+        allocated_notional=downstream,
+        allocated_risk=allocated_risk,
+        notional=downstream,
+        effective_notional=downstream,
+    )
+    for key in ("notional_usdt", "order_notional"):
+        if key in projected:
+            projected[key] = downstream
+    quantity = projected.get("quantity", projected.get("qty"))
+    if quantity is not None:
+        try:
+            allocated_quantity = float(quantity) * scale
+        except (TypeError, ValueError):
+            return projected, "PORTFOLIO_ALLOCATION_SIZE_UNAVAILABLE"
+        projected["quantity"] = allocated_quantity
+        projected["qty"] = allocated_quantity
+        if "effective_quantity" in projected:
+            projected["effective_quantity"] = allocated_quantity
+    return projected, ""
+
+
 def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     recent_stats = recent_stats or {}
+    ctx.market_ctx, allocation_reject = _project_precomputed_portfolio_allocation(
+        ctx.market_ctx
+    )
+    if allocation_reject:
+        _audit(
+            ctx,
+            None,
+            LifecycleState.SIGNAL_CREATED,
+            LifecycleState.SIGNAL_REJECTED,
+            allocation_reject,
+        )
+        return _rejected_cycle_result(allocation_reject, candidate=None)
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
@@ -574,6 +703,7 @@ def evaluate_signal_decision(
     """
     mode_enum = mode if isinstance(mode, TradingMode) else TradingMode(str(mode).upper())
     market_ctx = dict(market_snapshot or {})
+    market_ctx, allocation_reject = _project_precomputed_portfolio_allocation(market_ctx)
     if execution_context is not None:
         market_ctx["execution_ctx"] = dict(execution_context)
         market_ctx.update(
@@ -591,7 +721,15 @@ def evaluate_signal_decision(
     if not isinstance(recent_stats, Mapping):
         recent_stats = {}
 
-    candidate_or_rejection = build_order_candidate(symbol, market_ctx, config)
+    candidate_or_rejection = (
+        OrderRejection(
+            symbol=symbol,
+            reject_reason=allocation_reject,
+            diagnostics={"portfolio_allocation": market_ctx.get("portfolio_allocation")},
+        )
+        if allocation_reject
+        else build_order_candidate(symbol, market_ctx, config)
+    )
     if isinstance(candidate_or_rejection, OrderRejection):
         execution_ctx = market_ctx.get("execution_ctx") if isinstance(market_ctx.get("execution_ctx"), Mapping) else build_execution_context(market_ctx)
         return DecisionResult(
@@ -627,23 +765,57 @@ def evaluate_signal_decision(
             candidate.expectancy = inferred_expectancy
             market_ctx = {**market_ctx, "expectancy": inferred_expectancy}
 
-    quality = evaluate_trade_quality(candidate, market_ctx, recent_stats, config)
     execution_ctx = market_ctx.get("execution_ctx") if isinstance(market_ctx.get("execution_ctx"), Mapping) else build_execution_context(market_ctx)
-    order_payload = {"risk_reward": candidate.rr, "rr": candidate.rr}
-    effective_rr, execution_flags, rr_breakdown = _effective_rr(
-        order_payload,
+    canonical_rr_stage = build_decision_rr_metrics(
+        candidate.rr,
+        {
+            **market_ctx,
+            "entry": candidate.entry,
+            "sl": candidate.sl,
+            "tp": candidate.tp,
+            "side": candidate.side,
+        },
         execution_ctx,
         mode=mode_enum.value,
-        min_effective_rr=float(config.get("MIN_EFFECTIVE_RR", MIN_RR_THRESHOLD)),
     )
-    if mode_enum == TradingMode.BACKTEST:
-        execution_flags = [flag for flag in execution_flags if flag != "UNKNOWN_EXECUTION_CONTEXT"]
+    canonical_rr_stage["rr_basis"] = (
+        "EXPECTED_FILL_RUNTIME_PARITY"
+        if canonical_rr_stage.get("expected_fill") is not None
+        and canonical_rr_stage.get("execution_cost_semantics") is not None
+        else "UNAVAILABLE"
+    )
+    quality = evaluate_trade_quality(
+        candidate, {**market_ctx, **canonical_rr_stage}, recent_stats, config
+    )
+    effective_rr = float(canonical_rr_stage["effective_rr"])
+    execution_safety = evaluate_execution_safety(
+        execution_ctx, effective_rr=effective_rr,
+        min_effective_rr=float(config.get("MIN_EFFECTIVE_RR", MIN_RR_THRESHOLD)),
+        thresholds=config, require_measured=mode_enum is TradingMode.LIVE,
+    )
+    execution_flags = list(execution_safety["all_failed_gates"])
+    rr_breakdown = {
+        **build_execution_cost_breakdown(candidate.rr, execution_ctx).as_dict(),
+        **canonical_rr_stage,
+        "raw_rr": canonical_rr_stage["executable_raw_rr"],
+        "cost_penalty": canonical_rr_stage["remaining_execution_penalty"],
+        "cost_penalty_rr": canonical_rr_stage["remaining_execution_penalty"],
+        "cost_penalty_total": canonical_rr_stage["remaining_execution_penalty"],
+        "reject_flags": execution_flags,
+        "diagnostics_json": json.dumps({
+            "authority": "build_decision_rr_metrics",
+            "formula": "effective_rr = max(executable_raw_rr - remaining_execution_penalty, 0)",
+        }, sort_keys=True),
+        "execution_evidence_status": execution_safety["execution_evidence_status"],
+    }
 
     diagnostics = {
         **quality.diagnostics,
         "effective_rr": effective_rr,
         "execution_flags": execution_flags,
         "effective_rr_breakdown": rr_breakdown,
+        "canonical_rr_stage": canonical_rr_stage,
+        "execution_safety": execution_safety,
         "shared_decision_boundary": "evaluate_signal_decision",
     }
     reject_reason = ""
@@ -685,6 +857,18 @@ def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[
     """
     config = config or {}
     recent_stats = recent_stats or {}
+    ctx.market_ctx, allocation_reject = _project_precomputed_portfolio_allocation(
+        ctx.market_ctx
+    )
+    if allocation_reject:
+        _audit(
+            ctx,
+            None,
+            LifecycleState.SIGNAL_CREATED,
+            LifecycleState.SIGNAL_REJECTED,
+            allocation_reject,
+        )
+        return _rejected_cycle_result(allocation_reject, candidate=None)
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)

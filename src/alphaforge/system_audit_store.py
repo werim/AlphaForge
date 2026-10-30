@@ -575,12 +575,25 @@ def _accepted_outcome(
     ambiguous = bool(payload.get("ambiguous_intrabar_sequence")) or "ambiguous_intrabar_sequence" in missing
     complete = bool(outcome.get("evidence_complete")) and not ambiguous
     authoritative = attributable and complete
+    management_events = []
+    if _table_exists(source, "burnin_position_management_events"):
+        management_events = [
+            dict(value) for value in source.execute(
+                "SELECT * FROM burnin_position_management_events "
+                "WHERE trade_id=? ORDER BY id",
+                (pending.get("trade_id"),),
+            )
+        ]
     _insert_outcome(
         audit,
         envelope_id=envelope_id,
         kind="ACCEPTED_ACTUAL",
         source_outcome_id=str(outcome.get("outcome_id")),
-        payload={"outcome": outcome, "pending_position": pending},
+        payload={
+            "outcome": outcome,
+            "pending_position": pending,
+            "position_management_events": management_events,
+        },
         status=outcome.get("exit_reason"),
         gross_r=outcome.get("gross_r"),
         net_r=outcome.get("net_r"),
@@ -746,64 +759,78 @@ def ingest_audit_evidence(
     source snapshot is idempotent. If an upstream canonical row changes later,
     a new immutable source-hash version is appended rather than rewriting the
     prior audit evidence.
+
+    If the caller has not already opened a source transaction, hold one explicit
+    read transaction for the whole ingest so every SELECT observes the same
+    SQLite snapshot while PAPER writers continue committing concurrently.
     """
     source.row_factory = sqlite3.Row
     audit.row_factory = sqlite3.Row
     _assert_isolated(source, audit)
-    run_ids = _run_ids(source, campaign_id=campaign_id, burnin_run_id=burnin_run_id)
-    run_meta = _run_metadata(source, run_ids)
-    campaign_map = _campaign_by_run(source, run_ids)
-    observations = _observation_index(source, run_ids)
-    rows = _decision_rows(source, run_ids)
-    bootstrap_audit_schema(audit)
+    owns_source_snapshot = not source.in_transaction
+    if owns_source_snapshot:
+        source.execute("BEGIN")
+    try:
+        run_ids = _run_ids(source, campaign_id=campaign_id, burnin_run_id=burnin_run_id)
+        run_meta = _run_metadata(source, run_ids)
+        campaign_map = _campaign_by_run(source, run_ids)
+        observations = _observation_index(source, run_ids)
+        rows = _decision_rows(source, run_ids)
+        bootstrap_audit_schema(audit)
 
-    before = {
-        table: int(audit.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-        for table in IMMUTABLE_TABLES
-    }
-    for row in rows:
-        run_id = str(row.get("run_id") or "")
-        diagnostics = _json_object(row.get("diagnostics_json"))
-        observation_id = diagnostics.get("observation_id")
-        observation = observations.get(str(observation_id)) if observation_id else None
-        resolved_campaign = (
-            str(campaign_id) if campaign_id
-            else diagnostics.get("campaign_id")
-            or campaign_map.get(run_id)
-        )
-        envelope_id, diagnostics, envelope = _insert_envelope(
-            audit,
-            row=row,
-            run_meta=run_meta.get(run_id, {}),
-            campaign_id=str(resolved_campaign) if resolved_campaign else None,
-            observation=observation,
-        )
-        if _normalized_decision(row.get("decision")) == "ACCEPT":
-            _accepted_outcome(
-                source, envelope_id=envelope_id, row=row, run_id=run_id, audit=audit
+        before = {
+            table: int(audit.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in IMMUTABLE_TABLES
+        }
+        for row in rows:
+            run_id = str(row.get("run_id") or "")
+            diagnostics = _json_object(row.get("diagnostics_json"))
+            observation_id = diagnostics.get("observation_id")
+            observation = observations.get(str(observation_id)) if observation_id else None
+            resolved_campaign = (
+                str(campaign_id) if campaign_id
+                else diagnostics.get("campaign_id")
+                or campaign_map.get(run_id)
             )
-        elif _normalized_decision(row.get("decision")) == "REJECT":
-            _reject_shadow(
-                source,
-                envelope_id=envelope_id,
+            envelope_id, diagnostics, envelope = _insert_envelope(
+                audit,
                 row=row,
-                envelope=envelope,
-                diagnostics=diagnostics,
-                run_id=run_id,
+                run_meta=run_meta.get(run_id, {}),
                 campaign_id=str(resolved_campaign) if resolved_campaign else None,
-                audit=audit,
+                observation=observation,
             )
-    audit.commit()
-    after = {
-        table: int(audit.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-        for table in IMMUTABLE_TABLES
-    }
-    return {
-        "source_decisions": len(rows),
-        "envelopes_added": after["audit_decision_envelopes"] - before["audit_decision_envelopes"],
-        "outcomes_added": after["audit_outcomes"] - before["audit_outcomes"],
-        "shadow_decisions_added": after["shadow_decisions"] - before["shadow_decisions"],
-        "shadow_outcomes_added": after["shadow_outcomes"] - before["shadow_outcomes"],
-        "total_envelopes": after["audit_decision_envelopes"],
-        "total_outcomes": after["audit_outcomes"],
-    }
+            if _normalized_decision(row.get("decision")) == "ACCEPT":
+                _accepted_outcome(
+                    source, envelope_id=envelope_id, row=row, run_id=run_id, audit=audit
+                )
+            elif _normalized_decision(row.get("decision")) == "REJECT":
+                _reject_shadow(
+                    source,
+                    envelope_id=envelope_id,
+                    row=row,
+                    envelope=envelope,
+                    diagnostics=diagnostics,
+                    run_id=run_id,
+                    campaign_id=str(resolved_campaign) if resolved_campaign else None,
+                    audit=audit,
+                )
+        audit.commit()
+        after = {
+            table: int(audit.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in IMMUTABLE_TABLES
+        }
+        return {
+            "source_decisions": len(rows),
+            "envelopes_added": after["audit_decision_envelopes"] - before["audit_decision_envelopes"],
+            "outcomes_added": after["audit_outcomes"] - before["audit_outcomes"],
+            "shadow_decisions_added": after["shadow_decisions"] - before["shadow_decisions"],
+            "shadow_outcomes_added": after["shadow_outcomes"] - before["shadow_outcomes"],
+            "total_envelopes": after["audit_decision_envelopes"],
+            "total_outcomes": after["audit_outcomes"],
+        }
+    except BaseException:
+        audit.rollback()
+        raise
+    finally:
+        if owns_source_snapshot and source.in_transaction:
+            source.rollback()

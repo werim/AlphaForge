@@ -14,10 +14,12 @@ ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+from alphaforge.realized_accounting import finite_cash, position_cash_geometry, realized_cash_ledger, sum_cash, mean_cash
 from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.adaptive_learning import classify_expectancy_bucket
-from alphaforge.multi_timeframe import build_execution_context as build_historical_execution_context, build_regime_context, build_setup_context
+from alphaforge.multi_timeframe import (build_execution_context as build_historical_execution_context,
+    build_mtf_candidate_context, build_regime_context, build_setup_context)
 from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
 from alphaforge.expectancy_evidence import fetch_expectancy_as_of
 from alphaforge.config import load_config_from_env
@@ -26,12 +28,14 @@ from alphaforge.config_registry import (decision_filter_config, effective_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_decision_evidence, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
-from alphaforge.symbol_selector import select_symbol
+from alphaforge.symbol_selector import UniverseConstraints, build_selected_universe, select_symbol
+from alphaforge.universe_evidence import persist_universe_selection
 from alphaforge.signal_geometry import build_breakout_geometry
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
     HistoricalCandle,
     HistoricalDataError,
+    SUPPORTED_INTERVAL_MS,
     fetch_binance_klines_paginated,
     load_or_fetch_candles as load_or_fetch_historical_candles,
 )
@@ -433,7 +437,7 @@ class LifecycleRow:
     setup_type: str
     setup_reason: str
     regime: str
-    score: float
+    score: Optional[float]
     rr: Optional[float]
     entry: float
     sl: float
@@ -443,8 +447,22 @@ class LifecycleRow:
     trigger_price: float = 0.0
     close_price: float = 0.0
     close_reason: str = ""
-    net_pnl_pct: float = 0.0
-    net_pnl_usdt: float = 0.0
+    net_pnl_pct: float | None = None
+    legacy_price_return_pct: float | None = None
+    net_pnl_usdt: float | None = None
+    gross_pnl_usd: float | None = None
+    initial_risk_usd: float | None = None
+    total_cost_usd: float | None = None
+    gross_r: float | None = None
+    net_r: float | None = None
+    filled_quantity: float | None = None
+    closed_timestamp: int | None = None
+    realized_accounting_version: str = "CASH_LEDGER_V1"
+    realized_evidence_status: str = "NOT_REALIZED"
+    realized_cost_source: str = "UNAVAILABLE"
+    realized_costs_json: str = "{}"
+    realized_missing_fields: str = "[]"
+    legacy_approx_pnl_usdt: float | None = None
     hold_minutes: float = 0.0
     reject_reason: str = ""
     cancel_reason: str = ""
@@ -470,6 +488,11 @@ class LifecycleRow:
     lifecycle_seq: int = 0
     shadow_outcome: str = ""
     cost_penalty: float = 0.0
+    candidate_raw_rr: Optional[float] = None
+    executable_raw_rr: Optional[float] = None
+    remaining_execution_penalty: Optional[float] = None
+    rr_basis: str = "PLANNED_ENTRY_LEGACY_BACKTEST"
+    execution_cost_semantics: Any = "BACKTEST_PLANNED_ENTRY_LEGACY"
     total_cost_pct: Any = "UNAVAILABLE_BACKTEST"
     total_explicit_cost_pct: Any = "UNAVAILABLE_BACKTEST"
     spread_source: str = "UNAVAILABLE"
@@ -667,31 +690,39 @@ def _build_market_ctx(
     rr = geometry["rr"]
     breakout_strength = geometry["breakout_strength"]
     range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
-    score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
-    expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
+    legacy_geometry_score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
+    legacy_geometry_expectancy = ((legacy_geometry_score / 10.0) - 0.5) * (rr - 1.0)
     quote_volume = symbol_meta.get("quoteVolume")
     if quote_volume in (None, "", 0, 0.0):
         quote_volume = now.volume * now.close * 1440.0
     candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     liq = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     spread_source = "ACTUAL" if symbol_meta.get("actual_spread_pct") not in (None, "") else "ESTIMATED_BACKTEST"
+    spread_status = "MEASURED" if spread_source == "ACTUAL" else "MODEL_ESTIMATE"
     raw_spread = symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct)
     spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
     base = {
+        **{key: symbol_meta[key] for key in (
+            "fee_pct", "fee_status", "fee_source", "latency_ms", "latency_status", "latency_source",
+        ) if key in symbol_meta},
         "entry": entry,
         "sl": sl,
         "tp": tp,
         "rr": rr,
-        "score": score,
+        # Geometry-only diagnostics are deliberately not canonical decision
+        # authority. scan_symbol_backtest installs the AIBrain score and
+        # expectancy before either shared pre-submit boundary is evaluated.
+        "legacy_geometry_score": legacy_geometry_score,
         "setup_type": "BREAKOUT_UP" if side == "LONG" else "BREAKDOWN_DOWN",
         "setup_reason": "CLOSE_ABOVE_PREV_HIGH" if side == "LONG" else "CLOSE_BELOW_PREV_LOW",
         "regime": "BREAKOUT" if breakout_strength > 0.002 else "TREND",
-        "expectancy": expectancy,
-        "expectancy_bucket": _bucket_expectancy(expectancy),
+        "legacy_geometry_expectancy": legacy_geometry_expectancy,
+        "legacy_geometry_expectancy_bucket": _bucket_expectancy(legacy_geometry_expectancy),
         "side": side,
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
         "spread_unit_assumed": spread_unit_assumed,
+        "spread_status": spread_status,
         "spread_source": spread_source,
         "candle_range_pct": candle_range_pct,
         "volatility_pct": candle_range_pct,
@@ -710,6 +741,54 @@ def _build_market_ctx(
     base.update(exec_ctx)
     base["spread_unit_assumed"] = spread_unit_assumed
     return base
+
+
+def _closed_mtf_layers_from_1m(candles: List[Candle], *, decision_ts_ms: int,
+                               regime_timeframe: str, setup_timeframe: str,
+                               execution_timeframe: str) -> dict[str, list[dict[str, Any]]]:
+    """Aggregate complete, as-of 1m rows into PAPER's configured MTF layers."""
+    source_step = SUPPORTED_INTERVAL_MS["1m"]
+    closed_source = {
+        int(candle.timestamp): candle
+        for candle in candles
+        if int(candle.timestamp) + source_step - 1 <= decision_ts_ms
+    }
+
+    def aggregate(timeframe: str) -> list[dict[str, Any]]:
+        target_step = SUPPORTED_INTERVAL_MS.get(timeframe)
+        if target_step is None or target_step < source_step or target_step % source_step:
+            return []
+        rows: list[dict[str, Any]] = []
+        count = target_step // source_step
+        bucket_starts = sorted({(timestamp // target_step) * target_step for timestamp in closed_source})
+        for bucket_start in bucket_starts:
+            expected = [bucket_start + offset * source_step for offset in range(count)]
+            if bucket_start + target_step - 1 > decision_ts_ms or any(ts not in closed_source for ts in expected):
+                continue
+            bucket = [closed_source[ts] for ts in expected]
+            rows.append({
+                "open_ts": bucket_start,
+                "open": bucket[0].open,
+                "high": max(candle.high for candle in bucket),
+                "low": min(candle.low for candle in bucket),
+                "close": bucket[-1].close,
+                "volume": sum(candle.volume for candle in bucket),
+                "close_ts": bucket_start + target_step - 1,
+            })
+        return rows[-64:]
+
+    return {
+        "regime": aggregate(regime_timeframe),
+        "setup": aggregate(setup_timeframe),
+        "execution": aggregate(execution_timeframe),
+    }
+
+
+def _closed_candles_at(candles: List[Candle], *, timeframe: str, end_ms: int) -> List[Candle]:
+    step = SUPPORTED_INTERVAL_MS.get(timeframe)
+    if step is None:
+        return []
+    return [candle for candle in candles if int(candle.timestamp) + step - 1 <= end_ms]
 def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Candle], idx: int) -> Dict[str, Any]:
     now = candles[idx]
     prev = candles[idx - 1] if idx > 0 else now
@@ -728,6 +807,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     liquidity_score = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     actual_spread_pct = symbol_meta.get("actual_spread_pct")
     spread_source = "ACTUAL" if actual_spread_pct not in (None, "") else "ESTIMATED_BACKTEST"
+    spread_status = "MEASURED" if spread_source == "ACTUAL" else "MODEL_ESTIMATE"
     spread_unit_assumed = "fraction"
     if actual_spread_pct not in (None, ""):
         spread_pct, spread_unit_assumed = normalize_pct_input(actual_spread_pct, field="spread_pct")
@@ -754,6 +834,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     return {
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
+        "spread_status": spread_status,
         "spread_source": spread_source,
         "spread_unit_assumed": spread_unit_assumed,
         "actual_spread_pct": spread_pct if actual_spread_pct not in (None, "") else None,
@@ -783,19 +864,28 @@ def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int
         for c in candles[:idx + 1]
         if int(c.timestamp) <= decision_ts
     ]
-    timeframe = str(market_ctx.get("timeframe", "1m"))
-    regime = build_regime_context(historical[-20:], timeframe)
-    setup = build_setup_context(historical[-12:], timeframe, regime=regime)
-    execution = build_historical_execution_context(
-        historical[-5:], timeframe,
-        {**dict(market_ctx), "market_data_latency_ms": market_ctx.get("market_data_latency_ms")},
-        trade_side=str(market_ctx.get("side") or ""),
+    existing_mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else None
+    if existing_mtf is None:
+        timeframe = str(market_ctx.get("timeframe", "1m"))
+        regime = build_regime_context(historical[-20:], timeframe)
+        setup = build_setup_context(historical[-12:], timeframe, regime=regime)
+        execution = build_historical_execution_context(
+            historical[-5:], timeframe,
+            {**dict(market_ctx), "market_data_latency_ms": market_ctx.get("market_data_latency_ms")},
+            trade_side=str(market_ctx.get("side") or ""),
+        )
+        existing_mtf = {
+            "regime": regime, "setup": setup, "execution": execution,
+            "alignment": {"alignment": regime.get("regime_alignment")},
+        }
+    scoring_market = {**dict(market_ctx), "mode": "BACKTEST", "mtf": existing_mtf}
+    signal = build_signal_payload(
+        symbol,
+        scoring_market,
+        signal_id=f"{symbol}:{decision_ts}",
+        default_mode="BACKTEST",
+        decision_filters=decision_filter_config("BACKTEST"),
     )
-    scoring_market = {**dict(market_ctx), "mode": "BACKTEST", "mtf": {
-        "regime": regime, "setup": setup, "execution": execution,
-        "alignment": {"alignment": regime.get("regime_alignment")},
-    }}
-    signal = build_signal_payload(symbol, scoring_market, signal_id=f"{symbol}:{decision_ts}", default_mode="BACKTEST")
     scope = dict(expectancy_scope or {})
     stats_ctx = empty_stats_context()
     if expectancy_bind is not None:
@@ -829,13 +919,26 @@ def parse_ts(value: str) -> int:
 def fetch_json(url: str) -> Any:
     with urlopen(url) as resp:  # nosec - public market data
         return json.loads(resp.read().decode("utf-8"))
-def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    if symbols:
-        return [{"symbol": sym.strip().upper(), "quoteVolume": 0.0} for sym in symbols if sym.strip()]
+def build_backtest_universe_selection(
+    top_n: int,
+    quote: str = "USDT",
+    *,
+    constraints: UniverseConstraints | None = None,
+    decision_timestamp: float | None = None,
+):
+    observed_at = float(decision_timestamp if decision_timestamp is not None else datetime.now(timezone.utc).timestamp())
+    resolved = constraints or UniverseConstraints(
+        min_volume_24h_usd=0.0,
+        candidate_pool_top_n_volume=max(1, int(top_n)),
+        max_active_symbols=max(1, int(top_n)),
+        max_evidence_age_sec=120.0,
+    )
     info = fetch_json("https://fapi.binance.com/fapi/v1/exchangeInfo")
     tickers = fetch_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
+    books = fetch_json("https://fapi.binance.com/fapi/v1/bookTicker")
     ticker_map = {t["symbol"]: t for t in tickers}
-    selected = []
+    book_map = {row.get("symbol"): row for row in books if isinstance(row, dict) and row.get("symbol")}
+    candidates = []
     for s in info.get("symbols", []):
         sym = s.get("symbol", "")
         if s.get("status") != "TRADING" or s.get("contractType") != "PERPETUAL":
@@ -843,22 +946,56 @@ def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[Li
         if s.get("quoteAsset") != quote or not sym.endswith(quote):
             continue
         t = ticker_map.get(sym)
-        if not t:
+        book = book_map.get(sym)
+        if not t or not book:
             continue
-        qv = float(t.get("quoteVolume", 0.0) or 0.0)
-        if qv <= 0:
+        try:
+            qv = float(t.get("quoteVolume"))
+            bid = float(book.get("bidPrice"))
+            ask = float(book.get("askPrice"))
+            change = abs(float(t.get("priceChangePercent"))) / 100.0
+        except (TypeError, ValueError):
             continue
-        if not s.get("filters"):
+        if qv < 0 or bid <= 0 or ask < bid or not s.get("filters"):
             continue
-        selected.append({"symbol": sym, "quoteVolume": qv})
-    selected.sort(key=lambda x: x["quoteVolume"], reverse=True)
-    return selected[:top_n]
+        mid = (bid + ask) / 2.0
+        candidates.append({
+            "symbol": sym,
+            "quoteVolume": qv,
+            "volume_24h_usdt": qv,
+            "spread_pct": (ask - bid) / mid,
+            "volatility_pct": change,
+            "market_ts": observed_at,
+            "market_observed_at": observed_at,
+            "source_exchange": "binance",
+            "market_data_source": "BINANCE_PUBLIC_SNAPSHOT",
+            "instrument_status": s.get("status"),
+            "contract_type": s.get("contractType"),
+            "market_cap_status": "UNAVAILABLE",
+            "market_cap_source": "UNAVAILABLE",
+        })
+    selection = build_selected_universe(
+        candidates,
+        resolved,
+        decision_timestamp=observed_at,
+        execution_mode="BACKTEST",
+        git_sha=os.getenv("GITHUB_SHA") or os.getenv("ALPHAFORGE_GIT_SHA") or "UNKNOWN_GIT_COMMIT",
+    )
+    selected_by_symbol = {candidate["symbol"]: candidate for candidate in candidates}
+    return [selected_by_symbol[symbol] for symbol in selection.selected_symbols], selection
+
+
+def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    if symbols:
+        return [{"symbol": sym.strip().upper(), "quoteVolume": 0.0} for sym in symbols if sym.strip()]
+    selected, _selection = build_backtest_universe_selection(top_n, quote)
+    return selected
 def save_symbol_universe(path: str, universe: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["symbol", "quoteVolume"])
         w.writeheader()
-        w.writerows(universe)
+        w.writerows({"symbol": row.get("symbol"), "quoteVolume": row.get("quoteVolume", row.get("volume_24h_usdt"))} for row in universe)
 def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List[Candle]:
     rows = fetch_binance_klines_paginated(symbol=symbol, interval=interval, start_ms=start_ms, end_ms=end_ms)
     return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in rows]
@@ -886,7 +1023,7 @@ def _fetch_klines_legacy(symbol: str, interval: str, start_ms: int, end_ms: int)
         for r in rows
     ]
 
-def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], interval: str) -> None:
+def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], interval: str | Iterable[str]) -> None:
     """Keep run-local candle artifacts aligned with the current symbol universe.
 
     Candle JSON files live inside the run artifact directory, not a shared cache.
@@ -896,7 +1033,11 @@ def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], inter
     candles_dir = Path(output_dir) / "candles"
     if not candles_dir.exists():
         return
-    expected = {f"{str(symbol).upper()}_{interval}.json" for symbol in symbols}
+    intervals = (interval,) if isinstance(interval, str) else tuple(interval)
+    expected = {
+        f"{str(symbol).upper()}_{timeframe}.json"
+        for symbol in symbols for timeframe in intervals
+    }
     for path in candles_dir.glob("*.json"):
         if path.name not in expected:
             path.unlink()
@@ -941,6 +1082,77 @@ def scan_symbol_backtest(
     now = candles[idx]
     prev = candles[idx - 1]
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
+    if "mtf_source_candles" in context:
+        regime_timeframe = str(context.get("regime_timeframe") or "1h")
+        setup_timeframe = str(context.get("setup_timeframe") or "15m")
+        execution_timeframe = str(context.get("execution_timeframe") or "1m")
+        simulation_timeframe = str(context.get("simulation_timeframe") or execution_timeframe)
+        simulation_step = SUPPORTED_INTERVAL_MS.get(simulation_timeframe)
+        decision_ts_ms = (
+            int(now.timestamp) + simulation_step - 1
+            if simulation_step is not None else int(now.timestamp)
+        )
+        layers = _closed_mtf_layers_from_1m(
+            list(context.get("mtf_source_candles") or []),
+            decision_ts_ms=decision_ts_ms,
+            regime_timeframe=regime_timeframe,
+            setup_timeframe=setup_timeframe,
+            execution_timeframe=execution_timeframe,
+        )
+        mtf_execution_ctx = {
+            **dict(mctx),
+            **dict(context.get("mtf_execution_ctx") or {}),
+        }
+        mtf = build_mtf_candidate_context(
+            layers,
+            execution_ctx=mtf_execution_ctx,
+            decision_ts_ms=decision_ts_ms,
+            regime_timeframe=regime_timeframe,
+            setup_timeframe=setup_timeframe,
+            execution_timeframe=execution_timeframe,
+            state_direction_resolution_enabled=bool(context.get("enable_state_direction_resolution", False)),
+            regime_direction_threshold=float(context.get("regime_direction_threshold", .0005)),
+            setup_direction_threshold=float(context.get("setup_direction_threshold", .0003)),
+            execution_direction_threshold=float(context.get("execution_direction_threshold", .0005)),
+            guided_signal_generation_enabled=bool(context.get("mtf_guided_signal_generation_enabled", True)),
+            provider="BACKTEST_HISTORICAL_CLOSED_1M",
+        )
+        mctx["mtf"] = mtf
+        generation = mtf.get("generation") if isinstance(mtf.get("generation"), Mapping) else {}
+        alignment = mtf.get("alignment") if isinstance(mtf.get("alignment"), Mapping) else {}
+        generated_candidate = generation.get("candidate") if isinstance(generation, Mapping) else None
+        if (alignment.get("aligned") and generation.get("evidence_status") == "COMPLETE"
+                and isinstance(generated_candidate, Mapping)):
+            mctx.update(dict(generated_candidate))
+            regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+            mctx["regime"] = regime_layer.get("regime")
+            mctx["setup"] = generated_candidate.get("setup_type")
+            mctx["timeframe"] = execution_timeframe
+            mctx.update(build_execution_context(mctx))
+        elif alignment.get("aligned") and generation.get("mode") == "LEGACY_VETO":
+            # Explicit rollback mode preserves the pre-existing breakout
+            # candidate while still using shared MTF equality as its veto.
+            mctx["timeframe"] = execution_timeframe
+        else:
+            reasons = list(alignment.get("reasons") or [])
+            reason = str(reasons[0] if reasons else generation.get("reason") or "MTF_GUIDED_GEOMETRY_UNAVAILABLE")
+            result = {
+                "status": "rejected",
+                "accepted": False,
+                "candidate": None,
+                "reason": reason,
+                "reject_reason": reason,
+                "rejection_reason": reason,
+                "diagnostics": {
+                    "primary_reject_reason": reason,
+                    "all_failed_gates": reasons,
+                    "mtf": mtf,
+                    "score_status": "NOT_SCORED_MTF_REJECT",
+                },
+            }
+            context["last_result"] = result
+            context["market_ctx"] = mctx
+            return None
     if "min_effective_rr" in context:
         mctx["MIN_EFFECTIVE_RR"] = context["min_effective_rr"]
     authoritative = _historical_authoritative_score(
@@ -1072,6 +1284,7 @@ def simulate_candidate(
     order_id = str(uuid5(NAMESPACE_URL, f"backtest:order:{signal_id}:{candidate.entry}:{candidate.sl}:{candidate.tp}"))
     position_id = str(uuid5(NAMESPACE_URL, f"backtest:position:{signal_id}:{candidate.side}"))
     def _finalize_rows(out_rows: List[LifecycleRow]) -> List[LifecycleRow]:
+        rr_stage = market_ctx.get("canonical_rr_stage")
         for seq, row in enumerate(out_rows, start=1):
             row.lifecycle_seq = seq
             row.accepted_reason = str(market_ctx.get("accepted_reason", row.accepted_reason) or row.accepted_reason)
@@ -1087,6 +1300,19 @@ def simulate_candidate(
                 row.order_id = order_id
             if row.status_after in {"POSITION_OPENED", "POSITION_CLOSED"} and row.position_id == "":
                 row.position_id = position_id
+            if (
+                isinstance(rr_stage, Mapping)
+                and rr_stage.get("rr_basis") == "EXPECTED_FILL_RUNTIME_PARITY"
+                and isinstance(rr_stage.get("execution_cost_semantics"), Mapping)
+            ):
+                row.candidate_raw_rr = _sql_nullable_number(rr_stage.get("candidate_rr"))
+                row.executable_raw_rr = _sql_nullable_number(rr_stage.get("executable_raw_rr"))
+                row.remaining_execution_penalty = _sql_nullable_number(
+                    rr_stage.get("remaining_execution_penalty")
+                )
+                row.effective_rr = _sql_nullable_number(rr_stage.get("effective_rr"))
+                row.rr_basis = str(rr_stage.get("rr_basis") or "UNAVAILABLE")
+                row.execution_cost_semantics = rr_stage.get("execution_cost_semantics")
         return out_rows
     rows: List[LifecycleRow] = [
         LifecycleRow(
@@ -1354,6 +1580,7 @@ def simulate_candidate(
         # Conservative same-candle rule:
         # if both TP and SL touch inside the same candle, count SL first.
         if hit_sl and hit_tp:
+            market_ctx = {**market_ctx, "ambiguous_intrabar": True}
             hit_tp = False
         if hit_sl:
             pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100 if long_side else ((candidate.entry - candidate.sl) / candidate.entry) * 100
@@ -1435,12 +1662,51 @@ def finalize(
     mae: float = 0.0,
 ):
     market_ctx = market_ctx or {}
-    risk_usdt = balance * (risk_pct / 100)
-    net_pnl_usdt = risk_usdt * (pnl_pct / 100)
+    # risk_pct historically allocates NOTIONAL, not stop-defined dollar risk.
+    scale = finite_cash(market_ctx.get("risk_scale", 1.0))
+    base_notional = finite_cash(balance * risk_pct / 100 if market_ctx.get("notional") is None else market_ctx["notional"])
+    fill = finite_cash(trigger_price)
+    valid_size = scale is not None and 0 <= scale <= 1 and base_notional is not None and base_notional >= 0
+    quantity = base_notional * scale / fill if valid_size and fill and fill > 0 else None
+    stop = finite_cash(candidate.sl)
+    exit_fill = finite_cash(close_price)
+    valid_geometry = (quantity is not None and stop is not None
+        and exit_fill is not None and exit_fill > 0 and stop > 0
+        and str(candidate.side).upper() in {"LONG", "SHORT"})
+    geometry = position_cash_geometry(fill=fill, stop=stop, quantity=quantity,
+        exit_price=exit_fill, side=str(candidate.side).upper()) if valid_geometry else {}
+    raw_costs = market_ctx.get("realized_costs_usd")
+    raw_costs = raw_costs if isinstance(raw_costs, Mapping) else {}
+    cost_source = str(market_ctx.get("realized_cost_source") or "UNAVAILABLE").strip()
+    costs = {
+        "spread_cost": sum_cash([raw_costs.get("entry_spread"), raw_costs.get("exit_spread")]),
+        "entry_slippage_cost": raw_costs.get("entry_slippage"),
+        "exit_slippage_cost": raw_costs.get("exit_slippage"),
+        "fee_cost": sum_cash([raw_costs.get("entry_fee"), raw_costs.get("exit_fee")]),
+        "funding_cost": raw_costs.get("funding"),
+        "latency_cost": raw_costs.get("latency_impact_penalty"),
+        "volatility_penalty": raw_costs.get("volatility_penalty", 0.0),
+        "liquidity_penalty": raw_costs.get("liquidity_penalty", 0.0),
+    }
+    missing = []
+    for key, value in raw_costs.items():
+        parsed = finite_cash(value)
+        if parsed is None or (parsed < 0 and key != "funding"):
+            missing.append(key)
+    if cost_source in {"UNAVAILABLE", "UNKNOWN", ""}:
+        missing.append("realized_cost_source")
+    # Entry price already embeds slippage. A second cash debit would double count it.
+    if finite_cash(raw_costs.get("entry_slippage")) != 0:
+        missing.append("entry_slippage_already_in_fill")
+    if after != "POSITION_CLOSED" or market_ctx.get("ambiguous_intrabar"):
+        missing.append("unresolved_lifecycle")
+    accounting = realized_cash_ledger(gross_pnl=geometry.get("gross_pnl_usd"),
+        initial_risk=geometry.get("initial_risk_usd"), costs=costs, missing=missing)
+    net_pnl_usdt = accounting["net_pnl_usd"]
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
     effective_rr, reject_flags, cost_breakdown = _execution_reject_flags(candidate.rr, market_ctx)
     return LifecycleRow(
-        candidate.timestamp,
+        closed_ts,
         candidate.symbol,
         candidate.side,
         candidate.setup_type,
@@ -1456,8 +1722,19 @@ def finalize(
         trigger_price=trigger_price,
         close_price=close_price,
         close_reason=close_reason,
-        net_pnl_pct=pnl_pct,
+        net_pnl_pct=None if net_pnl_usdt is None or not quantity or not fill else net_pnl_usdt / (quantity * fill) * 100,
+        legacy_price_return_pct=pnl_pct,
         net_pnl_usdt=net_pnl_usdt,
+        gross_pnl_usd=geometry.get("gross_pnl_usd"),
+        initial_risk_usd=geometry.get("initial_risk_usd"),
+        gross_r=geometry.get("gross_r"),
+        net_r=accounting["net_r"], total_cost_usd=accounting["total_cost_usd"],
+        filled_quantity=quantity, closed_timestamp=closed_ts,
+        realized_evidence_status="COMPLETE" if not accounting["missing_fields"] else "INCOMPLETE",
+        realized_cost_source=cost_source,
+        realized_costs_json=json.dumps({k: finite_cash(v) for k, v in raw_costs.items()}, sort_keys=True),
+        realized_missing_fields=json.dumps(accounting["missing_fields"]),
+        legacy_approx_pnl_usdt=None if scale is None else balance * risk_pct / 100 * scale * pnl_pct / 100,
         hold_minutes=hold,
         order_type=candidate.order_type,
         expectancy_bucket=candidate.expectancy_bucket,
@@ -1621,7 +1898,10 @@ def process_backtest_result(
     setup_type = diagnostics.get("setup_type", mctx.get("setup_type", ""))
     setup_reason = diagnostics.get("setup_reason", mctx.get("setup_reason", ""))
     regime = diagnostics.get("regime", mctx.get("regime", ""))
-    score = float(diagnostics.get("score", mctx.get("score", 0.0)) or 0.0)
+    score_status = str(diagnostics.get("score_status", "SCORED") or "SCORED").upper()
+    score_unavailable = score_status == "NOT_SCORED_MTF_REJECT"
+    score = None if score_unavailable else float(diagnostics.get("score", mctx.get("score", 0.0)) or 0.0)
+    score_for_policy = float(score or 0.0)
     rr = float(diagnostics.get("rr", mctx.get("rr", 0.0)) or 0.0)
     entry = float(diagnostics.get("entry", mctx.get("entry", 0.0)) or 0.0)
     sl = float(diagnostics.get("sl", mctx.get("sl", 0.0)) or 0.0)
@@ -1674,7 +1954,7 @@ def process_backtest_result(
             rescue_size_multiplier = sbr.size_multiplier
         else:
             ok, rescue_reason = _rescue_acceptance_allowed(
-            mode=mode, reason=reject_reason, score=score, effective_rr=effective_rr_value, regime=regime,
+            mode=mode, reason=reject_reason, score=score_for_policy, effective_rr=effective_rr_value, regime=regime,
             mctx=mctx, cfg=rescue_config, stats=rescue_stats, recent_stats=recent_stats, open_rows=open_rows, symbol=symbol,
         )
         if not short_breakdown_ok:
@@ -1687,18 +1967,18 @@ def process_backtest_result(
             "original_reject_reason": reject_reason,
             "rescue_size_multiplier": rescue_size_multiplier,
             "rescue_effective_rr": effective_rr_value,
-            "rescue_score": score,
+            "rescue_score": score_for_policy,
             "rescue_mode": mode,
             "rescue_min_shadow_expectancy": getattr(sbr, "min_shadow_expectancy", 0.0) if rescue_reason == SHORT_BREAKDOWN_RESCUE_REASON else None,
         }
         rescued = CandidateOrder(
-            candle.timestamp, symbol, side, entry, sl, tp, rr, setup_type, setup_reason, regime, score, order_type,
+            candle.timestamp, symbol, side, entry, sl, tp, rr, setup_type, setup_reason, regime, score_for_policy, order_type,
             expectancy_bucket=expectancy_bucket, accepted_reason=rescue_reason, original_reject_reason=reject_reason,
             rescue_size_multiplier=rescue_size_multiplier, rescue_effective_rr=effective_rr_value,
             rescue_decision_context=json.dumps(context, sort_keys=True),
         )
-        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True)}
-        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_size_multiplier, market_ctx=sim_ctx)
+        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True), "canonical_rr_stage": diagnostics.get("canonical_rr_stage") if isinstance(diagnostics, Mapping) else None}
+        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct, market_ctx=sim_ctx)
         if portfolio_state is not None:
             candidate_notional = portfolio_state.notional_for(entry=rescued.entry, balance=balance, risk_pct=risk_pct, risk_scale=rescue_size_multiplier, notional=mctx.get("notional"))
             position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
@@ -1743,6 +2023,8 @@ def process_backtest_result(
             status_after="SIGNAL_CREATED",
             order_type=order_type,
             expectancy_bucket=expectancy_bucket,
+            event_flags=score_status if score_unavailable else "",
+            expectancy_available=not score_unavailable,
             volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
             spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
             funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
@@ -1793,6 +2075,8 @@ def process_backtest_result(
                 reject_reason=reason,
                 order_type=order_type,
                 expectancy_bucket=expectancy_bucket,
+                event_flags=score_status if score_unavailable else "",
+                expectancy_available=not score_unavailable,
                 volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
                 spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
                 funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
@@ -1822,7 +2106,7 @@ def process_backtest_result(
                 "setup_reason": setup_reason,
                 "regime": regime,
                 "score": score,
-                "gate_score": _safe_float(diagnostics.get("score"), score),
+                "gate_score": None if score_unavailable else _safe_float(diagnostics.get("score"), score_for_policy),
                 "rr": rr,
                 "expectancy": expectancy,
                 "quality_score": diagnostics.get("quality_score", 0.0),
@@ -1979,7 +2263,13 @@ def process_backtest_result(
         return None
 
     risk_scale = min(1.0, max(0.0, _safe_float(diagnostics.get("risk_scale"), 1.0))) if isinstance(diagnostics, dict) else 1.0
-    sim_ctx = {**dict(mctx), "risk_scale": risk_scale}
+    sim_ctx = {
+        **dict(mctx),
+        "risk_scale": risk_scale,
+        "canonical_rr_stage": (
+            diagnostics.get("canonical_rr_stage") if isinstance(diagnostics, Mapping) else None
+        ),
+    }
     if isinstance(diagnostics, dict):
         for key in ("bypassed_reject_reasons", "disabled_filters", "disabled_filter_bypass_count", "filter_switch_experiment_active"):
             if key in diagnostics:
@@ -1988,7 +2278,7 @@ def process_backtest_result(
         for key in ("stop_too_wide_softened", "original_reject_reason", "reject_reason_softened"):
             if key in diagnostics:
                 sim_ctx[key] = diagnostics[key]
-    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct * risk_scale, market_ctx=sim_ctx)
+    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=sim_ctx)
     if portfolio_state is not None:
         candidate_notional = portfolio_state.notional_for(entry=cand.entry, balance=balance, risk_pct=risk_pct, risk_scale=risk_scale, notional=mctx.get("notional"))
         position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
@@ -2200,10 +2490,23 @@ def _persist_lifecycle_rows(
                 "take_profit": row.tp,
                 "exit_price": row.close_price,
                 "close_price": row.close_price,
-                "gross_pnl": row.net_pnl_usdt,
+                "gross_pnl": row.gross_pnl_usd,
+                "initial_risk_usd": row.initial_risk_usd,
+                "total_cost_usd": row.total_cost_usd,
+                "gross_r": row.gross_r, "net_r": row.net_r,
+                "filled_quantity": row.filled_quantity,
+                "realized_accounting_version": row.realized_accounting_version,
+                "realized_evidence_status": row.realized_evidence_status,
+                "realized_cost_source": row.realized_cost_source,
+                "realized_costs_json": row.realized_costs_json,
+                "closed_timestamp": row.closed_timestamp,
+                "realized_missing_fields": row.realized_missing_fields,
+                "legacy_approx_pnl_usdt": row.legacy_approx_pnl_usdt,
+                "legacy_price_return_pct": row.legacy_price_return_pct,
                 "net_pnl": row.net_pnl_usdt,
                 "net_pnl_usdt": row.net_pnl_usdt,
-                "fees": row.cost_penalty,
+                "fees": None if row.total_cost_usd is None else sum_cash(
+                    json.loads(row.realized_costs_json).get(key) for key in ("entry_fee", "exit_fee")),
                 "accepted_reason": row.accepted_reason,
                 "original_reject_reason": row.original_reject_reason,
                 "rescue_size_multiplier": row.rescue_size_multiplier,
@@ -2214,6 +2517,7 @@ def _persist_lifecycle_rows(
                 "disabled_filter_bypass_count": row.disabled_filter_bypass_count,
                 "filter_switch_experiment_active": row.filter_switch_experiment_active,
                 "source_stage": row.source_stage or source_stage,
+                "event_flags": row.event_flags,
                 "rr_available": row.rr_available,
                 "effective_rr_available": row.effective_rr_available,
                 "expectancy_available": row.expectancy_available,
@@ -2325,6 +2629,15 @@ def _persist_lifecycle_rows(
                 decision=decision,
                 score=row.score,
                 raw_rr=row.rr,
+                candidate_raw_rr=(
+                    _sql_nullable_number(row.candidate_raw_rr)
+                    if row.candidate_raw_rr is not None
+                    else row.rr
+                ),
+                executable_raw_rr=_sql_nullable_number(row.executable_raw_rr),
+                remaining_execution_penalty=_sql_nullable_number(row.remaining_execution_penalty),
+                rr_basis=row.rr_basis,
+                execution_cost_semantics=row.execution_cost_semantics,
                 effective_rr=effective_rr,
                 min_effective_rr=min_effective_rr,
                 expectancy=None,
@@ -2337,8 +2650,8 @@ def _persist_lifecycle_rows(
                 tp=row.tp,
                 trigger_price=row.trigger_price or None,
                 close_price=row.close_price or None,
-                net_pnl_pct=row.net_pnl_pct if row.net_pnl_pct != 0.0 else (0.0 if row.close_reason else None),
-                net_pnl_usdt=row.net_pnl_usdt if row.net_pnl_usdt != 0.0 else (0.0 if row.close_reason else None),
+                net_pnl_pct=row.net_pnl_pct,
+                net_pnl_usdt=row.net_pnl_usdt,
                 hold_minutes=row.hold_minutes if row.hold_minutes != 0.0 else (0.0 if row.close_reason else None),
                 volume_24h_usdt=_sql_nullable_number(row.volume_24h_usdt),
                 spread_pct=_sql_nullable_number(row.spread_pct),
@@ -2413,6 +2726,7 @@ def _persist_lifecycle_rows(
                        json_extract(execution_ctx, '$.funding_rate_pct') AS funding_rate_pct,
                        json_extract(execution_ctx, '$.volume_24h_usdt') AS volume_24h_usdt,
                        json_extract(execution_ctx, '$.accepted_reason') AS accepted_reason,
+                       json_extract(execution_ctx, '$.event_flags') AS event_flags,
                        json_extract(execution_ctx, '$.side') AS side,
                        json_extract(execution_ctx, '$.entry') AS entry,
                        json_extract(execution_ctx, '$.sl') AS sl,
@@ -2421,6 +2735,18 @@ def _persist_lifecycle_rows(
                        json_extract(execution_ctx, '$.close_price') AS close_price,
                        json_extract(execution_ctx, '$.close_reason') AS close_reason,
                        json_extract(execution_ctx, '$.gross_pnl') AS gross_pnl,
+                       json_extract(execution_ctx, '$.initial_risk_usd') AS initial_risk_usd,
+                       json_extract(execution_ctx, '$.total_cost_usd') AS total_cost_usd,
+                       json_extract(execution_ctx, '$.gross_r') AS gross_r,
+                       json_extract(execution_ctx, '$.net_r') AS net_r,
+                       json_extract(execution_ctx, '$.filled_quantity') AS filled_quantity,
+                       json_extract(execution_ctx, '$.closed_timestamp') AS closed_timestamp,
+                       json_extract(execution_ctx, '$.realized_accounting_version') AS realized_accounting_version,
+                       json_extract(execution_ctx, '$.realized_evidence_status') AS realized_evidence_status,
+                       json_extract(execution_ctx, '$.realized_cost_source') AS realized_cost_source,
+                       json_extract(execution_ctx, '$.realized_costs_json') AS realized_costs_json,
+                       json_extract(execution_ctx, '$.legacy_approx_pnl_usdt') AS legacy_approx_pnl_usdt,
+                       json_extract(execution_ctx, '$.legacy_price_return_pct') AS legacy_price_return_pct,
                        json_extract(execution_ctx, '$.net_pnl') AS net_pnl,
                        json_extract(execution_ctx, '$.net_pnl_usdt') AS net_pnl_usdt,
                        json_extract(execution_ctx, '$.fees') AS fees,
@@ -2484,6 +2810,8 @@ def _decision_evidence_rows(database_url: str | None = None, *, mode: str = "BAC
                 """
                 SELECT evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
                        setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
+                       candidate_raw_rr, executable_raw_rr, remaining_execution_penalty, rr_basis,
+                       execution_cost_semantics,
                        effective_rr, min_effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
                        entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes,
                        volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score,
@@ -2760,9 +3088,9 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         "rescue_rejected_count": 0,
         "rescue_accepted_would_tp_count": sum(1 for r in rescue_closed if str(r.get("close_reason", "")).upper() == "TP_HIT"),
         "rescue_accepted_would_sl_count": sum(1 for r in rescue_closed if str(r.get("close_reason", "")).upper() == "SL_HIT"),
-        "rescue_accepted_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in rescue_closed),
-        "baseline_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in baseline_closed),
-        "baseline_plus_rescue_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in baseline_closed + rescue_closed),
+        "rescue_accepted_net_pnl": sum_cash(r.get("net_pnl_usdt") for r in rescue_closed),
+        "baseline_net_pnl": sum_cash(r.get("net_pnl_usdt") for r in baseline_closed),
+        "baseline_plus_rescue_net_pnl": sum_cash(r.get("net_pnl_usdt") for r in baseline_closed + rescue_closed),
         "rescue_avg_effective_rr": (sum(_safe_float(r.get("rescue_effective_rr"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
         "rescue_avg_score": (sum(_safe_float(r.get("score"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
         "rescue_reject_reasons": {},
@@ -2794,7 +3122,7 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         "acceptance_candidates_near_threshold_count": len(near_threshold),
         "accepted_trade_quality_diagnostics": _accepted_quality_diagnostics(accepted_rows, candidate_rows),
         "score_calibration_diagnostics": _score_calibration_diagnostics(candidate_rows),
-        "disabled_filter_acceptance_evidence": {"disabled_filters": _distribution([r.get("disabled_filters", "") for r in candidate_rows if str(r.get("disabled_filters", "")) not in {"", "[]"}]), "accepted_because_filter_disabled_count": sum(int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) for r in accepted_rows), "estimated_pnl_impact_usdt": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0) for r in accepted_rows if int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) > 0)},
+        "disabled_filter_acceptance_evidence": {"disabled_filters": _distribution([r.get("disabled_filters", "") for r in candidate_rows if str(r.get("disabled_filters", "")) not in {"", "[]"}]), "accepted_because_filter_disabled_count": sum(int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) for r in accepted_rows), "estimated_pnl_impact_usdt": sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in accepted_rows if int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) > 0)},
     }
 
 
@@ -2847,12 +3175,12 @@ def _accepted_quality_diagnostics(accepted_rows: List[Mapping[str, Any]], candid
             b["tp"] += int(o == "TP_HIT")
             b["sl"] += int(o == "SL_HIT")
             b["open"] += int(o in {"OPEN_AT_END", "OPEN", "CANCELLED", "UNKNOWN"})
-            b["net_pnl"] += _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+            b["net_pnl"] = sum_cash([b["net_pnl"], r.get("net_pnl_usdt", r.get("net_pnl"))])
         for b in out.values():
             n = max(1, int(b["count"]))
             b["tp_rate"] = b["tp"] / n
             b["sl_rate"] = b["sl"] / n
-            b["expectancy"] = b["net_pnl"] / n
+            b["expectancy"] = mean_cash(b["net_pnl"], n)
         return out
 
     enriched = []
@@ -2888,7 +3216,7 @@ def _score_calibration_diagnostics(candidate_rows: List[Mapping[str, Any]]) -> D
         b["tp"] += int(outcome in {"TP_HIT", "WOULD_TP"})
         b["sl"] += int(outcome in {"SL_HIT", "WOULD_SL"})
         b["timeout"] += int(outcome in {"WOULD_TIMEOUT", "OPEN_AT_END"})
-        b["net_pnl"] += _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+        b["net_pnl"] = sum_cash([b["net_pnl"], r.get("net_pnl_usdt", r.get("net_pnl"))])
         eff = _safe_float(r.get("effective_rr"), -1.0)
         if eff >= 0:
             b["effective_rr_sum"] += eff; b["effective_rr_count"] += 1
@@ -2896,7 +3224,7 @@ def _score_calibration_diagnostics(candidate_rows: List[Mapping[str, Any]]) -> D
         b["expectancy_buckets"][eb] = b["expectancy_buckets"].get(eb, 0) + 1
     for b in out.values():
         n = max(1, int(b["count"]))
-        b["tp_rate"] = b["tp"] / n; b["sl_rate"] = b["sl"] / n; b["net_pnl_per_signal"] = b["net_pnl"] / n
+        b["tp_rate"] = b["tp"] / n; b["sl_rate"] = b["sl"] / n; b["net_pnl_per_signal"] = mean_cash(b["net_pnl"], n)
         b["mean_effective_rr"] = b["effective_rr_sum"] / b["effective_rr_count"] if b["effective_rr_count"] else None
     return {"score_10_saturation_count": sum(1 for r in rows if _safe_float(r.get("score"), -1.0) >= 10.0), "by_score_bucket": out}
 
@@ -2932,17 +3260,17 @@ def build_accepted_loss_diagnostics(rows: List[Mapping[str, Any]]) -> Dict[str, 
         for r in enriched:
             key = str(key_func(r) or "UNKNOWN")
             b = grouped.setdefault(key, {"count": 0, "wins": 0, "losses": 0, "open": 0, "net_pnl": 0.0, "tp_gain_sum": 0.0, "tp_count": 0, "sl_loss_sum": 0.0, "sl_count": 0})
-            pnl = _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+            pnl = finite_cash(r.get("net_pnl_usdt", r.get("net_pnl")))
             o = outcome(r)
-            b["count"] += 1; b["net_pnl"] += pnl
+            b["count"] += 1; b["net_pnl"] = sum_cash([b["net_pnl"], pnl])
             b["wins"] += int(o == "TP_HIT"); b["losses"] += int(o == "SL_HIT"); b["open"] += int(o not in {"TP_HIT", "SL_HIT"})
-            if o == "TP_HIT": b["tp_gain_sum"] += pnl; b["tp_count"] += 1
-            if o == "SL_HIT": b["sl_loss_sum"] += pnl; b["sl_count"] += 1
+            if o == "TP_HIT": b["tp_gain_sum"] = sum_cash([b["tp_gain_sum"], pnl]); b["tp_count"] += 1
+            if o == "SL_HIT": b["sl_loss_sum"] = sum_cash([b["sl_loss_sum"], pnl]); b["sl_count"] += 1
         for key, b in grouped.items():
             n = max(1, int(b["count"]))
             b["win_rate"] = b["wins"] / n; b["loss_rate"] = b["losses"] / n
-            b["avg_tp_gain"] = b["tp_gain_sum"] / b["tp_count"] if b["tp_count"] else 0.0
-            b["avg_sl_loss"] = b["sl_loss_sum"] / b["sl_count"] if b["sl_count"] else 0.0
+            b["avg_tp_gain"] = mean_cash(b["tp_gain_sum"], b["tp_count"]) if b["tp_count"] else 0.0
+            b["avg_sl_loss"] = mean_cash(b["sl_loss_sum"], b["sl_count"]) if b["sl_count"] else 0.0
             flat_rows.append({"grouping": grouping, "bucket": key, **b})
         return grouped
 
@@ -2960,7 +3288,7 @@ def build_accepted_loss_diagnostics(rows: List[Mapping[str, Any]]) -> Dict[str, 
         "by": by,
         "rows": flat_rows,
         "high_effective_rr_accepted_outcome_split": _distribution([outcome(r) for r in high_rr]),
-        "score_10_accepted_net_pnl": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0) for r in score10),
+        "score_10_accepted_net_pnl": sum_cash(r.get("net_pnl_usdt", r.get("net_pnl")) for r in score10),
     }
 
 def build_filter_profile_comparison_artifact(summary: Mapping[str, Any], quality_summary: Mapping[str, Any], filter_state: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2973,8 +3301,8 @@ def build_filter_profile_comparison_artifact(summary: Mapping[str, Any], quality
         "win": _safe_float(summary.get("tp_hits"), 0.0),
         "loss": _safe_float(summary.get("sl_hits"), 0.0),
         "open": _safe_float(summary.get("open_at_end"), 0.0),
-        "net_pnl": _safe_float(summary.get("total_net_pnl_usdt"), 0.0),
-        "return": _safe_float(summary.get("total_pnl_pct"), 0.0),
+        "net_pnl": finite_cash(summary.get("total_net_pnl_usdt")),
+        "return": finite_cash(summary.get("total_pnl_pct")),
         "accepted_effective_rr_distribution": quality_summary.get("accepted_trade_quality_diagnostics", {}).get("by_effective_rr_bucket", {}),
         "score_calibration": quality_summary.get("score_calibration_diagnostics", {}),
         "top_reject_reasons": quality_summary.get("reject_reason_distribution", {}),
@@ -2991,7 +3319,14 @@ def _accepted_terminal_rows_for_risk(lifecycle_rows: List[LifecycleRow]) -> List
         r for r in lifecycle_rows
         if not r.reject_reason and r.status_after in {"POSITION_CLOSED", "OPEN_AT_END", "TP_HIT", "SL_HIT"}
     ]
-    return sorted(rows, key=lambda r: (r.timestamp, r.symbol, r.side))
+    ordered = sorted(rows, key=lambda r: (r.closed_timestamp or r.timestamp, r.symbol, r.side))
+    unique, seen = [], set()
+    for row in ordered:
+        key = row.position_id or id(row)
+        if key not in seen:
+            unique.append(row)
+            seen.add(key)
+    return unique
 
 
 def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balance: float) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -3003,7 +3338,14 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
     gross_profit = gross_loss = 0.0
     curve: List[Dict[str, Any]] = []
     for idx, row in enumerate(_accepted_terminal_rows_for_risk(lifecycle_rows), start=1):
-        pnl = float(row.net_pnl_usdt or 0.0)
+        pnl = finite_cash(row.net_pnl_usdt)
+        if pnl is None or equity is None:
+            equity = None
+            curve.append({"trade_index": idx, "timestamp": row.closed_timestamp or row.timestamp, "symbol": row.symbol,
+                "side": row.side, "close_reason": row.close_reason or row.status_after,
+                "net_pnl_usdt": pnl, "equity": None, "peak_equity": None,
+                "drawdown": None, "drawdown_pct": None})
+            continue
         equity += pnl
         peak = max(peak, equity)
         drawdown = equity - peak
@@ -3019,7 +3361,7 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
         longest_loss = max(longest_loss, cur_loss)
         longest_win = max(longest_win, cur_win)
         curve.append({
-            "trade_index": idx, "timestamp": row.timestamp, "symbol": row.symbol, "side": row.side,
+            "trade_index": idx, "timestamp": row.closed_timestamp or row.timestamp, "symbol": row.symbol, "side": row.side,
             "close_reason": row.close_reason or row.status_after, "net_pnl_usdt": pnl,
             "equity": equity, "peak_equity": peak, "drawdown": drawdown, "drawdown_pct": drawdown_pct,
         })
@@ -3030,6 +3372,11 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
         "longest_win_streak": longest_win,
         "profit_factor": (gross_profit / gross_loss if gross_loss else (float("inf") if gross_profit else 0.0)),
     }
+    metrics["realized_evidence_status"] = "COMPLETE" if equity is not None else "INCOMPLETE"
+    metrics["ending_equity"] = equity
+    if equity is None:
+        for key in ("max_drawdown", "max_drawdown_pct", "longest_loss_streak", "longest_win_streak", "profit_factor"):
+            metrics[key] = None
     return curve, metrics
 
 
@@ -3052,17 +3399,25 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
     score10_after = [r for r in accepted_after if float(r.score or 0.0) >= cfg.saturated_score_threshold]
     high_vol_after = [r for r in accepted_after if _is_high_vol_context(r.regime, {"volatility_regime": r.volatility_regime})]
     reasons = []
-    net = _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
-    pf = _safe_float(summary.get("profit_factor"), 0.0)
-    dd = abs(_safe_float(summary.get("max_drawdown_pct"), 0.0))
-    loss = int(_safe_float(summary.get("longest_loss_streak"), 0.0))
+    net = finite_cash(summary.get("total_net_pnl_usdt"))
+    pf = finite_cash(summary.get("profit_factor"))
+    # Infinite PF is valid for a measured, cost-complete all-winning series.
+    if summary.get("profit_factor") == float("inf"):
+        pf = float("inf")
+    raw_dd = finite_cash(summary.get("max_drawdown_pct"))
+    dd = None if raw_dd is None else abs(raw_dd)
+    loss = finite_cash(summary.get("longest_loss_streak"))
     avg_day = before_count / max(1, int(_safe_float(summary.get("requested_last_n_days"), 1.0)))
     score10_tp = sum(1 for r in score10_after if r.close_reason == "TP_HIT")
     score10_sl = sum(1 for r in score10_after if r.close_reason == "SL_HIT")
-    if net <= 0: reasons.append("NET_PNL_NOT_POSITIVE")
-    if pf < cfg.min_profit_factor_for_profile_pass: reasons.append("PROFIT_FACTOR_BELOW_MIN")
-    if dd > cfg.max_drawdown_pct_for_profile_pass: reasons.append("MAX_DRAWDOWN_TOO_HIGH")
-    if loss > cfg.max_loss_streak_for_profile_pass: reasons.append("LOSS_STREAK_TOO_HIGH")
+    if net is None: reasons.append("REALIZED_NET_EVIDENCE_INCOMPLETE")
+    elif net <= 0: reasons.append("NET_PNL_NOT_POSITIVE")
+    if pf is None: reasons.append("PROFIT_FACTOR_UNAVAILABLE")
+    elif pf < cfg.min_profit_factor_for_profile_pass: reasons.append("PROFIT_FACTOR_BELOW_MIN")
+    if dd is None: reasons.append("DRAWDOWN_UNAVAILABLE")
+    elif dd > cfg.max_drawdown_pct_for_profile_pass: reasons.append("MAX_DRAWDOWN_TOO_HIGH")
+    if loss is None: reasons.append("LOSS_STREAK_UNAVAILABLE")
+    elif loss > cfg.max_loss_streak_for_profile_pass: reasons.append("LOSS_STREAK_TOO_HIGH")
     if avg_day > cfg.max_accepted_trades_per_day: reasons.append("OVERTRADE_RISK")
     if score10_sl > score10_tp: reasons.append("SCORE_SATURATION_RISK")
     if cfg.profile in {"HIGH_VOL_MOMENTUM_DIAGNOSTIC", "HIGH_VOL_GUARD_OFF_DIAGNOSTIC", "VOL_GUARD_RELAXED_DIAGNOSTIC"}:
@@ -3080,7 +3435,7 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
         "trade_count_before_after": {"before": before_count, "after": len(accepted_after)},
         "loss_streak_before_after": {"before": None, "after": loss},
         "profit_factor_before_after": {"before": None, "after": pf},
-        "max_drawdown_before_after": {"before": None, "after": _safe_float(summary.get("max_drawdown_pct"), 0.0)},
+        "max_drawdown_before_after": {"before": None, "after": raw_dd},
         "score10_tp_sl_before_after": {"before": None, "after": {"tp": score10_tp, "sl": score10_sl}},
         "high_vol_trade_count_before_after": {"before": None, "after": len(high_vol_after)},
         "diagnostic_profile_warning": HIGH_VOL_GUARD_DIAGNOSTIC_WARNING if cfg.profile == "HIGH_VOL_GUARD_OFF_DIAGNOSTIC" else "",
@@ -3487,7 +3842,7 @@ def build_symbol_regime_acceptance_diagnostics(lifecycle_rows: List[LifecycleRow
             "tp_count": cnt(rows, "TP_HIT"), "sl_count": cnt(rows, "SL_HIT"),
             "tp_rate": cnt(rows, "TP_HIT") / n if n else 0.0, "sl_rate": cnt(rows, "SL_HIT") / n if n else 0.0,
             "mean_effective_rr": sum(_safe_float(r.effective_rr if r.effective_rr is not None else r.rr, 0.0) for r in rows) / n if n else 0.0,
-            "mean_net_pnl": sum(float(r.net_pnl_usdt or 0.0) for r in rows) / n if n else 0.0,
+            "mean_net_pnl": mean_cash(sum_cash(r.net_pnl_usdt for r in rows), n),
             "score_10_tp_count": cnt(score10, "TP_HIT"), "score_10_sl_count": cnt(score10, "SL_HIT"),
             "high_regime_tp_count": cnt(high, "TP_HIT"), "high_regime_sl_count": cnt(high, "SL_HIT"),
             "normal_regime_tp_count": cnt(normal, "TP_HIT"), "normal_regime_sl_count": cnt(normal, "SL_HIT"),
@@ -3569,7 +3924,8 @@ def verify_export_integrity(
         if expectancy_bucket == "":
             errors.append(f"lifecycle row index={idx} missing expectancy_bucket")
         signal_terminals.setdefault(signal_id, set()).add(lifecycle_state)
-        if lifecycle_state == "SIGNAL_CREATED":
+        score_status = str(row.get("event_flags", "") or "").strip().upper()
+        if lifecycle_state == "SIGNAL_CREATED" and score_status != "NOT_SCORED_MTF_REJECT":
             score_by_signal[signal_id] = row.get("score")
             rr_by_signal[signal_id] = row.get("rr")
         ctx = _decode_execution_ctx(row.get("execution_ctx"))
@@ -4617,20 +4973,21 @@ def build_score_calibration_artifacts(records: List[Mapping[str, Any]]) -> tuple
     summary={"total_rows": len(rows), "score_source_interpretation": "BACKTEST score mixes breakout/range strength, raw RR expectancy, and execution context; PAPER/LIVE AIBrain score is probabilistic quality after costs. Diagnostics test both raw WOULD_TP and effective_tp_hit.", "pearson_score_would_tp": pear_raw, "spearman_score_would_tp": _spearman(xs, raw_y) if len(xs)==len(raw_y) else None, "pearson_score_effective_tp_hit": pear_eff, "spearman_score_effective_tp_hit": _spearman(xs, eff_y) if len(xs)==len(eff_y) else None, "monotonicity": {"score_bucket_count": len(bucket_rows), "violations": monotonic_violations, "generally_improves_with_score": monotonic_violations == 0}, "miscalibration_flags": sorted(set(flags)), "thresholds_changed": False, "acceptance_logic_changed": False, "calibrated_score_scope": "BACKTEST_DIAGNOSTIC_ONLY", "calibrated_score_future_leakage": "NO_FORWARD_OUTCOME_FIELDS_USED; row-local pre-decision score/RR/execution/volatility/stop-distance fields only"}
     return diagnostics, summary
 
-def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig, baseline_net_pnl: float = 0.0) -> Dict[str, Any]:
+def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig, baseline_net_pnl: float | None = None) -> Dict[str, Any]:
     rejected = [r for r in records if r.get("source") == "REJECTED_SHADOW"]
     mode_ok = "BACKTEST" in {m.upper() for m in cfg.modes}
     candidates: List[Dict[str, Any]] = []
     rejected_reasons: Dict[str, int] = {}
     daily_counts: Dict[str, int] = {}
-    for r in rejected:
+    for original in rejected:
+        r = dict(original)
         if "stop_distance_pct_bucket" not in r:
             r["stop_distance_pct_bucket"] = _bucket_quality(r.get("stop_distance_pct"), [0.75, 1.5], ["TIGHT", "NORMAL", "WIDE"])
         reason = str(r.get("reject_reason", "")).upper()
-        eff = _quality_float(r.get("effective_rr"))
-        score = _quality_float(r.get("score"))
-        spread = _quality_float(r.get("spread_pct"))
-        slip = _quality_float(r.get("expected_slippage_pct"))
+        eff = finite_cash(r.get("effective_rr"))
+        score = finite_cash(r.get("score"))
+        spread = finite_cash(r.get("spread_pct"))
+        slip = finite_cash(r.get("expected_slippage_pct"))
         stop_bucket = str(r.get("stop_distance_pct_bucket") or "").upper()
         blocked = (
             not cfg.enabled or not mode_ok or cfg.allowed_gate_name != QUALITY_GATE_NAME
@@ -4662,11 +5019,39 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
     tp = sum(1 for r in candidates if r.get("outcome") == "WOULD_TP")
     sl = sum(1 for r in candidates if r.get("outcome") == "WOULD_SL")
     unknown = sum(1 for r in candidates if r.get("outcome") not in {"WOULD_TP", "WOULD_SL"})
-    eff_vals = [_quality_float(r.get("effective_rr")) for r in candidates]
+    eff_vals = [finite_cash(r.get("effective_rr")) for r in candidates]
     eff_vals = [v for v in eff_vals if v is not None]
-    expected = (sum((( _quality_float(r.get("effective_rr")) or 0.0) if r.get("outcome") == "WOULD_TP" else (-1.0 if r.get("outcome") == "WOULD_SL" else 0.0)) for r in candidates) / len(candidates)) if candidates else 0.0
-    sized_expected = expected * cfg.size_multiplier * len(candidates)
+    # This population is selected using future WOULD_TP outcomes. Its effective
+    # RR is a retrospective R diagnostic, not realized net R or a causal forecast.
+    expected = finite_cash(sum(eff_vals) / len(eff_vals)) if eff_vals else None
+    size = finite_cash(cfg.size_multiplier)
+    valid_size = size is not None and 0 <= size <= 1
+    sized_expected = finite_cash(sum(eff_vals) * size) if valid_size else None
+    baseline_cash = finite_cash(baseline_net_pnl)
+    reported_risk = [{
+        "symbol": r.get("symbol"), "timestamp": r.get("timestamp"),
+        "reported_initial_risk_usdt": finite_cash(r.get("initial_risk_usd")),
+        "reported_risk_scale": finite_cash(r.get("risk_scale")),
+        "source": str(r.get("initial_risk_source") or "UNAVAILABLE"),
+        "status": "UNVERIFIED_DIAGNOSTIC_INPUT",
+    } for r in candidates]
     return {
+        "quality_gate_schema_version": "QUALITY_GATE_DIAGNOSTIC_V2",
+        "quality_gate_authority": "DIAGNOSTIC_ONLY",
+        "quality_gate_selection_basis": "RETROSPECTIVE_WOULD_TP_CONDITIONED",
+        "quality_gate_uses_future_outcomes": True,
+        "quality_gate_decision_time_eligible": False,
+        "quality_gate_promotion_eligible": False,
+        "quality_gate_baseline_realized_net_pnl_usdt": baseline_cash,
+        "quality_gate_baseline_evidence_status": "AVAILABLE" if baseline_cash is not None else "UNAVAILABLE",
+        "quality_gate_counterfactual_expectancy_r": expected,
+        "quality_gate_counterfactual_scaled_total_r": sized_expected,
+        "quality_gate_r_basis": "DECISION_EFFECTIVE_RR_NOT_REALIZED_NET_R",
+        "quality_gate_r_evidence_status": "UNAVAILABLE_INVALID_SCALE" if not valid_size else "NO_SAMPLE" if not candidates else "AVAILABLE_RETROSPECTIVE_ONLY",
+        "quality_gate_candidate_risk_evidence_json": json.dumps(reported_risk, sort_keys=True),
+        "quality_gate_counterfactual_cash_usdt": None,
+        "quality_gate_cash_evidence_status": "UNAVAILABLE_NO_CAUSAL_CLOSURE_COST_MODEL",
+        "quality_gate_combined_net_pnl_status": "DEPRECATED_INCOMPATIBLE_UNITS_AND_AUTHORITY",
         "quality_gate_enabled": cfg.enabled,
         "quality_gate_mode": ",".join(cfg.modes),
         "quality_gate_candidate_count": len(candidates),
@@ -4676,9 +5061,9 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
         "quality_gate_would_sl_count": sl,
         "quality_gate_unknown_count": unknown,
         "quality_gate_tp_rate": tp / (tp + sl) if (tp + sl) else 0.0,
-        "quality_gate_mean_effective_rr": (sum(eff_vals) / len(eff_vals)) if eff_vals else 0.0,
+        "quality_gate_mean_effective_rr": expected,
         "quality_gate_expected_effective_expectancy": expected,
-        "baseline_plus_quality_gate_net_pnl": baseline_net_pnl + sized_expected,
+        "baseline_plus_quality_gate_net_pnl": None,
         "quality_gate_size_multiplier": cfg.size_multiplier,
         "quality_gate_reason_breakdown": _distribution([r.get("reject_reason") for r in candidates]),
         "quality_gate_symbol_breakdown": _distribution([r.get("symbol") for r in candidates]),
@@ -4686,7 +5071,7 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
         "quality_gate_rejected_reason_breakdown": rejected_reasons,
     }
 
-def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation], timeframe: str, thresholds: List[float] | None = None, quality_gate_config: Optional[QualityGateConfig] = None, baseline_net_pnl: float = 0.0) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation], timeframe: str, thresholds: List[float] | None = None, quality_gate_config: Optional[QualityGateConfig] = None, baseline_net_pnl: float | None = None) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     thresholds = thresholds or [1.7, 1.9, 2.1, 2.3]
     records = [_quality_record_from_lifecycle(r, timeframe) for r in accepted_rows] + [_quality_record_from_shadow(s, timeframe) for s in shadows]
     for r in records:
@@ -4865,7 +5250,7 @@ def main():
     p.add_argument("--start")
     p.add_argument("--end")
     p.add_argument("--last-n-days", type=int, default=7)
-    p.add_argument("--top-n", "--max-symbols", dest="top_n", type=int, default=cfg.backtest.top_n)
+    p.add_argument("--top-n", "--max-symbols", dest="top_n", type=int, default=cfg.runtime.max_symbols_per_scan)
     p.add_argument("--quote", default="USDT")
     p.add_argument("--interval", default=cfg.backtest.timeframe)
     p.add_argument("--output-dir", default=cfg.backtest.output_dir)
@@ -4939,17 +5324,53 @@ def main():
         short_breakdown_rescue_enabled=rescue_config.enabled and str(args.mode).upper() == "BACKTEST",
     )
     write_backtest_filter_state_artifacts(args.output_dir, filter_state)
+    universe_selection = None
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
+        mtf_source_by_symbol = dict(candles_by_symbol)
     else:
         fixed_symbols = fixed_symbols_for_state
-        universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
-        _prune_stale_candle_artifacts(args.output_dir, [row["symbol"] for row in universe], args.interval)
+        if fixed_symbols:
+            universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
+        else:
+            universe_constraints = UniverseConstraints(
+                min_market_cap_usd=cfg.runtime.universe_min_market_cap_usd,
+                max_market_cap_usd=cfg.runtime.universe_max_market_cap_usd,
+                min_volume_24h_usd=cfg.runtime.universe_min_volume_24h_usd,
+                candidate_pool_top_n_volume=cfg.runtime.universe_candidate_pool_top_n_volume,
+                max_active_symbols=args.top_n,
+                excluded_symbols=tuple(part.strip() for part in cfg.runtime.universe_excluded_symbols.replace(",", " ").split() if part.strip()),
+                max_evidence_age_sec=cfg.runtime.universe_max_evidence_age_sec,
+                max_spread_pct=cfg.runtime.max_spread_pct,
+                max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct,
+            )
+            universe, universe_selection = build_backtest_universe_selection(
+                args.top_n,
+                args.quote,
+                constraints=universe_constraints,
+            )
+        required_intervals = {args.interval, "1m"}
+        _prune_stale_candle_artifacts(args.output_dir, [row["symbol"] for row in universe], required_intervals)
         candles_by_symbol = {}
+        mtf_source_by_symbol = {}
         for row in universe:
-            c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir, force_refresh=args.force_refresh)
+            c = _closed_candles_at(
+                load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir, force_refresh=args.force_refresh),
+                timeframe=args.interval,
+                end_ms=end_ms,
+            )
             if c:
                 candles_by_symbol[row["symbol"]] = c
+            mtf_source = c if args.interval == "1m" else _closed_candles_at(
+                load_or_fetch_candles(
+                    row["symbol"], "1m", start_ms, end_ms, args.output_dir,
+                    force_refresh=args.force_refresh,
+                ),
+                timeframe="1m",
+                end_ms=end_ms,
+            )
+            if mtf_source:
+                mtf_source_by_symbol[row["symbol"]] = mtf_source
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
     symbol_meta_by_symbol = {row["symbol"]: row for row in universe}
     lifecycle = []
@@ -4978,7 +5399,11 @@ def main():
     backtest_database_url = resolve_backtest_database_url(args.output_dir, root=ROOT_DIR)
     backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
     backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
-    expectancy_session = Session(init_db(backtest_database_url))
+    backtest_engine = init_db(backtest_database_url)
+    if universe_selection is not None:
+        with backtest_engine.begin() as conn:
+            persist_universe_selection(conn, universe_selection)
+    expectancy_session = Session(backtest_engine)
     expectancy_scope = {
         "run_id": os.getenv("ALPHAFORGE_EXPECTANCY_RUN_ID"),
         "campaign_id": os.getenv("ALPHAFORGE_EXPECTANCY_CAMPAIGN_ID"),
@@ -5075,6 +5500,16 @@ def main():
                     "portfolio_config": portfolio_config,
                     "expectancy_bind": expectancy_session,
                     "expectancy_scope": expectancy_scope,
+                    "mtf_source_candles": mtf_source_by_symbol.get(symbol, []),
+                    "simulation_timeframe": args.interval,
+                    "regime_timeframe": getattr(getattr(cfg, "runtime", cfg), "regime_timeframe", "1h"),
+                    "setup_timeframe": getattr(getattr(cfg, "runtime", cfg), "setup_timeframe", "15m"),
+                    "execution_timeframe": getattr(getattr(cfg, "runtime", cfg), "execution_timeframe", "1m"),
+                    "mtf_guided_signal_generation_enabled": getattr(getattr(cfg, "runtime", cfg), "mtf_guided_signal_generation_enabled", True),
+                    "regime_direction_threshold": getattr(getattr(cfg, "runtime", cfg), "regime_direction_threshold", .0005),
+                    "setup_direction_threshold": getattr(getattr(cfg, "runtime", cfg), "setup_direction_threshold", .0003),
+                    "execution_direction_threshold": getattr(getattr(cfg, "runtime", cfg), "execution_direction_threshold", .0005),
+                    "enable_state_direction_resolution": getattr(getattr(cfg, "runtime", cfg), "enable_state_direction_resolution", False),
                 }
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
@@ -5195,8 +5630,9 @@ def main():
         "WOULD_TIMEOUT": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_TIMEOUT"),
     }
     rescue_reason_names = {"HIGH_EFFECTIVE_RR_RESCUE", SHORT_BREAKDOWN_RESCUE_REASON}
-    rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason in rescue_reason_names]
-    baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason not in rescue_reason_names]
+    closed_rows = [r for r in _accepted_terminal_rows_for_risk(lifecycle) if r.status_after == "POSITION_CLOSED"]
+    rescue_closed = [r for r in closed_rows if r.accepted_reason in rescue_reason_names]
+    baseline_closed = [r for r in closed_rows if r.accepted_reason not in rescue_reason_names]
     rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason in rescue_reason_names]
     accepted_reason_breakdown = _distribution([
         r.accepted_reason
@@ -5206,7 +5642,7 @@ def main():
     quality_gate_metrics = _quality_gate_metrics(
         [_quality_record_from_shadow(s, args.interval) for s in rejected_shadow],
         quality_gate_config,
-        baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
+        baseline_net_pnl=sum_cash(r.net_pnl_usdt for r in baseline_closed),
     )
     equity_curve_rows, drawdown_metrics = build_equity_curve_metrics(lifecycle, args.balance)
     gate_funnel_rows = build_default_gate_funnel([asdict(x) for x in rejected_shadow] or rejected, lifecycle)
@@ -5228,9 +5664,9 @@ def main():
         "rescue_rejected_count": rescue_stats.rejected_count,
         "rescue_accepted_would_tp_count": sum(1 for r in rescue_closed if r.close_reason == "TP_HIT"),
         "rescue_accepted_would_sl_count": sum(1 for r in rescue_closed if r.close_reason == "SL_HIT"),
-        "rescue_accepted_net_pnl": sum(r.net_pnl_usdt for r in rescue_closed),
-        "baseline_net_pnl": sum(r.net_pnl_usdt for r in baseline_closed),
-        "baseline_plus_rescue_net_pnl": sum(r.net_pnl_usdt for r in lifecycle if r.status_after == "POSITION_CLOSED"),
+        "rescue_accepted_net_pnl": sum_cash(r.net_pnl_usdt for r in rescue_closed),
+        "baseline_net_pnl": sum_cash(r.net_pnl_usdt for r in baseline_closed),
+        "baseline_plus_rescue_net_pnl": sum_cash(r.net_pnl_usdt for r in closed_rows),
         "rescue_avg_effective_rr": (sum(r.rescue_effective_rr for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
         "rescue_avg_score": (sum(r.score for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
         "rescue_reject_reasons": json.dumps(rescue_stats.reject_reasons, sort_keys=True),
@@ -5263,12 +5699,12 @@ def main():
             / max(1, sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"))
         ),
         "avg_rr": 0.0 if not lifecycle else sum(_safe_float(r.rr, 0.0) for r in lifecycle) / len(lifecycle),
-        "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle) / len(lifecycle),
-        "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle),
-        "return_unit": "pct_of_position_risk_sum",
+        "avg_pnl_pct": 0.0 if not lifecycle else mean_cash(sum_cash(r.net_pnl_pct for r in closed_rows), len(closed_rows)),
+        "total_pnl_pct": sum_cash(r.net_pnl_pct for r in closed_rows),
+        "return_unit": "sum_of_cost_complete_position_notional_returns_pct",
         "net_pnl_unit": "USDT",
         **drawdown_metrics,
-        "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),
+        "total_net_pnl_usdt": sum_cash(r.net_pnl_usdt for r in closed_rows),
         "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle) / len(lifecycle),
         "performance_by_symbol": {},
         "performance_by_regime": {},
@@ -5449,7 +5885,7 @@ def main():
         rejected_shadow,
         args.interval,
         quality_gate_config=quality_gate_config,
-        baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
+        baseline_net_pnl=sum_cash(r.net_pnl_usdt for r in baseline_closed),
     )
     with open(os.path.join(args.output_dir, "signal_quality_summary.json"), "w") as f:
         json.dump(signal_quality_summary, f, indent=2, sort_keys=True)

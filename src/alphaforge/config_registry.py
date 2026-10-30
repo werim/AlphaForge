@@ -68,6 +68,7 @@ def _s(env, field, typ, default, category, applies, desc, min_value=None, max_va
         "Notifications": "alphaforge.telegram_alert_delivery.telegram_alert_provider_from_env",
         "Hyperliquid": "alphaforge.exchange_market_scanner._scan_hyperliquid",
         "Binance": "alphaforge.env_contract.resolve_binance_environment",
+        "Universe Selection": "alphaforge.symbol_selector.build_selected_universe",
     }
     tests = {
         "Trade Quality Filters": "tests/test_env_filters_canonical.py::test_env_score_threshold_changes_backtest_and_paper_decisions",
@@ -81,6 +82,7 @@ def _s(env, field, typ, default, category, applies, desc, min_value=None, max_va
         "Notifications": "tests/test_telegram_alert_delivery.py::test_telegram_send_confirmation_is_persisted_without_credentials",
         "Hyperliquid": "tests/test_env_wiring_contract.py::test_hyperliquid_enabled_controls_scanner_without_network",
         "Binance": "tests/test_env_contract.py::test_binance_explicit_override_and_testnet_backward_compatibility",
+        "Universe Selection": "tests/test_issue577_universe_selection.py::test_canonical_config_loads_constraints_and_rejects_cross_field_invalidity",
     }
     # Resolve by setting family before falling back to category.  This keeps
     # metadata tied to the function that actually reads the effective field,
@@ -103,6 +105,21 @@ def _s(env, field, typ, default, category, applies, desc, min_value=None, max_va
     return ConfigSetting(env, field, typ, default, category, tuple(applies), desc, min_value=min_value, max_value=max_value, **kw)
 
 CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
+    _s("ALPHAFORGE_STORAGE_ENABLED", "storage_enabled", "bool", True, "Persistence", MODES, "SQLite storage policy: enabled; bytes are binary bytes.", 0, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_HIGH_BYTES", "storage_high_bytes", "int", 1073741824, "Persistence", MODES, "SQLite storage policy: high_bytes; bytes are binary bytes.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_LOW_BYTES", "storage_low_bytes", "int", 734003200, "Persistence", MODES, "SQLite storage policy: low_bytes; bytes are binary bytes.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_MIN_AGE_SEC", "storage_min_age_sec", "float", 604800.0, "Persistence", MODES, "SQLite storage policy: min_age_sec; bytes are binary bytes.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_CHECK_INTERVAL_SEC", "storage_check_interval_sec", "float", 60.0, "Persistence", MODES, "SQLite storage policy: check_interval_sec; bytes are binary bytes.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_BATCH_ROWS", "storage_batch_rows", "int", 1000, "Persistence", MODES, "SQLite storage policy: batch_rows; bytes are binary bytes.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_BATCH_SECONDS", "storage_batch_seconds", "float", 0.2, "Persistence", MODES, "SQLite storage policy: batch_seconds; bytes are binary bytes.", 0.01, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_FREE_RESERVE_BYTES", "storage_free_reserve_bytes", "int", 268435456, "Persistence", MODES, "SQLite storage policy: free_reserve_bytes; bytes are binary bytes.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_GROWTH_BUDGET_BYTES_PER_SEC", "storage_growth_budget_bytes_per_sec", "int", 0, "Persistence", MODES, "SQLite storage policy: growth_budget_bytes_per_sec; bytes are binary bytes.", 0, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_ARCHIVE_DIR", "storage_archive_dir", "str", '', "Persistence", MODES, "SQLite storage policy: archive_dir; bytes are binary bytes.", consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue620_storage_policy.py::test_config_is_validated_and_identity_bound", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_STATS_ONLY_ENABLED", "storage_stats_only_enabled", "bool", False, "Persistence", ("PAPER",), "Opt-in PAPER stats-only universe retention; permanently disables full universe replay qualification for that campaign identity.", 0, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue622_stats_only_retention.py::test_stats_only_config_is_opt_in_identity_bound_and_validated", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_STATS_ONLY_START_BYTES", "storage_stats_only_start_bytes", "int", 8589934592, "Persistence", ("PAPER",), "Physical DB+WAL bytes that start opt-in PAPER stats-only universe cleanup.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue622_stats_only_retention.py::test_stats_only_config_is_opt_in_identity_bound_and_validated", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_STATS_ONLY_TARGET_BYTES", "storage_stats_only_target_bytes", "int", 5368709120, "Persistence", ("PAPER",), "Allocated live-byte target for opt-in PAPER stats-only universe cleanup.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue622_stats_only_retention.py::test_stats_only_config_is_opt_in_identity_bound_and_validated", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_STATS_ONLY_MIN_AGE_SEC", "storage_stats_only_min_age_sec", "float", 3600.0, "Persistence", ("PAPER",), "Minimum age of a PAPER universe cycle before stats-only compaction.", 1.0, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue622_stats_only_retention.py::test_stats_only_config_is_opt_in_identity_bound_and_validated", dashboard_editable=False),
+    _s("ALPHAFORGE_STORAGE_STATS_ONLY_RECENT_CYCLES", "storage_stats_only_recent_cycles", "int", 12, "Persistence", ("PAPER",), "Per-campaign recent universe cycles always retained in full by stats-only cleanup.", 1, consumed_by="alphaforge.storage_policy.StorageController", behavioral_test="tests/test_issue622_stats_only_retention.py::test_stats_only_config_is_opt_in_identity_bound_and_validated", dashboard_editable=False),
     _s("ALPHAFORGE_EXECUTION_MODE", "execution_mode", "str", "PAPER", "Mode / Safety", MODES, "Canonical engine mode.", deprecated_aliases=("EXECUTION_MODE",)),
     _s("ALPHAFORGE_ENABLE_PAPER_TRADING", "paper_enabled", "bool", True, "Mode / Safety", ("PAPER",), "Allows PAPER runtime startup."),
     _s("ALPHAFORGE_ENABLE_LIVE_TRADING", "live_enabled", "bool", False, "Mode / Safety", ("LIVE",), "Requests LIVE runtime availability; readiness guard still applies."),
@@ -133,6 +150,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_EXECUTION_TIMEFRAME", "execution_timeframe", "str", "1m", "Learning", ("PAPER",), "Closed-candle execution timeframe.", consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_multi_timeframe.py::test_perfect_long_and_short_alignment", deprecated_aliases=("ALPHAFORGE_PAPER_DECISION_TIMEFRAME",)),
     _s("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED", "mtf_guided_signal_generation_enabled", "bool", True, "Learning", ("PAPER",), "Let 1h regime select trade side, 15m classify setup phase, and 1m confirm timing; false retains legacy equality-veto behavior.", consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_runtime_env_config.py::test_mtf_guided_signal_generation_env_controls_provider"),
     _s("MTF_EXECUTION_CONFIRMATION_MODE", "mtf_execution_confirmation_mode", "str", "ENFORCE", "Learning", ("PAPER",), "PAPER-only MTF execution-confirmation authority: ENFORCE rejects unconfirmed execution; SHADOW persists the counterfactual and continues through existing downstream gates.", consumed_by="alphaforge.runtime.RuntimeOrchestrator._process_symbol", behavioral_test="tests/test_multi_timeframe.py::test_mtf_execution_confirmation_shadow_preserves_downstream_authority"),
+    _s("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED", "paper_position_management_shadow_enabled", "bool", False, "Learning", ("PAPER",), "PAPER-only observation mode for deterministic counterfactual position-management proposals; never authorizes canonical position mutations.", consumed_by="alphaforge.burnin_cli._position_management_shadow_provider", behavioral_test="tests/test_issue612_position_management_shadow.py::test_shadow_config_defaults_off_and_is_identity_bearing_when_enabled"),
     _s("ALPHAFORGE_MAX_TOTAL_COST_PCT", "max_total_cost_pct", "float", 0.20, "Execution Cost Filters", MODES, "Maximum total explicit execution cost percent before rejection.", 0.0, 1.0, deprecated_aliases=("MAX_TOTAL_COST_PCT",)),
     _s("ALPHAFORGE_MIN_LIQUIDITY_SCORE", "min_liquidity_score", "float", 0.30, "Execution Cost Filters", MODES, "Minimum normalized liquidity score before rejection.", 0.0, 1.0, deprecated_aliases=("MIN_LIQUIDITY_SCORE",)),
     _s("ALPHAFORGE_MAX_VOLATILITY_PENALTY_PCT", "max_volatility_penalty_pct", "float", 0.20, "Execution Cost Filters", MODES, "Maximum RR volatility penalty before rejection.", 0.0, 10.0, deprecated_aliases=("MAX_VOLATILITY_PENALTY_PCT",)),
@@ -176,11 +194,25 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_ENABLE_STATE_DIRECTION_SHADOW_EVALUATION", "enable_state_direction_shadow_evaluation", "bool", False, "Learning", ("PAPER",), "Enable non-authoritative state-direction shadow evaluation for PAPER diagnostics.", consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_env_wiring_contract.py::test_state_direction_shadow_flag_is_registered_paper_only_and_identity_neutral"),
     _s("ALPHAFORGE_REJECT_RESOLVER_INTERVAL_SEC", "reject_resolver_interval_sec", "float", 60.0, "Operations", ("PAPER",), "Seconds between reject-label resolver checks.", 1.0, consumed_by="alphaforge.runtime.RuntimeOrchestrator._reject_forward_outcome_loop", behavioral_test="tests/test_runtime.py::test_standalone_resolver_fetches_each_pending_timeframe"),
     _s("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "heartbeat_interval_sec", "float", 30.0, "Operations", ("PAPER", "LIVE"), "Seconds between runtime heartbeats.", 0.01),
-    _s("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", "max_symbols_per_scan", "int", 5, "Operations", ("PAPER", "LIVE"), "Maximum selected symbols per scan.", 1),
+    _s("ALPHAFORGE_UNIVERSE_MIN_MARKET_CAP_USD", "universe_min_market_cap_usd", "str", "", "Universe Selection", MODES, "Optional minimum timestamp-bound market capitalization; configured filters fail closed when evidence is unavailable."),
+    _s("ALPHAFORGE_UNIVERSE_MAX_MARKET_CAP_USD", "universe_max_market_cap_usd", "str", "", "Universe Selection", MODES, "Optional maximum timestamp-bound market capitalization; configured filters fail closed when evidence is unavailable."),
+    _s("ALPHAFORGE_UNIVERSE_MIN_VOLUME_24H_USD", "universe_min_volume_24h_usd", "float", 5_000_000.0, "Universe Selection", MODES, "Minimum canonical 24h quote volume for universe eligibility.", 0.0),
+    _s("ALPHAFORGE_UNIVERSE_CANDIDATE_POOL_TOP_N_VOLUME", "universe_candidate_pool_top_n_volume", "int", 50, "Universe Selection", MODES, "Maximum liquid candidates retained before opportunity ranking.", 1),
+    _s("ALPHAFORGE_UNIVERSE_MAX_ACTIVE_SYMBOLS", "max_symbols_per_scan", "int", 5, "Universe Selection", MODES, "Maximum symbols selected from the canonical ranked candidate pool.", 1, deprecated_aliases=("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN",)),
+    _s("ALPHAFORGE_UNIVERSE_EXCLUDED_SYMBOLS", "universe_excluded_symbols", "str", "", "Universe Selection", MODES, "Comma-separated explicit symbol exclusions."),
+    _s("ALPHAFORGE_UNIVERSE_MAX_EVIDENCE_AGE_SEC", "universe_max_evidence_age_sec", "float", 120.0, "Universe Selection", MODES, "Maximum age of timestamp-bound universe market evidence.", 0.001),
     _s("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", "max_reject_log_entries", "int", 1000, "Operations", ("PAPER", "LIVE"), "In-memory reject log cap.", 1),
     _s("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "max_concurrent_positions", "int", 3, "Runtime Risk Limits", ("PAPER", "LIVE"), "Concurrent-position hard cap.", 1, deprecated_aliases=("ALPHAFORGE_MAX_OPEN_POSITIONS",)),
     _s("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", "max_notional_exposure", "float", 100000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Portfolio notional hard cap.", 0.0),
     _s("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", "max_symbol_notional", "float", 50000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Per-symbol notional hard cap.", 0.0),
+    _s("ALPHAFORGE_MAX_CORRELATION_GROUP_EXPOSURE", "max_correlation_group_exposure", "float", 75000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Same-direction correlation-group notional hard cap.", 0.0, consumed_by="alphaforge.portfolio_risk.evaluate_portfolio_risk", behavioral_test="tests/test_issue500_correlation_risk_config_ssot.py::test_canonical_correlation_limits_change_runtime_portfolio_decision"),
+    _s("ALPHAFORGE_MAX_CORRELATED_POSITIONS", "max_correlated_positions", "int", 2, "Runtime Risk Limits", ("PAPER", "LIVE"), "Same-direction correlated-position hard cap.", 0, consumed_by="alphaforge.portfolio_risk.evaluate_portfolio_risk", behavioral_test="tests/test_issue500_correlation_risk_config_ssot.py::test_canonical_correlation_limits_change_runtime_portfolio_decision"),
+    _s("ALPHAFORGE_PAPER_CANDIDATE_NOTIONAL", "paper_candidate_notional", "float", 10.0, "Runtime Risk Limits", ("PAPER",), "Canonical PAPER candidate notional used when market context does not provide an explicit size.", 0.0, consumed_by="alphaforge.runtime.RuntimeOrchestrator._process_symbol", behavioral_test="tests/test_issue491_paper_candidate_notional_ssot.py::test_canonical_candidate_notional_reaches_runtime_and_campaign_identity"),
+    _s("ALPHAFORGE_PAPER_POSITION_SIZING_MODE", "paper_position_sizing_mode", "str", "SHADOW", "Runtime Risk Limits", ("PAPER",), "PAPER position sizing authority: FIXED preserves canonical fixed notional, SHADOW computes risk-based counterfactual evidence, RISK_BASED makes the risk-derived size authoritative in PAPER only.", consumed_by="alphaforge.runtime.RuntimeOrchestrator._process_symbol", behavioral_test="tests/test_issue365_risk_based_sizing.py::test_runtime_shadow_preserves_fixed_notional_and_records_counterfactual"),
+    _s("ALPHAFORGE_RISK_PCT_PER_TRADE", "risk_pct_per_trade", "float", 0.01, "Runtime Risk Limits", ("PAPER",), "Fraction of PAPER equity budgeted at the executable stop before further de-risking; 0.01 means 1%.", 0.0, 1.0, consumed_by="alphaforge.portfolio_risk.risk_based_candidate_exposure", behavioral_test="tests/test_issue365_risk_based_sizing.py::test_stop_distance_derives_notional_from_risk_budget"),
+    _s("ALPHAFORGE_PAPER_MAX_LEVERAGE", "paper_max_leverage", "float", 1.0, "Runtime Risk Limits", ("PAPER",), "Maximum PAPER notional-to-equity leverage admitted by risk-based sizing; current derivatives contract remains notional-only 1x.", 0.0, 1.0, dashboard_editable=False, consumed_by="alphaforge.portfolio_risk.risk_based_candidate_exposure", behavioral_test="tests/test_issue365_risk_based_sizing.py::test_hard_caps_never_increase_risk"),
+    _s("ALPHAFORGE_PAPER_MAX_LIQUIDITY_PARTICIPATION_PCT", "paper_max_liquidity_participation_pct", "float", 0.01, "Runtime Risk Limits", ("PAPER",), "Maximum fraction of measured executable liquidity depth that one PAPER candidate may consume.", 0.0, 1.0, consumed_by="alphaforge.portfolio_risk.risk_based_candidate_exposure", behavioral_test="tests/test_issue365_risk_based_sizing.py::test_hard_caps_never_increase_risk"),
+    _s("ALPHAFORGE_PAPER_MIN_NOTIONAL", "paper_min_notional", "float", 0.0, "Runtime Risk Limits", ("PAPER",), "Minimum admissible PAPER notional for risk-based sizing. Sizes below this threshold are rejected rather than rounded up.", 0.0, consumed_by="alphaforge.portfolio_risk.risk_based_candidate_exposure", behavioral_test="tests/test_issue365_risk_based_sizing.py::test_min_notional_rejects_instead_of_increasing_risk"),
     _s("ALPHAFORGE_MAX_DAILY_LOSS_PCT", "max_daily_loss_pct", "float", 0.03, "Runtime Risk Limits", ("PAPER", "LIVE"), "Daily realized-loss fraction that blocks new risk (0.02 means 2%; percentage-point values require explicit migration).", 0.0, 1.0),
     _s("ALPHAFORGE_STALE_MARKET_DATA_SEC", "stale_market_data_sec", "float", 15.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Maximum market-data age.", 0.0),
     _s("ALPHAFORGE_ENABLE_SHADOW_MODE", "enable_shadow_mode", "bool", False, "Mode / Safety", ("PAPER", "LIVE"), "Enable shadow-only runtime behavior."),
@@ -200,6 +232,10 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_MAX_CLOCK_SKEW_MS", "max_clock_skew_ms", "int", 5000, "Operations", ("PAPER", "LIVE"), "Maximum allowed local/provider clock skew for burn-in preflight.", 0, dashboard_editable=False, consumed_by="alphaforge.burnin_ops.clock_skew_check", behavioral_test="tests/test_issue407_config_ssot.py::test_clock_skew_limit_uses_registry"),
     _s("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "enable_binance_readonly_reconciliation", "bool", True, "Mode / Safety", ("PAPER", "LIVE"), "Enable signed read-only Binance reconciliation."),
     _s("ALPHAFORGE_ALLOW_LIVE_ORDERS", "allow_live_orders", "bool", False, "Mode / Safety", ("LIVE",), "Additional deny-by-default authorization required before any LIVE adapter call.", dashboard_editable=False, consumed_by="alphaforge.runtime.RuntimeOrchestrator._execute", behavioral_test="tests/test_runtime_live_authorization.py::test_runtime_live_authorization_is_authoritative_and_refreshed"),
+    _s("ALPHAFORGE_EXECUTION_ACCOUNT_SCOPE", "execution_account_scope", "str", "", "Mode / Safety", ("LIVE",), "Explicit exchange account/subaccount ownership scope required before LIVE mutation.", dashboard_editable=False, consumed_by="alphaforge.runtime.RuntimeOrchestrator._execution_account_identity", behavioral_test="tests/test_issue507_execution_ownership.py::test_live_mutation_requires_explicit_account_scope"),
+    _s("ALPHAFORGE_PAPER_ACCOUNT_MODEL", "paper_account_model", "str", "ISOLATED_CAMPAIGN", "Mode / Safety", ("PAPER",), "Explicit PAPER capital model; current production contract supports isolated campaign/runtime virtual accounts only.", dashboard_editable=False, consumed_by="alphaforge.runtime.RuntimeOrchestrator._execution_account_identity", behavioral_test="tests/test_issue507_execution_ownership.py::test_independent_paper_campaigns_are_explicitly_isolated"),
+    _s("ALPHAFORGE_EXECUTION_LEASE_TTL_SEC", "execution_lease_ttl_sec", "float", 30.0, "Operations", ("PAPER", "LIVE"), "Durable execution-owner lease duration.", 1.0, dashboard_editable=False, consumed_by="alphaforge.runtime.RuntimeOrchestrator._authorize_execution_ownership", behavioral_test="tests/test_issue507_execution_ownership.py::test_two_runtimes_same_account_scope_only_one_owner"),
+    _s("ALPHAFORGE_EXECUTION_LEASE_MIN_VALIDITY_SEC", "execution_lease_min_validity_sec", "float", 5.0, "Operations", ("PAPER", "LIVE"), "Minimum remaining owner-lease validity required immediately before mutation.", 0.0, dashboard_editable=False, consumed_by="alphaforge.runtime.RuntimeOrchestrator._validate_execution_ownership", behavioral_test="tests/test_issue507_execution_ownership.py::test_stale_owner_is_fenced_after_lease_transfer"),
     _s("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", "require_exchange_connectivity_for_live", "bool", True, "Mode / Safety", ("LIVE",), "Require exchange connectivity checks before LIVE startup.", dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_issue407_config_ssot.py::test_live_connectivity_settings_are_registry_managed"),
     _s("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES", "required_live_exchanges", "str", "binance", "Mode / Safety", ("LIVE",), "Comma-separated exchanges required for LIVE connectivity.", dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_issue407_config_ssot.py::test_live_connectivity_settings_are_registry_managed"),
     _s("ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", "exchange_connectivity_timeout_sec", "float", 2.0, "Operations", ("LIVE",), "Timeout for LIVE exchange connectivity checks.", 0.1, dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_issue407_config_ssot.py::test_live_connectivity_settings_are_registry_managed"),
@@ -253,6 +289,14 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
 
 REGISTRY_BY_ENV = {s.env_name: s for s in CONFIG_REGISTRY}
 FIELD_BY_NAME = {s.field_name: s for s in CONFIG_REGISTRY}
+
+def canonical_field_default(field_name: str) -> Any:
+    """Return the typed registry default without consulting process env or files."""
+    setting = FIELD_BY_NAME.get(field_name)
+    if setting is None:
+        raise KeyError(f"Unknown canonical config field: {field_name}")
+    return setting.parse(None)
+
 
 # Former template settings with no canonical subsystem contract.  They remain
 # documented only in a clearly non-operational section for migration/audit.
@@ -329,6 +373,26 @@ def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
                 deprecated=True, description=f"Deprecated alias for {setting.env_name}; canonical value wins within a source.",
                 behavioral_test="tests/test_env_wiring_contract.py::test_alias_conflicts_fail_audit",
             ))
+    # Launcher-owned process context is consumed directly, rather than through
+    # RuntimeConfig or dashboard overrides. Keep it in the same audited contract.
+    rows.extend((
+        EnvContractEntry(
+            name="ALPHAFORGE_RELEASE_ID", canonical_name="ALPHAFORGE_RELEASE_ID",
+            classification="WIRED", value_type="str", default=None, applies_to=MODES,
+            launcher_owned=True,
+            consumed_by="alphaforge.runtime.RuntimeOrchestrator._phase8_runtime_hashes",
+            description="Launcher-owned release provenance; unset uses the existing runtime release configuration.",
+            behavioral_test="tests/test_worker_environment_contract.py::test_release_context_reaches_runtime_identity",
+        ),
+        EnvContractEntry(
+            name="ALPHAFORGE_BURNIN_DATABASE_PATH", canonical_name="ALPHAFORGE_BURNIN_DATABASE_PATH",
+            classification="WIRED", value_type="str", default=None, applies_to=("PAPER",),
+            launcher_owned=True,
+            consumed_by="alphaforge.db_doctor.targets.resolve_database_targets",
+            description="Launcher-owned burn-in database context for read-only target diagnosis; does not override the runtime database URL.",
+            behavioral_test="tests/test_worker_environment_contract.py::test_burnin_db_context_resolves_readonly_without_creating_target",
+        ),
+    ))
     for name in RESERVED_VARIABLES:
         secret = any(token in name for token in ("SECRET", "TOKEN", "KEY", "PASSWORD", "WEBHOOK"))
         explanation, remove, future = _reserved_details(name)

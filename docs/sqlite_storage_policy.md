@@ -1,0 +1,216 @@
+# Bounded SQLite storage (#620)
+
+The storage authority is `alphaforge.storage_policy`. All settings are typed in
+`config_registry.py`, frozen in runtime config, and included in new campaign
+config hashes. Changing the policy requires a new campaign identity; existing
+campaigns do not silently inherit new retention semantics.
+
+## Units, thresholds and operation
+
+Byte settings use bytes, with binary defaults: high 1 GiB, low 700 MiB. The
+physical trigger includes the main DB and WAL. SHM is reported separately.
+Deleting rows creates reusable pages; it does not promise a smaller OS file.
+Low-water attainment means allocated live pages are within the low budget.
+`REUSABLE_CAPACITY` explicitly reports a physically large but reusable DB;
+maintenance does not keep deleting because its filename still exceeds 1 GiB.
+
+The default policy checks every 60 seconds, retains at least seven days of
+telemetry, and removes at most 1,000 rows in a 0.2-second transaction budget.
+A cycle whose complete ownership graph exceeds the row budget stays protected;
+the operator can increase the budget deliberately. Archive backup is separately
+bounded to 30 seconds; it never holds the SQLite writer lock while copying,
+hashing or checking integrity. A cross-process archive file lock prevents two
+publishers from overwriting the same partial or verified snapshot.
+
+Read-only inventory:
+
+```bash
+PYTHONPATH=src python -m alphaforge.storage_policy inventory /absolute/path/runtime.db
+```
+
+This reports DB path/device/inode, DB/WAL/SHM bytes, page counts, reusable/live
+allocation, dbstat table/index allocations where available, oldest timestamps,
+rows, eligibility/preservation reasons, declared campaign artifacts, DB-owned
+backup sidecars and durable archive locations. Artifact inventory is bounded;
+missing locations and truncated measurements are explicit. Inventory/status
+never starts cleanup, checkpoints or qualification materialization.
+
+## Dependency and eligibility rules
+
+Automatically dispensable telemetry is limited to aged healthy **standalone**
+heartbeats with a later equivalent healthy state, no position/order exposure,
+no foreign-key consumers and no campaign-bound runtime instance. The latest
+heartbeat and degraded/recovery states remain. State snapshots, reconciliation,
+health transitions, incidents, decisions, outcomes and qualification evidence
+remain protected. A database containing qualification/audit dependencies is
+conservatively protected until the graph can prove removal safe.
+
+For terminal universe evidence, only COMPLETED campaigns older than the minimum
+age can be eligible. Failed/unfinished campaigns, workers, ambiguous run links,
+nonterminal or open runs, unresolved forward labels/positions, outstanding
+positions/orders/incidents, qualifications/audits, shared selector cycles,
+unknown selector dependencies, or missing clean shutdown evidence block
+archival/removal. Normal selection/ranking, costs, PnL and risk thresholds are
+unchanged.
+
+A full WAL-aware SQLite backup preserves canonical release/run/SHA/config
+identity and every source table. Integrity, foreign keys, row counts, schema
+hash and campaign domain identity are verified. A fsynced JSON manifest and a
+second read-only verification precede durable `storage_archives` publication.
+No deletion is authorized by a partial file, an unpublished manifest, a missing
+archive or a checksum/count/schema/domain mismatch.
+
+Source cleanup removes only eligible universe cycles, candidates and their
+campaign links. Other canonical campaign evidence remains operational. Every
+batch rechecks live dependencies inside `BEGIN IMMEDIATE`, verifies exact source
+rows against the immutable archive, and removes links before child/parent rows.
+Ordinary UPDATE remains forbidden. Ordinary DELETE remains forbidden. A
+transactional schema migration changes only the delete guards to permit exact
+cycle/hash/campaign capabilities. Capability insertion requires a temporary
+connection function and unpredictable token; capabilities exist only within the
+removal transaction and disappear on commit/rollback. The function is revoked
+in `finally`. Archive work does not disable normal writer immutability.
+
+Crash before the manifest leaves only unpublished work and no deletion. Crash
+after verification preserves the durable archive for the next attempt. Crash
+during removal rolls back the whole batch. Restart uses the same verified
+archive; no previous cycle is deleted twice. Completed publication is never
+overwritten merely to regenerate a manifest.
+
+Set `ALPHAFORGE_STORAGE_ARCHIVE_DIR` to an existing cold-storage directory with
+sufficient capacity. No configured safe destination means protected evidence
+stays and a concrete blocker is reported. A full snapshot can be much larger
+than the rows reclaimed. Same-device archives are accounted separately and do
+not create host free space; capacity checks include DB size and reserve. No
+archive or backup is silently deleted to meet a target.
+
+To locate replay evidence:
+
+```bash
+PYTHONPATH=src python -m alphaforge.storage_policy replay-location /absolute/path/runtime.db --campaign-id camp_...
+```
+
+The read-only locator verifies the archive and returns its path/checksum, or an
+explicit unavailable reason. Run existing read-only replay/report tooling
+against that archive path. Source readiness and dynamic reject-label consumers
+report archived evidence as requiring replay; they cannot turn a partially
+removed scope into favorable empty evidence. Campaign resume, runtime attachment
+and qualification materialization refuse an archived operational scope.
+
+## Opt-in PAPER stats-only universe retention (#622)
+
+Stats-only retention is a separate, disabled-by-default policy for new dynamic
+PAPER campaign identities. It is never inherited by an existing campaign. The
+initial production budget is explicit canonical configuration:
+
+- `ALPHAFORGE_STORAGE_HIGH_BYTES=10737418240` (10 GiB fail-closed hard cap)
+- `ALPHAFORGE_STORAGE_STATS_ONLY_START_BYTES=8589934592` (8 GiB physical DB+WAL start)
+- `ALPHAFORGE_STORAGE_STATS_ONLY_TARGET_BYTES=5368709120` (5 GiB allocated-live target)
+- `ALPHAFORGE_STORAGE_LOW_BYTES=5368709120`
+- `ALPHAFORGE_STORAGE_STATS_ONLY_ENABLED=true`
+
+Cleanup starts at the physical watermark and stops when allocated live pages
+reach the target. Before the hard cap, protected rows are reported but do not
+by themselves stop scans. At the hard cap, the normal fail-closed storage gate
+still blocks new evidence producers if the target cannot be reached. Reusable
+pages do not mean the SQLite file shrank; no online `VACUUM` or WAL unlink is
+performed.
+
+Only `PAPER` cycles owned by a campaign whose immutable provenance contains the
+exact stats-only policy hash are considered. Cycles are processed oldest first,
+after a configured minimum age, while the configured newest-cycle window stays
+complete. Detail is pinned when the dependency graph is unknown, the cycle is
+shared, qualification authority exists, identity does not match, runtime
+exposure/recovery is unresolved, an order/position or reconciliation incident
+is nonterminal, or the cycle overlaps an unresolved reject/position outcome
+window. Missing or malformed proof is a blocker, never deletion permission.
+
+For each eligible cycle, the writer first reconstructs and verifies the full
+canonical universe hash. In one bounded `BEGIN IMMEDIATE` transaction it writes
+an immutable per-cycle rollup, appends a hash-chained cumulative campaign
+checkpoint, creates a connection-local capability bound to the original
+cycle/evidence/rollup hashes, and deletes link, candidate, then parent rows in
+foreign-key-safe order. The capability is removed before commit. Any error or
+crash rolls back rollup, checkpoint, capability and source deletes together.
+Restart therefore sees either complete source evidence or a complete verified
+tombstone/checkpoint, never a favorable partial state. Ordinary updates and
+deletes remain forbidden.
+
+Trading, reject-forward, decision, fill, position, lifecycle, portfolio-risk,
+expectancy, PnL/net-R, drawdown and reconciliation tables are outside the delete
+surface and remain canonical. Detailed historical universe replay is
+permanently unavailable for compacted cycles. Such campaigns report
+`PAPER_STATS_ONLY`, `full_universe_replay_available=false`, and
+`STATS_ONLY_NOT_QUALIFICATION_ELIGIBLE`; they must never be used as PAPER/SOAK,
+LIVE_PRECHECK or LIVE qualification evidence.
+
+## Disk pressure and WAL
+
+Startup reserve is the configured free reserve (256 MiB), high-minus-low growth
+headroom, current WAL bytes, plus configured growth-budget bytes/second times
+known duration. The growth budget defaults to zero: it is an operator budget,
+not a fabricated measured growth rate. The runtime also checks periodically.
+The old fixed 100 MiB preflight threshold is replaced by this shared authority.
+
+Maintenance uses canonical writer arbitration and bounded fresh-connection
+BUSY retries. WAL, busy_timeout=30000, synchronous=NORMAL and foreign_keys=ON
+remain intact. PASSIVE checkpoints report frames, progress and readers retaining
+backlog. When no reader blocks progress, a zero-wait SQLite TRUNCATE checkpoint
+can reclaim WAL capacity; its busy timeout is restored afterward. No code unlinks
+WAL/SHM. No online VACUUM is performed. Reclaiming OS
+space requires separately capacity-checked offline compaction or storage
+provisioning; reusable-page success is never reported as physical shrinkage.
+
+If reserve is insufficient or protected live data prevents reclaiming the
+budget, new evidence-producing scans and entries stop. The runtime records a
+recovery-required transition before exhaustion. With open positions/orders,
+position management and reconciliation stay alive and exposure is preserved.
+An empty, reconciled campaign requests normal supervised shutdown only after its
+recovery state is durably written. Unknown exposure keeps supervision alive.
+If reserve is exhausted despite the gate, SQLite FULL is a concrete maintenance
+blocker. Missing mandatory recovery persistence remains explicit and incomplete;
+it cannot authorize shutdown or favorable evidence. The state write runs off the
+event loop so position management can keep operating. Removing pressure does not automatically clear recovery
+or reopen execution. Unknown/nontransient persistence errors remain fatal.
+
+A controller holds one current diagnostic report; its only append-only
+maintenance history is the immutable stats-only rollup/checkpoint ledger.
+Reports distinguish threshold, logical target, disk reserve,
+rows/batches, verified archives, checkpoint backlog, protected scope and next
+action. PAPER/FAST/SOAK acceptance remains a separate gated workflow.
+
+## Storage-pressure recovery and offline outcomes (#631)
+
+`burnin_cli worker --once` runs the canonical market-data-backed outcome resolver
+without starting the execution runtime. Elapsed horizons alone never resolve a
+label. Candle collection and persistence share the due/claim predicate: expired
+`RESOLVING` claims are retried; fresh claims and claims without an attributable
+timestamp retain ownership. Missing/gapped market windows remain pending.
+Recovery, completion and stats-only compaction regard every label other than
+`RESOLVED` with `evidence_complete=1` as outstanding protected evidence.
+
+The explicit `burnin_ops recover-runtime --terminalize-zero-exposure` path also accepts
+the supervisor's durable controlled storage-stop event as predecessor identity
+when its exact campaign/run/release/runtime/startup and referenced PAPER recovery
+snapshot match. A cleared campaign worker PID alone is not death evidence.
+The predecessor must be dead, all execution/exposure checks must pass, and fresh
+authenticated read-only reconciliation must be available. Missing, malformed,
+cross-scoped or unsafe proof fails closed. The existing atomic transition ends
+the campaign/run as `FAILED`; it neither starts a new run nor resumes trading.
+The immutable stop snapshot is retained and fresh reconciliation is appended.
+Compaction still independently verifies eligibility and hash-chain integrity.
+
+Preserve original forensic campaign databases. Validate recovery changes on a
+WAL-aware laboratory backup first. Allocated-live reclamation is distinct from
+physical main+WAL reduction; attaining a live-page target does not prove the
+physical hard cap or authorize continuation. Stats-only remains non-replayable
+and non-qualification-eligible. No automatic restart, manual flag reset, threshold
+change or generic production VACUUM is part of this recovery path.
+
+## Deterministic storage evidence
+
+The terminal three-cycle fixture removed nine source rows after verified replay.
+Allocated live bytes changed from 790,528 to 716,800; reusable bytes changed from
+0 to 94,208. These measurements include the added archival manifest/schema
+overhead and demonstrate capacity reuse, not host-scale savings or a GB/day
+forecast. The test prints its current before/after measurements for review.

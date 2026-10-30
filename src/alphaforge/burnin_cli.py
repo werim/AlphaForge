@@ -6,6 +6,7 @@ from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
 from alphaforge.config import load_config_from_env
 from alphaforge.persistence import init_db
 from alphaforge.database_defaults import sqlite_path_from_url
+from alphaforge.position_management_shadow import PaperPositionManagementShadowProvider
 
 def _db_path(args):
     if getattr(args,'db',None): return str(Path(args.db).expanduser().resolve())
@@ -20,6 +21,16 @@ def _print(payload, json_out):
 def _candle_provider():
     cfg = load_config_from_env()
     return BinanceReadOnlyCandleProvider(base_url=cfg.exchange.binance.market_data_base_url)
+
+def _position_management_shadow_provider():
+    runtime = load_config_from_env().runtime
+    if not getattr(runtime, "paper_position_management_shadow_enabled", False):
+        return None
+    if str(getattr(runtime, "execution_mode", "")).upper() != "PAPER":
+        raise ValueError("ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED is PAPER-only")
+    return PaperPositionManagementShadowProvider(
+        max_evidence_age_seconds=float(runtime.stale_market_data_sec)
+    )
 
 def _human(p):
     if not isinstance(p,dict): return str(p)
@@ -96,7 +107,7 @@ def main(argv=None) -> int:
         if args.cmd=='worker':
             engine=init_db(f"sqlite+pysqlite:///{db}")
             try:
-                runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider(), provider_transient_outage_grace_seconds=load_config_from_env().runtime.provider_transient_outage_grace_seconds)
+                runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider(), position_management_shadow_provider=_position_management_shadow_provider(), provider_transient_outage_grace_seconds=load_config_from_env().runtime.provider_transient_outage_grace_seconds)
                 if args.once:
                     with engine.begin() as conn: bootstrap_campaign_schema(conn)
                     res=runner.resolver_tick(); _print(res,args.json); return 0 if res.get('status') in {'OK','PAUSED'} else 1
@@ -135,7 +146,7 @@ def main(argv=None) -> int:
                     out=_launch_detached_worker(db,args.campaign_id); _print({**res, **out},args.json); return 0
                 engine=init_db(f"sqlite+pysqlite:///{db}")
                 try:
-                    runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider(), provider_transient_outage_grace_seconds=load_config_from_env().runtime.provider_transient_outage_grace_seconds)
+                    runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider(), position_management_shadow_provider=_position_management_shadow_provider(), provider_transient_outage_grace_seconds=load_config_from_env().runtime.provider_transient_outage_grace_seconds)
                     import asyncio; out=asyncio.run(runner.run_foreground()); _print({**res, **out},args.json); return 0
                 finally: engine.dispose()
             if args.cmd=='pause': pause_campaign(conn,args.campaign_id); conn.commit(); _print({'status':'PAUSED','campaign_id':args.campaign_id},args.json); return 0

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL, AMBIGUITY_MAINTENANCE_EVENT
+
 import argparse, asyncio, contextlib, csv, hashlib, json, math, os, re, sqlite3, subprocess, sys, threading, time, uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, field
@@ -16,12 +18,15 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThr
 from alphaforge.config import runtime_filter_config
 from alphaforge.process_liveness import process_is_alive
 from alphaforge.provider_failures import classify_provider_exception, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, RETRYABLE_MARKET_DATA
+from alphaforge.sqlite_safety import sqlite_writer_guard
+from alphaforge.position_management_shadow import persist_position_management_shadow_proposals, shadow_table_exists
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 CANONICAL_CAMPAIGN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}$")
 CANONICAL_BURNIN_RUN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}_run_[0-9]{4,}$")
 CANONICAL_CAMPAIGN_AGGREGATE_ID_RE = re.compile(r"^camp_[0-9a-f]{16}__aggregate$")
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
+DYNAMIC_UNIVERSE_SCOPE_MODE = "CANONICAL_DYNAMIC_V1"
 CAMPAIGN_STATUSES = {"CREATED","STARTING","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
 ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode", "git_commit")
 RUNTIME_ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode")
@@ -36,6 +41,7 @@ PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_terminal_causes (id INTEGER PRIMARY KEY AUTOINCREMENT,terminal_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,terminal_cause TEXT NOT NULL,terminal_cause_source TEXT NOT NULL,terminal_event_id TEXT NOT NULL,terminal_at TEXT NOT NULL,run_status TEXT,campaign_status TEXT,details_json TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,timeframe TEXT,horizon_bars INTEGER,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_token TEXT,claimed_at TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_position_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_position_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,signal_id TEXT,source_decision_id TEXT,decision_time TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,setup_type TEXT,entry_time TEXT NOT NULL,planned_entry REAL,simulated_fill REAL,stop REAL,target REAL,quantity REAL,notional REAL,entry_spread REAL,entry_slippage REAL,entry_fee REAL,regime TEXT,source_provenance_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_time TEXT,exit_price REAL,exit_reason TEXT,gross_pnl REAL,gross_r REAL,exit_spread REAL,exit_slippage REAL,exit_fee REAL,funding REAL,latency_impact_penalty REAL,total_execution_cost REAL,net_pnl REAL,net_r REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,evidence_complete INTEGER NOT NULL DEFAULT 0,missing_fields_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(trade_id))""",
+"""CREATE TABLE IF NOT EXISTS burnin_position_management_events (id INTEGER PRIMARY KEY AUTOINCREMENT,management_event_id TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,event_time TEXT NOT NULL,action TEXT NOT NULL,requested_quantity REAL,execution_price REAL,previous_stop REAL,new_stop REAL,previous_remaining_quantity REAL,new_remaining_quantity REAL,gross_pnl REAL,execution_cost REAL,net_pnl REAL,evidence_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_exports (id INTEGER PRIMARY KEY AUTOINCREMENT,export_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,output_dir TEXT NOT NULL,manifest_path TEXT NOT NULL,generated_at TEXT NOT NULL,evidence_hash TEXT NOT NULL,checksums_json TEXT NOT NULL,status TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 ]
 
@@ -69,26 +75,27 @@ def configure_sqlite_engine(engine: Engine) -> Engine:
 def _with_fresh_lock_retry(engine: Engine, operation: Any, *, attempts: int = SQLITE_LOCK_RETRY_ATTEMPTS) -> Any:
     """Retry only SQLite contention; each failed transaction is rolled back and closed."""
     configure_sqlite_engine(engine)
-    for attempt in range(max(1, attempts)):
-        conn = engine.connect()
-        transaction = conn.begin()
-        try:
-            result = operation(conn)
-            transaction.commit()
-            return result
-        except OperationalError as exc:
-            transaction.rollback()
-            # Do not return a connection associated with a failed locked
-            # transaction to the pool: the retry must open a new DBAPI handle.
-            conn.invalidate()
-            if not _is_sqlite_lock_error(exc) or attempt + 1 >= attempts:
+    with sqlite_writer_guard(engine):
+        for attempt in range(max(1, attempts)):
+            conn = engine.connect()
+            transaction = conn.begin()
+            try:
+                result = operation(conn)
+                transaction.commit()
+                return result
+            except OperationalError as exc:
+                transaction.rollback()
+                # Do not return a connection associated with a failed locked
+                # transaction to the pool: the retry must open a new DBAPI handle.
+                conn.invalidate()
+                if not _is_sqlite_lock_error(exc) or attempt + 1 >= attempts:
+                    raise
+                time.sleep(SQLITE_LOCK_RETRY_BASE_SECONDS * (2 ** attempt))
+            except BaseException:
+                transaction.rollback()
                 raise
-            time.sleep(SQLITE_LOCK_RETRY_BASE_SECONDS * (2 ** attempt))
-        except BaseException:
-            transaction.rollback()
-            raise
-        finally:
-            conn.close()
+            finally:
+                conn.close()
 
 def bootstrap_campaign_schema(conn: Any) -> None:
     bootstrap_burnin_schema(conn)
@@ -96,9 +103,31 @@ def bootstrap_campaign_schema(conn: Any) -> None:
     for stmt in ["ALTER TABLE burnin_pending_reject_labels ADD COLUMN timeframe TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN horizon_bars INTEGER", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claim_token TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claimed_at TEXT"]:
         try: _exec(conn, stmt)
         except Exception: pass
-    for stmt in ["ALTER TABLE burnin_pending_position_outcomes ADD COLUMN source_decision_id TEXT", "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN decision_time TEXT", "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN setup_type TEXT"]:
+    for stmt in [
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN source_decision_id TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN decision_time TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN setup_type TEXT",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_stop REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN current_target REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_quantity REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN remaining_notional REAL",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_gross_pnl REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_execution_cost REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN realized_net_pnl REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN trailing_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN management_version INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE burnin_pending_position_outcomes ADD COLUMN last_management_at TEXT",
+    ]:
         try: _exec(conn, stmt)
         except Exception: pass
+    # Existing rows predate adaptive position management. Initialize the mutable
+    # management state from immutable entry evidence without rewriting that evidence.
+    _exec(conn, """UPDATE burnin_pending_position_outcomes
+        SET current_stop=COALESCE(current_stop,stop),
+            current_target=COALESCE(current_target,target),
+            remaining_quantity=COALESCE(remaining_quantity,quantity),
+            remaining_notional=COALESCE(remaining_notional,notional)
+        WHERE status='OPEN'""")
     # additive qualification columns; ignore on older SQLite if duplicate
     for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN last_operator_activity_at TEXT"]:
         try: _exec(conn, stmt)
@@ -112,10 +141,72 @@ def canonical_paper_source_exchanges(source_provenance: Mapping[str, Any]) -> tu
                  if exchange.upper() in identity.upper())
 
 
-def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",)) -> dict[str, Any]:
+def dynamic_universe_identity_payload(
+    runtime_config: Any,
+    intervals: Sequence[str],
+    paper_source_exchanges: Sequence[str],
+) -> dict[str, Any]:
+    """Canonical campaign identity for selector-owned dynamic universe scope."""
+    raw_excluded = getattr(runtime_config, "universe_excluded_symbols", "")
+    if isinstance(raw_excluded, str):
+        excluded = sorted({
+            item.strip().upper()
+            for item in raw_excluded.replace(",", " ").split()
+            if item.strip()
+        })
+    else:
+        excluded = sorted({str(item).strip().upper() for item in (raw_excluded or ()) if str(item).strip()})
+    constraints = {
+        "min_market_cap_usd": getattr(runtime_config, "universe_min_market_cap_usd", None),
+        "max_market_cap_usd": getattr(runtime_config, "universe_max_market_cap_usd", None),
+        "min_volume_24h_usd": getattr(runtime_config, "universe_min_volume_24h_usd", 5_000_000.0),
+        "candidate_pool_top_n_volume": getattr(runtime_config, "universe_candidate_pool_top_n_volume", 50),
+        "max_active_symbols": getattr(runtime_config, "max_symbols_per_scan", 5),
+        "excluded_symbols": excluded,
+        "max_evidence_age_sec": getattr(runtime_config, "universe_max_evidence_age_sec", 120.0),
+        "max_spread_pct": getattr(runtime_config, "max_spread_pct", 0.05),
+        "max_expected_slippage_pct": getattr(runtime_config, "max_expected_slippage_pct", 0.05),
+        "max_abs_funding_rate_pct": getattr(runtime_config, "max_abs_funding_rate_pct", 0.001),
+        "min_liquidity_score": getattr(runtime_config, "min_liquidity_score", 0.30),
+        "quote_asset": "USDT",
+    }
+    return {
+        "scope_mode": DYNAMIC_UNIVERSE_SCOPE_MODE,
+        "selector_authority": "alphaforge.symbol_selector.build_selected_universe",
+        "constraints": constraints,
+        "paper_source_exchanges": sorted({
+            str(value).strip().lower() for value in paper_source_exchanges if str(value).strip()
+        }),
+        "intervals": sorted(map(str, intervals)),
+    }
+
+
+def campaign_uses_dynamic_universe(campaign: Mapping[str, Any]) -> bool:
+    provenance = campaign.get("source_provenance")
+    if not isinstance(provenance, Mapping):
+        try:
+            provenance = json.loads(str(campaign.get("source_provenance_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            provenance = {}
+    return str((provenance or {}).get("universe_scope_mode") or "").upper() == DYNAMIC_UNIVERSE_SCOPE_MODE
+
+
+def campaign_uses_stats_only_retention(campaign: Mapping[str, Any]) -> bool:
+    provenance = campaign.get("source_provenance")
+    if not isinstance(provenance, Mapping):
+        try:
+            provenance = json.loads(str(campaign.get("source_provenance_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            provenance = {}
+    return str((provenance or {}).get("storage_retention_mode") or "").upper() == "PAPER_STATS_ONLY"
+
+
+def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",), dynamic_universe: bool = False) -> dict[str, Any]:
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
+    from alphaforge.storage_policy import StoragePolicy
+    config_payload["storage_policy"] = StoragePolicy.from_config(runtime_config).identity()
     config_payload["symbols"] = sorted(map(str, symbols))
     config_payload["intervals"] = sorted(map(str, intervals))
     config_payload["campaign_intervals"] = sorted(map(str, intervals))
@@ -154,6 +245,15 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
                                                         for value in paper_source_exchanges if str(value).strip()})
     if not config_payload["paper_source_exchanges"]:
         raise ValueError("paper_source_exchanges must identify at least one supported provider")
+    dynamic_universe_payload = None
+    if dynamic_universe:
+        if symbols:
+            raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_EMPTY_FIXED_SYMBOLS")
+        dynamic_universe_payload = dynamic_universe_identity_payload(
+            runtime_config, intervals, config_payload["paper_source_exchanges"]
+        )
+        config_payload["campaign_universe_scope_mode"] = DYNAMIC_UNIVERSE_SCOPE_MODE
+        config_payload["dynamic_universe_constraints"] = dynamic_universe_payload["constraints"]
     strategy_payload = {
         "min_signal_score": getattr(runtime_config, "min_signal_score", None),
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
@@ -188,7 +288,11 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "release_id": rid,
         "config_hash": make_config_hash(config_payload),
         "strategy_config_hash": make_config_hash(strategy_payload),
-        "universe_hash": make_universe_hash(symbols, intervals),
+        "universe_hash": (
+            make_config_hash(dynamic_universe_payload)
+            if dynamic_universe_payload is not None
+            else make_universe_hash(symbols, intervals)
+        ),
         "execution_cost_config_hash": make_config_hash(execution_cost_payload),
         "config_payload": config_payload,
         "strategy_payload": strategy_payload,
@@ -244,12 +348,28 @@ def require_valid_release_id(release_id: str, conn: Any | None = None) -> None:
                   "DATABASE_IDENTITY_COLLISION" if validation["database_identity_collisions"] else "EMPTY")
         raise ValueError(f"INVALID_RELEASE_ID:{reason}")
 
-def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
+def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] | None = None, dynamic_universe: bool = False, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
     require_valid_release_id(release_id)
     bootstrap_campaign_schema(conn)
     require_valid_release_id(release_id, conn)
+    if dynamic_universe and symbols:
+        raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_EMPTY_FIXED_SYMBOLS")
+    if dynamic_universe and runtime_config is None:
+        raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_RUNTIME_CONFIG")
     prov=dict(source_provenance or {"provider":"BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE",
                                     "order_submission": "DISABLED", "source":"operator"})
+    if dynamic_universe:
+        prov["universe_scope_mode"] = DYNAMIC_UNIVERSE_SCOPE_MODE
+        prov["universe_scope_authority"] = "alphaforge.symbol_selector.build_selected_universe"
+    if runtime_config is not None and bool(getattr(runtime_config, "storage_stats_only_enabled", False)):
+        mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
+        if str(mode).upper() != "PAPER" or not dynamic_universe:
+            raise ValueError("PAPER_STATS_ONLY_REQUIRES_DYNAMIC_PAPER_CAMPAIGN")
+        from alphaforge.storage_policy import StoragePolicy
+        retention_policy = StoragePolicy.from_config(runtime_config)
+        prov["storage_retention_mode"] = "PAPER_STATS_ONLY"
+        prov["storage_policy_hash"] = retention_policy.identity_hash()
+        prov["qualification_semantics"] = "STATS_ONLY_NOT_QUALIFICATION_ELIGIBLE"
     if not prov: raise ValueError("missing provenance")
     provenance_scope = canonical_paper_source_exchanges(prov)
     identity_scope = tuple(sorted({str(value).strip().lower() for value in
@@ -257,9 +377,11 @@ def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols
     if not provenance_scope or identity_scope != provenance_scope:
         raise ValueError("PHASE8_CAMPAIGN_PROVIDER_IDENTITY_MISMATCH")
     if runtime_config is not None:
-        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps, paper_source_exchanges=identity_scope)
+        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps, paper_source_exchanges=identity_scope, dynamic_universe=dynamic_universe)
         ch=ident["config_hash"]; sh=ident["strategy_config_hash"]; uh=ident["universe_hash"]; ech=ident["execution_cost_config_hash"]
     else:
+        if dynamic_universe:
+            raise ValueError("DYNAMIC_UNIVERSE_REQUIRES_RUNTIME_CONFIG")
         config_payload = dict(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})
         config_payload["paper_source_exchanges"] = list(identity_scope)
         ch=make_config_hash(config_payload)
@@ -270,7 +392,7 @@ def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols
     c=BurnInCampaign(cid, release_id, expected_duration_seconds=float(duration_days)*86400, target_decisions=target_decisions, target_closed_trades=target_closed_trades, target_reject_forward_outcomes=target_reject_forward_outcomes, config_hash=ch, strategy_config_hash=sh, universe_hash=uh, git_commit=git_commit(), execution_cost_config_hash=ech, source_provenance=prov, symbols=list(symbols), intervals=list(intervals))
     c.validate()
     _exec(conn,"""INSERT INTO burnin_campaigns(campaign_id,release_id,campaign_status,created_at,started_at,completed_at,expected_duration_seconds,observed_duration_seconds,target_decisions,target_closed_trades,target_reject_forward_outcomes,active_run_id,config_hash,strategy_config_hash,universe_hash,git_commit,execution_cost_config_hash,source_provenance_json,symbols_json,intervals_json,restart_count,last_heartbeat_at,last_error,qualification_status,latest_qualification_id,evidence_completeness_status,schema_version) VALUES (:campaign_id,:release_id,:campaign_status,:created_at,:started_at,:completed_at,:expected_duration_seconds,:observed_duration_seconds,:target_decisions,:target_closed_trades,:target_reject_forward_outcomes,:active_run_id,:config_hash,:strategy_config_hash,:universe_hash,:git_commit,:execution_cost_config_hash,:source_provenance_json,:symbols_json,:intervals_json,:restart_count,:last_heartbeat_at,:last_error,:qualification_status,:latest_qualification_id,:evidence_completeness_status,:schema_version) ON CONFLICT(campaign_id) DO NOTHING""", {**asdict(c),"source_provenance_json":json.dumps(c.source_provenance,sort_keys=True),"symbols_json":json.dumps(c.symbols,sort_keys=True),"intervals_json":json.dumps(c.intervals,sort_keys=True)})
-    event(conn,c.campaign_id,"CAMPAIGN_CREATED",details={"release_id":release_id})
+    event(conn,c.campaign_id,"CAMPAIGN_CREATED",details={"release_id":release_id,"universe_scope_mode":prov.get("universe_scope_mode","FIXED_ALLOWLIST")})
     return c
 
 def get_campaign(conn: Any, campaign_id: str) -> dict[str,Any]|None:
@@ -435,9 +557,19 @@ def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str,
     event(conn, campaign_id, "PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL", burnin_run_id=run_id,
           details={"runtime_instance_id": runtime_instance_id, "transition": "STARTING->RUNNING"})
 
+def require_operational_campaign_evidence(conn: Any, campaign_id: str) -> None:
+    if not isinstance(conn, sqlite3.Connection) and conn.dialect.name != "sqlite":
+        return
+    if _exec(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='storage_archives'").fetchone():
+        if _exec(conn, "SELECT 1 FROM storage_archives WHERE campaign_id=:cid", {"cid": campaign_id}).fetchone():
+            raise RuntimeError("ARCHIVED_CAMPAIGN_REQUIRES_REPLAY_DATABASE")
+
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")
+    if _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND event_type=:kind LIMIT 1", {"cid": campaign_id, "kind": AMBIGUITY_MAINTENANCE_EVENT}).fetchone():
+        raise RuntimeError("PRESERVED_AMBIGUITY_MAINTENANCE_ONLY_NO_CONTINUATION")
+    require_operational_campaign_evidence(conn, campaign_id)
     require_valid_release_id(str(c.get("release_id") or ""), conn)
     pid = c.get("worker_pid")
     if pid:
@@ -725,13 +857,37 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     if duplicate_qualification_outcomes: integrity_issues.append("DUPLICATE_CANONICAL_REJECT_OUTCOMES")
     coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
     metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":qualification_unique_labels,"diagnostic_unique_reject_labels_persisted":unique_labels,"non_attributable_reject_labels_persisted":unique_labels-qualification_unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"duplicate_canonical_rejected_forward_outcomes":duplicate_qualification_outcomes,"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":identity_mode,"ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"diagnostic_ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(observed_duration),"source_run_ids":run_ids}
-    qualification_hash_payload={key:metrics[key] for key in ("sample_count","accepted_count","rejected_count","closed_trade_count","completed_rejected_forward_outcomes","ambiguous_rejected_forward_outcomes","observed_duration_seconds","source_run_ids","qualification_reject_identity_unit","qualification_reject_identity_mode")}
+    # Wall-clock campaign duration is progress state, not immutable source evidence.
+    # Keeping it in the evidence hash makes an unchanged campaign appear mutated
+    # merely because a later read happened in a different instant, defeating the
+    # #550 aggregate-reuse/SQLite-contention invariant.
+    qualification_hash_payload={key:metrics[key] for key in ("sample_count","accepted_count","rejected_count","closed_trade_count","completed_rejected_forward_outcomes","ambiguous_rejected_forward_outcomes","source_run_ids","qualification_reject_identity_unit","qualification_reject_identity_mode")}
     qualification_hash_payload["reject_outcomes"] = sorted(({
         "reject_decision_id": reject_decision_id_from_outcome(dict(r) if isinstance(r,sqlite3.Row) else dict(r._mapping)),
         "reject_reason": gv(r,"reject_reason"), "forward_label": gv(r,"forward_label"),
         "hypothetical_net_r_after_costs": gv(r,"hypothetical_net_r_after_costs")
     } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
+    management_rows = _exec(conn, """SELECT management_event_id,request_hash,trade_id,burnin_run_id,event_time,
+        action,requested_quantity,execution_price,previous_stop,new_stop,
+        previous_remaining_quantity,new_remaining_quantity,gross_pnl,execution_cost,
+        net_pnl,evidence_json FROM burnin_position_management_events
+        WHERE campaign_id=:cid ORDER BY id""", {"cid": campaign_id}).fetchall()
+    qualification_hash_payload["position_management_events"] = [
+        dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
+        for row in management_rows
+    ]
+    metrics["position_management_event_count"] = len(management_rows)
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
+    if campaign_uses_stats_only_retention(c):
+        from alphaforge.storage_policy import stats_only_campaign_summary
+        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection.driver_connection
+        retention = stats_only_campaign_summary(raw, campaign_id)
+        metrics["universe_evidence_mode"] = "PAPER_STATS_ONLY"
+        metrics["qualification_eligible"] = False
+        metrics["universe_retention"] = retention
+    else:
+        metrics["universe_evidence_mode"] = "FULL_REPLAY"
+        metrics["qualification_eligible"] = True
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     metrics["reject_candidate_feasibility_shadow"] = reject_candidate_feasibility_shadow(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
@@ -917,6 +1073,38 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
 
 def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresholds|None=None) -> dict[str,Any]:
     configure_sqlite_engine(engine)
+    # The progress/hash check is read-only.  Do not rebuild the synthetic run
+    # when the latest qualification already names the exact current evidence.
+    with engine.connect() as read_conn:
+        require_operational_campaign_evidence(read_conn, campaign_id)
+        current = aggregate_campaign(read_conn, campaign_id)
+        campaign = get_campaign(read_conn, campaign_id)
+        if campaign and campaign_uses_stats_only_retention(campaign):
+            return {
+                "campaign_id": campaign_id,
+                "qualification_id": None,
+                "verdict": "STATS_ONLY_NOT_QUALIFICATION_ELIGIBLE",
+                "aggregate_evidence_hash": current.get("evidence_hash"),
+                "aggregate_run_id": None,
+                "materialized": False,
+                "full_universe_replay_available": False,
+            }
+        latest = None
+        if campaign and campaign.get("latest_qualification_id"):
+            latest = _exec(read_conn, """SELECT qualification_id,status,aggregate_evidence_hash
+                FROM burnin_qualification_snapshots WHERE qualification_id=:qid""",
+                {"qid": campaign["latest_qualification_id"]}).mappings().first()
+    if (latest and current.get("status") == "OK"
+            and latest.get("aggregate_evidence_hash") == current.get("evidence_hash")):
+        return {
+            "campaign_id": campaign_id,
+            "qualification_id": latest["qualification_id"],
+            "verdict": latest["status"],
+            "aggregate_evidence_hash": current["evidence_hash"],
+            "aggregate_run_id": f"{campaign_id}__aggregate",
+            "materialized": False,
+        }
+
     def rebuild(conn: Any) -> tuple[str, dict[str, Any]]:
         bootstrap_campaign_schema(conn)
         aggregate_run_id = materialize_campaign_aggregate(conn, campaign_id)
@@ -935,7 +1123,7 @@ def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresho
         _exec(conn,"UPDATE burnin_campaigns SET qualification_status=:s, latest_qualification_id=:qid, evidence_completeness_status=:ev WHERE campaign_id=:cid",{"cid":campaign_id,"s":snap.status,"qid":snap.qualification_id,"ev":snap.evidence_completeness_status})
         event(conn,campaign_id,"QUALIFICATION_SNAPSHOT",burnin_run_id=aggregate_run_id,details={"qualification_id":snap.qualification_id,"status":snap.status})
     _with_fresh_lock_retry(engine, persist_snapshot)
-    return {"campaign_id":campaign_id,"qualification_id":snap.qualification_id,"verdict":snap.status,"aggregate_evidence_hash":agg["evidence_hash"],"aggregate_run_id":aggregate_run_id}
+    return {"campaign_id":campaign_id,"qualification_id":snap.qualification_id,"verdict":snap.status,"aggregate_evidence_hash":agg["evidence_hash"],"aggregate_run_id":aggregate_run_id,"materialized":True}
 
 def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id: str) -> dict[str,Any]:
     conn=sqlite3.connect(str(db_path)); conn.row_factory=sqlite3.Row
@@ -945,17 +1133,26 @@ def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id:
         root=Path(output_dir)/f"burnin_campaign_{campaign_id}"; root.mkdir(parents=True,exist_ok=True)
         agg=aggregate_campaign(conn,campaign_id); run_ids=agg.get("metrics",{}).get("source_run_ids",[])
         (root/"campaign.json").write_text(json.dumps(c,indent=2,sort_keys=True,default=str))
-        tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
+        tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","position_management_events.csv":"burnin_position_management_events","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
         counts={}
         for fname,table in tables.items():
             if table == "burnin_campaign_runs": rows=conn.execute("SELECT cr.*,r.observed_duration_seconds FROM burnin_campaign_runs cr JOIN burnin_runs r ON r.burnin_run_id=cr.burnin_run_id WHERE cr.campaign_id=? ORDER BY cr.id",(campaign_id,)).fetchall()
-            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
+            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes","burnin_position_management_events"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
             else:
                 q=",".join("?" for _ in run_ids) or "''"; rows=conn.execute(f"SELECT * FROM {table} WHERE burnin_run_id IN ({q}) ORDER BY id",run_ids).fetchall()
             counts[fname]=len(rows); 
             with (root/fname).open("w",newline="") as fh:
                 if rows: w=csv.DictWriter(fh,fieldnames=list(dict(rows[0]).keys())); w.writeheader(); w.writerows([dict(r) for r in rows])
                 else: csv.writer(fh).writerow(["no_evidence"])
+        # Counterfactual #612 evidence is exported only when it exists. OFF campaigns
+        # retain the previous authoritative bundle surface byte-for-byte.
+        if shadow_table_exists(conn):
+            shadow_rows=conn.execute("SELECT * FROM burnin_position_management_shadow_proposals WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
+            if shadow_rows:
+                shadow_name="position_management_shadow_proposals.csv"
+                counts[shadow_name]=len(shadow_rows)
+                with (root/shadow_name).open("w",newline="") as fh:
+                    w=csv.DictWriter(fh,fieldnames=list(dict(shadow_rows[0]).keys())); w.writeheader(); w.writerows([dict(r) for r in shadow_rows])
         qs=conn.execute("SELECT * FROM burnin_qualification_snapshots WHERE campaign_id=? OR burnin_run_id IN (%s) ORDER BY id" % (",".join("?" for _ in run_ids) or "''"), [campaign_id,*run_ids]).fetchall()
         (root/"qualification_snapshots.json").write_text(json.dumps([dict(r) for r in qs],indent=2,sort_keys=True,default=str)); counts["qualification_snapshots.json"]=len(qs)
         (root/"config.json").write_text(json.dumps({"config_hash":c["config_hash"],"strategy_config_hash":c["strategy_config_hash"],"universe_hash":c["universe_hash"]},indent=2,sort_keys=True))
@@ -1035,7 +1232,7 @@ def check_campaign_completion(conn: Any, campaign_id: str) -> dict[str, Any]:
         raise KeyError("campaign not found")
     agg = aggregate_campaign(conn, campaign_id)
     metrics = agg.get("metrics", {}) if agg.get("status") == "OK" else {}
-    pending_rejects = int((_exec(conn, "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY')", {"cid": campaign_id}).fetchone()[0]) or 0)
+    pending_rejects = int((_exec(conn, f"SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND {UNRESOLVED_REJECT_SQL}", {"cid": campaign_id}).fetchone()[0]) or 0)
     pending_positions = int((_exec(conn, "SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'", {"cid": campaign_id}).fetchone()[0]) or 0)
     blockers: list[str] = []
     if c.get("expected_duration_seconds") is not None and float(c.get("observed_duration_seconds") or 0) < float(c["expected_duration_seconds"]): blockers.append("DURATION_INCOMPLETE")
@@ -1094,12 +1291,14 @@ class BinanceReadOnlyCandleProvider:
 
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
-    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
+    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, position_management_provider: Any | None = None, position_management_shadow_provider: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.position_management_provider = position_management_provider; self.position_management_shadow_provider = position_management_shadow_provider; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
             c = get_campaign(conn, self.campaign_id) or {}
+            if campaign_uses_stats_only_retention(c):
+                return False
             count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
             agg = aggregate_campaign(conn, self.campaign_id)
             latest_hash = _exec(conn,"SELECT aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE qualification_id=:qid",{"qid":c.get("latest_qualification_id")}).scalar() if c.get("latest_qualification_id") else None
@@ -1112,7 +1311,12 @@ class BurnInCampaignRunner:
         elapsed = time.monotonic() - self._last_qualification_monotonic
         enough_new = count - self._last_qualification_observation_count >= self.qualification_observation_threshold
         evidence_changed = latest_hash is not None and latest_hash != agg.get("evidence_hash")
-        return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and (enough_new or evidence_changed))
+        return (
+            first_evidence
+            or (evidence_changed and near_completion)
+            or (elapsed >= self.qualification_interval_seconds
+                and (enough_new or evidence_changed))
+        )
 
     def _qualify_if_due(self) -> dict[str, Any] | None:
         # Resolver and maintenance run in separate worker threads. Qualification
@@ -1147,15 +1351,25 @@ class BurnInCampaignRunner:
             event(conn, self.campaign_id, "RESOLVER_BATCH_FAILED", details=details)
 
     def resolver_tick(self) -> dict[str, Any]:
-        from alphaforge.burnin_resolver import resolve_campaign_batch, resolve_campaign_positions
+        from alphaforge.burnin_resolver import due_reject_labels, resolve_campaign_batch, resolve_campaign_positions
         try:
             with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
-                due = _exec(conn, "SELECT symbol, timeframe, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol,timeframe", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
-                positions = _exec(conn, "SELECT trade_id,symbol,entry_time FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
+                reject_resolution_time = utc_now()
+                labels = due_reject_labels(conn, self.campaign_id, now=reject_resolution_time)
+                windows: dict[tuple[str, str], dict[str, Any]] = {}
+                for label in labels:
+                    key = (label["symbol"], label["timeframe"])
+                    window = windows.setdefault(key, {"symbol": key[0], "timeframe": key[1],
+                                                     "start_ts": label["decision_timestamp"], "end_ts": label["due_at"]})
+                    window["start_ts"] = min(window["start_ts"], label["decision_timestamp"])
+                    window["end_ts"] = max(window["end_ts"], label["due_at"])
+                due = list(windows.values())
+                positions = _exec(conn, "SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
+                shadow_campaign = get_campaign(conn, self.campaign_id) if self.position_management_shadow_provider is not None else None
             candles: dict[str, Any] = {}
             for row in due:
-                r = _row_dict(row)
+                r = row
                 try: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"], r.get("timeframe"))
                 except TypeError: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
             resolution_time = utc_now()
@@ -1167,19 +1381,76 @@ class BurnInCampaignRunner:
                 # An idle resolver still needs a real read after an outage;
                 # an empty batch alone cannot prove the candle provider recovered.
                 with self.engine.connect() as conn:
-                    symbols = (get_campaign(conn, self.campaign_id) or {}).get("symbols") or []
-                if not symbols:
+                    campaign = get_campaign(conn, self.campaign_id) or {}
+                    symbols = campaign.get("symbols") or []
+                probe_symbol = symbols[0] if symbols else ("BTCUSDT" if campaign_uses_dynamic_universe(campaign) else None)
+                if not probe_symbol:
                     raise ProviderFailure("PROVIDER_FAILURE:NO_PROBE_SYMBOL")
                 probe_start = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
-                try: self.candle_provider(symbols[0], probe_start, resolution_time, "1m")
-                except TypeError: self.candle_provider(symbols[0], probe_start, resolution_time)
-            def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int]]:
+                try: self.candle_provider(probe_symbol, probe_start, resolution_time, "1m")
+                except TypeError: self.candle_provider(probe_symbol, probe_start, resolution_time)
+            management_actions: dict[str, list[dict[str, Any]]] = {}
+            if self.position_management_provider is not None:
+                for raw in positions:
+                    position = _row_dict(raw)
+                    trade_id = str(position.get("trade_id") or "")
+                    position_candles = (
+                        candles.get((position.get("symbol"), "position", trade_id)) or []
+                    )
+                    proposed = self.position_management_provider(
+                        dict(position), list(position_candles), resolution_time
+                    )
+                    if proposed is None:
+                        continue
+                    if isinstance(proposed, Mapping):
+                        proposed_actions = proposed.get("actions")
+                    else:
+                        proposed_actions = proposed
+                    if not isinstance(proposed_actions, (list, tuple)):
+                        raise ValueError("POSITION_MANAGEMENT_PROVIDER_ACTIONS_INVALID")
+                    actions = [dict(action) for action in proposed_actions if isinstance(action, Mapping)]
+                    if len(actions) != len(proposed_actions):
+                        raise ValueError("POSITION_MANAGEMENT_PROVIDER_ACTION_INVALID")
+                    if actions:
+                        management_actions[trade_id] = actions
+            shadow_proposals: list[dict[str, Any]] = []
+            if self.position_management_shadow_provider is not None:
+                if not shadow_campaign:
+                    raise ValueError("POSITION_MANAGEMENT_SHADOW_CAMPAIGN_IDENTITY_MISSING")
+                shadow_context = {**dict(shadow_campaign), "execution_mode": "PAPER"}
+                for raw in positions:
+                    position = _row_dict(raw)
+                    trade_id = str(position.get("trade_id") or "")
+                    position_candles = candles.get((position.get("symbol"), "position", trade_id)) or []
+                    proposed = self.position_management_shadow_provider(
+                        dict(position), list(position_candles), resolution_time, shadow_context
+                    )
+                    if proposed is None:
+                        continue
+                    proposed_rows = proposed.get("proposals") if isinstance(proposed, Mapping) else proposed
+                    if not isinstance(proposed_rows, (list, tuple)):
+                        raise ValueError("POSITION_MANAGEMENT_SHADOW_PROPOSALS_INVALID")
+                    rows = [dict(row) for row in proposed_rows if isinstance(row, Mapping)]
+                    if len(rows) != len(proposed_rows):
+                        raise ValueError("POSITION_MANAGEMENT_SHADOW_PROPOSAL_INVALID")
+                    shadow_proposals.extend(rows)
+            def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int], dict[str, int] | None]:
                 self._persist_pending_failure_events(conn)
-                counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
-                position_counts = resolve_campaign_positions(conn, self.campaign_id, candles, now=resolution_time)
-                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts})
-                return counts, position_counts
-            counts, position_counts = _with_fresh_lock_retry(self.engine, persist_resolution)
+                counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=reject_resolution_time)
+                shadow_counts = None
+                if shadow_proposals:
+                    shadow_counts = persist_position_management_shadow_proposals(conn, shadow_proposals)
+                position_counts = resolve_campaign_positions(
+                    conn, self.campaign_id, candles, now=resolution_time,
+                    management_actions_by_trade=management_actions,
+                )
+                details = {"counts": counts, "position_counts": position_counts, "position_management_action_count": sum(len(value) for value in management_actions.values()), "position_management_provider_configured": self.position_management_provider is not None}
+                if self.position_management_shadow_provider is not None:
+                    details["position_management_shadow_proposal_count"] = len(shadow_proposals)
+                    details["position_management_shadow_persist"] = shadow_counts or {"inserted": 0, "idempotent": 0}
+                event(conn, self.campaign_id, "RESOLVER_BATCH", details=details)
+                return counts, position_counts, shadow_counts
+            counts, position_counts, shadow_counts = _with_fresh_lock_retry(self.engine, persist_resolution)
             self._pending_resolver_failure_events.clear()
             q = self._qualify_if_due()
             if q is not None:
@@ -1190,7 +1461,10 @@ class BurnInCampaignRunner:
             self.resolver_failure_count = 0
             self._provider_failure_active = False
             self._transient_failure_started_monotonic = None
-            return {"status": "OK", "resolver_counts": counts, "position_counts": position_counts, "qualification": q, "provider_recovered": recovered}
+            result = {"status": "OK", "resolver_counts": counts, "position_counts": position_counts, "qualification": q, "provider_recovered": recovered}
+            if self.position_management_shadow_provider is not None:
+                result["position_management_shadow"] = shadow_counts or {"inserted": 0, "idempotent": 0}
+            return result
         except Exception as exc:
             if isinstance(exc, OperationalError) and not _is_sqlite_lock_error(exc):
                 raise
@@ -1287,6 +1561,7 @@ class BurnInCampaignRunner:
         os.environ["EXECUTION_MODE"] = "PAPER"
         self._stop_event = asyncio.Event()
         runtime = None
+        controlled_storage_exit: dict[str, Any] | None = None
         tasks: list[asyncio.Task[Any]] = []
         try:
             if self.runtime_factory is None:
@@ -1331,6 +1606,44 @@ class BurnInCampaignRunner:
                     status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
                 if status in {"STARTING", "RUNNING"}:
                     if task.get_name() == "phase8_runtime_start":
+                        # Only the attached runtime's persisted, scoped recovery
+                        # snapshot can distinguish a deliberate storage stop from
+                        # an unexpected normal return. Never trust in-memory flags.
+                        with self.engine.connect() as conn:
+                            campaign = get_campaign(conn, self.campaign_id) or {}
+                            try:
+                                row = conn.exec_driver_sql("""
+                                SELECT id,runtime_status,fail_closed_reason,
+                                       active_position_count,pending_order_count,
+                                       unknown_exchange_state,reconciliation_status,
+                                       recovery_action_required,diagnostics_json
+                                FROM runtime_state_snapshots
+                                WHERE campaign_id=? AND burnin_run_id=?
+                                  AND instance_id=? AND startup_id=? AND mode='PAPER'
+                                ORDER BY id DESC LIMIT 1
+                                """, (self.campaign_id, campaign.get("active_run_id"),
+                                      getattr(runtime, "runtime_instance_id", None),
+                                      getattr(runtime, "startup_id", None))).mappings().first()
+                            except OperationalError:
+                                # Missing/unreadable proof is an unexpected exit.
+                                row = None
+                        if row and (row["runtime_status"] == "RECOVERY_REQUIRED"
+                                    and row["fail_closed_reason"] == "STORAGE_PRESSURE_RECOVERY_REQUIRED"
+                                    and row["recovery_action_required"] == 1
+                                    and row["active_position_count"] == 0
+                                    and row["pending_order_count"] == 0
+                                    and row["unknown_exchange_state"] == 0
+                                    and row["reconciliation_status"] == "CLEAN"):
+                            try:
+                                report = json.loads(row["diagnostics_json"] or "{}").get("storage_policy")
+                            except (TypeError, ValueError):
+                                report = None
+                            if isinstance(report, dict) and report.get("blocked") is True:
+                                controlled_storage_exit = {"storage_report": {**report, "recovery_state_persisted": True},
+                                                           "recovery_snapshot_id": row["id"],
+                                                           "runtime_instance_id": runtime.runtime_instance_id,
+                                                           "startup_id": runtime.startup_id}
+                                raise RuntimeError("STORAGE_PRESSURE_RECOVERY_REQUIRED")
                         raise RuntimeError("RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING")
                     raise RuntimeError(f"SUPERVISOR_EXITED_WHILE_CAMPAIGN_RUNNING:{task.get_name()}")
             return {"status": "STOPPED", "campaign_id": self.campaign_id}
@@ -1338,14 +1651,16 @@ class BurnInCampaignRunner:
             with self.engine.begin() as conn:
                 campaign = get_campaign(conn, self.campaign_id) or {}
                 if campaign.get("campaign_status") in {"STARTING", "RUNNING"}:
+                    reason = "STORAGE_PRESSURE_RECOVERY_REQUIRED" if controlled_storage_exit else "RUNTIME_SUPERVISION_FAILED"
                     terminalize_active_campaign_run(
                         conn,
                         self.campaign_id,
-                        run_status="FAILED",
-                        campaign_status="FAILED",
-                        reason="RUNTIME_SUPERVISION_FAILED",
-                        event_type="RUNTIME_SUPERVISION_FAILED",
-                        details={"exception_type": exc.__class__.__name__, "message": str(exc)},
+                        run_status="RECOVERY_REQUIRED" if controlled_storage_exit else "FAILED",
+                        campaign_status="RECOVERY_REQUIRED" if controlled_storage_exit else "FAILED",
+                        reason=reason,
+                        event_type=reason,
+                        details={"exception_type": exc.__class__.__name__, "message": str(exc),
+                                 **(controlled_storage_exit or {})},
                     )
             raise
         finally:

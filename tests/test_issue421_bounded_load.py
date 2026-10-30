@@ -256,6 +256,12 @@ def test_active_paper_writes_do_not_starve_read_only_readiness_or_audit(tmp_path
                 reads["readiness"] += 1
                 ingest_audit_evidence(source, audit, burnin_run_id=run_id)
                 reads["audit"] += 1
+            # The loop may observe the penultimate committed batch immediately
+            # before writer_done flips.  One final idempotent ingest after writer
+            # completion proves eventual catch-up without weakening the 64/64
+            # evidence assertion or extending the load deadline.
+            ingest_audit_evidence(source, audit, burnin_run_id=run_id)
+            reads["audit"] += 1
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
         finally:

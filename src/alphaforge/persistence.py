@@ -17,6 +17,8 @@ from alphaforge.burnin import DDL as PHASE7_BURNIN_DDL
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.execution import execution_context_is_unavailable
 from alphaforge.expectancy_evidence import EXPECTANCY_EVIDENCE_DDL, EXPECTANCY_EVIDENCE_INDEX_DDL
+from alphaforge.portfolio_allocation_evidence import PORTFOLIO_ALLOCATION_DDL
+from alphaforge.universe_evidence import UNIVERSE_SELECTION_DDL
 
 
 
@@ -245,6 +247,11 @@ def init_db(database_url: str | None = None) -> Engine:
             decision TEXT,
             score REAL,
             raw_rr REAL,
+            candidate_raw_rr REAL,
+            executable_raw_rr REAL,
+            remaining_execution_penalty REAL,
+            rr_basis TEXT,
+            execution_cost_semantics TEXT,
             effective_rr REAL,
             min_effective_rr REAL,
             expectancy REAL,
@@ -401,6 +408,8 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS canary_run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, event_type TEXT NOT NULL, event_ts TEXT NOT NULL, shadow_mode INTEGER NOT NULL, canary_mode INTEGER NOT NULL, mutation_attempted INTEGER NOT NULL, mutation_blocked INTEGER NOT NULL, evidence_json TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS rollback_verification_events (id INTEGER PRIMARY KEY AUTOINCREMENT, verification_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, verified_at TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS runbook_evidence (id INTEGER PRIMARY KEY AUTOINCREMENT, evidence_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, recorded_at TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL)",
+        *UNIVERSE_SELECTION_DDL,
+        *PORTFOLIO_ALLOCATION_DDL,
         *PHASE7_BURNIN_DDL,
     ]
     with engine.begin() as conn:
@@ -409,10 +418,12 @@ def init_db(database_url: str | None = None) -> Engine:
         _apply_sqlite_migrations(conn)
     # Provision runtime-owned tables through their canonical schema functions;
     # init_db orchestrates them but does not duplicate their definitions.
+    from alphaforge.execution_ownership import ensure_execution_ownership_schema
     from alphaforge.reconciliation import ensure_reconciliation_tables
     from alphaforge.runtime_control import ensure_runtime_control_schema
     from alphaforge.runtime_state import ensure_runtime_state_schema
 
+    ensure_execution_ownership_schema(engine)
     ensure_reconciliation_tables(engine)
     ensure_runtime_control_schema(engine)
     ensure_runtime_state_schema(engine)
@@ -576,6 +587,9 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("setup_reason", "setup_reason TEXT"), ("regime", "regime TEXT"),
             ("lifecycle_state_before", "lifecycle_state_before TEXT"), ("lifecycle_state_after", "lifecycle_state_after TEXT"),
             ("decision", "decision TEXT"), ("score", "score REAL"), ("raw_rr", "raw_rr REAL"),
+            ("candidate_raw_rr", "candidate_raw_rr REAL"), ("executable_raw_rr", "executable_raw_rr REAL"),
+            ("remaining_execution_penalty", "remaining_execution_penalty REAL"), ("rr_basis", "rr_basis TEXT"),
+            ("execution_cost_semantics", "execution_cost_semantics TEXT"),
             ("effective_rr", "effective_rr REAL"), ("min_effective_rr", "min_effective_rr REAL"),
             ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
             ("reject_reason", "reject_reason TEXT"), ("cancel_reason", "cancel_reason TEXT"), ("close_reason", "close_reason TEXT"),
@@ -689,10 +703,24 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
         ("2026_09_22_decision_threshold_provenance", "Add decision-time min_effective_rr provenance to durable decision evidence."),
         ("2026_09_26_rollback_evidence_git_provenance", "Add exact git commit provenance to rollback validation evidence."),
+        ("2026_09_27_decision_rr_stage_semantics", "Separate candidate, executable, remaining-penalty and effective RR evidence stages."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)
     _ensure_sqlite_runtime_schema(conn)
+    decision_evidence_cols = _sqlite_columns(conn, "decision_evidence")
+    if {"raw_rr", "rr_basis"} <= decision_evidence_cols:
+        # Historical raw_rr differs by writer/mode. Never infer a stage from it.
+        # Keep legacy rows queryable but explicitly non-authoritative for staged
+        # RR readiness/parity until fresh evidence is generated.
+        conn.execute(text("""
+            UPDATE decision_evidence
+            SET rr_basis='LEGACY_AMBIGUOUS_RAW_RR'
+            WHERE raw_rr IS NOT NULL
+              AND (rr_basis IS NULL OR TRIM(rr_basis)='')
+              AND candidate_raw_rr IS NULL
+              AND executable_raw_rr IS NULL
+        """))
     signal_cols = _sqlite_columns(conn, "signals")
     if "signal_id" in signal_cols and "uq_signals_signal_id_not_null" not in existing:
         conn.execute(text("UPDATE signals SET signal_id = 'legacy-signal-' || id WHERE signal_id IS NULL OR TRIM(signal_id) = ''"))
@@ -853,7 +881,8 @@ def save_ai_decision_features(*args, execution_features=None, **kwargs):
         return None
 
 
-def save_signal(session: Any, **signal: Any) -> Any:
+def save_signal(session: Any, *, _commit: bool = True, _raise_on_error: bool = False,
+                **signal: Any) -> Any:
     if session is None:
         return None
     now = _utc_now_iso()
@@ -871,14 +900,17 @@ def save_signal(session: Any, **signal: Any) -> Any:
             "mode": signal.get("mode"), "score": signal.get("score"), "rr": signal.get("rr"), "effective_rr": signal.get("effective_rr"),
             "expectancy_bucket": signal.get("expectancy_bucket"), "created_at": now, "updated_at": now,
         })
-        if hasattr(session, "commit"):
+        if _commit and hasattr(session, "commit"):
             session.commit()
         return signal_id or row.lastrowid
     except Exception:
+        if _raise_on_error:
+            raise
         return signal.get("id")
 
 
-def save_order_decision(session: Any, **decision: Any) -> Any:
+def save_order_decision(session: Any, *, _commit: bool = True,
+                        _raise_on_error: bool = False, **decision: Any) -> Any:
     if session is None:
         return None
     now = _utc_now_iso()
@@ -946,10 +978,12 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_context_is_unavailable(execution_ctx))) else 0,
         "created_at": now, "updated_at": now,
     })
-        if hasattr(session, "commit"):
+        if _commit and hasattr(session, "commit"):
             session.commit()
         return decision_id or row.lastrowid
     except Exception:
+        if _raise_on_error:
+            raise
         return None
 
 
@@ -957,7 +991,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
 DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
     "evidence_id", "run_id", "profile_id", "profile_name", "mode", "timestamp", "symbol", "side",
     "setup_type", "setup_reason", "regime", "lifecycle_state_before", "lifecycle_state_after",
-    "decision", "score", "raw_rr", "effective_rr", "min_effective_rr", "expectancy",
+    "decision", "score", "raw_rr", "candidate_raw_rr", "executable_raw_rr",
+    "remaining_execution_penalty", "rr_basis", "execution_cost_semantics",
+    "effective_rr", "min_effective_rr", "expectancy",
     "expectancy_bucket", "reject_reason", "cancel_reason", "close_reason", "entry", "sl", "tp",
     "trigger_price", "close_price", "net_pnl_pct", "net_pnl_usdt", "hold_minutes",
     "volume_24h_usdt", "spread_pct", "funding_rate_pct", "expected_slippage_pct",
@@ -977,7 +1013,12 @@ DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
 )
 
 _DECISION_EVIDENCE_JSON_FIELDS = {
-    "diagnostics_json", "portfolio_diagnostics_json", "risk_flags", "reject_flags", "unavailable_fields",
+    "diagnostics_json",
+    "portfolio_diagnostics_json",
+    "risk_flags",
+    "reject_flags",
+    "unavailable_fields",
+    "execution_cost_semantics",
 }
 
 
@@ -1007,6 +1048,10 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
     }.get(decision_raw, decision_raw or None)
 
     payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}
+    # Compatibility contract: raw_rr means candidate/structural RR only.
+    # Never let executable RR silently occupy the legacy alias.
+    if evidence.get("candidate_raw_rr") is not None:
+        payload["raw_rr"] = evidence.get("candidate_raw_rr")
     payload["evidence_id"] = evidence_id
     payload["decision"] = decision
     payload["timestamp"] = evidence.get("timestamp")
@@ -1041,7 +1086,8 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
         return None
 
 
-def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, Any] | None:
+def save_rejected_decision_artifact(session: Any, *, _commit: bool = True,
+                                    **artifact: Any) -> dict[str, Any] | None:
     """Persist a rejected signal/order as one auditable SQL artifact.
 
     The helper intentionally writes the signal, order_decision, and lifecycle
@@ -1081,9 +1127,11 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
         "effective_rr": effective_rr,
         "expectancy_bucket": artifact.get("expectancy_bucket"),
     }
-    save_signal(session, **signal_payload)
+    save_signal(session, _commit=False, _raise_on_error=True, **signal_payload)
     decision_id = save_order_decision(
         session,
+        _commit=False,
+        _raise_on_error=True,
         decision_id=artifact.get("decision_id") or f"{signal_id}:REJECTED",
         signal_id=signal_id,
         order_id=artifact.get("order_id"),
@@ -1113,6 +1161,8 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
     )
     lifecycle_ok = save_trade_lifecycle_event(
         session,
+        _commit=False,
+        _raise_on_error=True,
         event_id=artifact.get("event_id") or f"{signal_id}:SIGNAL_REJECTED",
         signal_id=signal_id,
         order_id=artifact.get("order_id"),
@@ -1134,10 +1184,13 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
     )
     if not decision_id or not lifecycle_ok:
         return None
+    if _commit and hasattr(session, "commit"):
+        session.commit()
     return {"signal_id": signal_id, "decision_id": decision_id, "reject_reason": reason}
 
 
-def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
+def save_trade_lifecycle_event(session: Any, *, _commit: bool = True,
+                               _raise_on_error: bool = False, **event: Any) -> Any:
     if session is None:
         return False
     now = _utc_now_iso()
@@ -1225,9 +1278,30 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
             lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason,
             incident_payload=excluded.incident_payload
     """)
+    # event_id is the stable identity for an explicit lifecycle replay.  Check
+    # it before using the secondary (signal_id,event_ts,lifecycle_state) key so
+    # a retry with timestamp drift converges on the existing authoritative row
+    # instead of attempting a fresh insert that violates event_id uniqueness.
+    #
+    # When event_id is new, keep the lifecycle-key UPSERT as the primary path;
+    # this preserves convergence for callers that retry the same lifecycle key
+    # with a newly generated event_id.
+    primary_statement = statement_by_lifecycle_key
+    event_id_authority_hit = False
     try:
-        session.execute(statement_by_lifecycle_key, payload)
+        if event.get("event_id") or event.get("id"):
+            lookup_sql = "SELECT 1 FROM trade_lifecycle_events WHERE event_id=:event_id LIMIT 1"
+            existing_event = session.execute(
+                lookup_sql if isinstance(session, sqlite3.Connection) else text(lookup_sql),
+                {"event_id": event_id},
+            ).fetchone()
+            if existing_event is not None:
+                primary_statement = statement_by_event_id
+                event_id_authority_hit = True
+        session.execute(primary_statement, payload)
     except Exception as first_error:
+        if _raise_on_error or event_id_authority_hit:
+            raise
         # A failed SQLAlchemy statement poisons the transaction.  Roll it back
         # before the compatibility conflict-target retry, and never hide the
         # original database evidence if both forms fail.
@@ -1245,7 +1319,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
                 f"fallback={fallback_error.__class__.__name__}:{fallback_error}"
             ) from first_error
 
-    if hasattr(session, "commit"):
+    if _commit and hasattr(session, "commit"):
         try:
             session.commit()
         except Exception as commit_error:

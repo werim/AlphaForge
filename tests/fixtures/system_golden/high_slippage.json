@@ -11,22 +11,22 @@
     "market_context": {
       "source_exchange": "fixture",
       "timeframe": "1m",
-      "entry": 100.0,
-      "sl": 99.0,
-      "tp": 103.0,
-      "rr": 3.0,
+      "entry": 100,
+      "sl": 99,
+      "tp": 103,
+      "rr": 3,
       "side": "LONG",
       "setup": "LONG_CONTINUATION",
       "geometry_status": "COMPLETE",
       "geometry_source": "FROZEN_REPLAY",
-      "volume_24h_usdt": 90000000.0,
+      "volume_24h_usdt": 90000000,
       "spread_pct": 0.0002,
       "spread_status": "MEASURED",
       "expected_slippage_pct": 0.003,
       "slippage_status": "MODEL_ESTIMATE",
       "liquidity_score": 0.95,
       "liquidity_status": "MEASURED",
-      "funding_rate_pct": 0.0,
+      "funding_rate_pct": 0,
       "funding_status": "MEASURED",
       "orderbook_imbalance": 0.1,
       "orderbook_status": "MEASURED",
@@ -35,15 +35,25 @@
       "trend_strength": 0.95,
       "chop_score": 0.05,
       "mtf": {
-        "setup": {"setup_quality": 1.0},
-        "execution": {
-          "momentum_confirmation": 1.0,
-          "liquidity_score": 1.0,
-          "volatility_fit": 1.0
+        "setup": {
+          "setup_quality": 1
         },
-        "regime": {"regime": "TRENDING", "alignment": 1.0},
-        "alignment": {"aligned": true}
+        "execution": {
+          "momentum_confirmation": 1,
+          "liquidity_score": 1,
+          "volatility_fit": 1
+        },
+        "regime": {
+          "regime": "TRENDING",
+          "alignment": 1
+        },
+        "alignment": {
+          "aligned": true
+        }
       }
+    },
+    "runtime_config": {
+      "max_expected_slippage_pct": 0.002
     }
   },
   "expected": {

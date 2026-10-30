@@ -109,6 +109,7 @@ def test_paper_final_gate_rejects_tight_stop_from_executable_geometry():
         "sl": 99.9,
         "tp": 100.12,
         "rr": 1.2,
+        "expectancy": 0.2,
         "side": "LONG",
         "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0,
@@ -141,6 +142,7 @@ def test_paper_final_gate_accepts_normal_width_fill_geometry():
         "sl": 99.0,
         "tp": 101.2,
         "rr": 1.2,
+        "expectancy": 0.2,
         "side": "LONG",
         "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0,
@@ -171,7 +173,7 @@ def test_runtime_rejects_same_direction_btc_eth_when_correlation_limit_is_one():
     runtime.on_reject_persist = lambda payload: rejects.append(payload)
     market = {
         "entry": 100.0, "sl": 99.0, "tp": 101.2, "rr": 1.2,
-        "side": "LONG", "market_ts": time.time(),
+        "expectancy": 0.2, "side": "LONG", "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0, "spread_pct": 0.0,
         "expected_slippage_pct": 0.0002, "latency_ms": 0.0,
         "funding_rate_pct": 0.0, "liquidity_score": 1.0,

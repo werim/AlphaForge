@@ -76,7 +76,11 @@ class _AlwaysAcceptBrain:
             limit_price = None
             stop_price = None
 
-        return {}, _Plan(), "ok"
+        return SimpleNamespace(
+            total_score=0.9,
+            components={},
+            probabilistic={"raw_expectancy": 0.2, "expectancy_after_costs": 0.2},
+        ), _Plan(), "ok"
 
 
 def test_execution_mode_from_env_parses_and_validates() -> None:
@@ -102,12 +106,12 @@ def test_paper_execution_simulator_produces_fill() -> None:
 
 
 def test_attached_campaign_allowlist_bounds_and_deduplicates_before_selection(monkeypatch):
-    candidates = [{"symbol": symbol, "source_exchange": "binance"} for symbol in
+    now = time.time()
+    candidates = [{"symbol": symbol, "source_exchange": "binance", "market_ts": now,
+                   "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
+                   "volatility_pct": 0.4, "liquidity_score": 0.9} for symbol in
                   ("BTCUSDT", "ETHUSDT", "BCHUSDT", "XRPUSDT", "BNBUSDT", "BTCUSDT")]
     observed = []
-    monkeypatch.setattr(runtime_module, "select_symbols", lambda rows, cfg: [
-        SimpleNamespace(symbol=row["symbol"], tradable=True, reject_reasons=[],
-                        diagnostics={"inputs": row}) for row in rows])
     async def process(self, selection):
         observed.append(selection.symbol)
     monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
@@ -136,11 +140,11 @@ def test_campaign_defense_in_depth_fails_before_processing():
 
 def test_attached_binance_campaign_filters_same_symbol_hyperliquid_candidate(monkeypatch):
     observed = []
-    candidates = [{"symbol": "BTCUSDT", "source_exchange": "hyperliquid"},
-                  {"symbol": "BTCUSDT", "source_exchange": "binance"}]
-    monkeypatch.setattr(runtime_module, "select_symbols", lambda rows, cfg: [
-        SimpleNamespace(symbol=row["symbol"], tradable=True, reject_reasons=[],
-                        diagnostics={"inputs": row}) for row in rows])
+    now = time.time()
+    candidates = [{"symbol": "BTCUSDT", "source_exchange": source, "market_ts": now,
+                   "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
+                   "volatility_pct": 0.4, "liquidity_score": 0.9}
+                  for source in ("hyperliquid", "binance")]
     async def process(self, selection):
         observed.append(selection.diagnostics["inputs"]["source_exchange"])
     monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
@@ -169,7 +173,7 @@ def test_reject_lifecycle_persistence_increments_metrics() -> None:
     rejects: list[dict] = []
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 100.8, "rr": 1.0, "side": "LONG", "volume_24h_usdt": 5_000_000, "spread_pct": 0.01, "volatility_pct": 2.0, "trend_strength": 0.4, "liquidity_score": 0.8, "chop_score": 0.3}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 100.8, "rr": 1.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 5_000_000, "spread_pct": 0.01, "volatility_pct": 2.0, "trend_strength": 0.4, "liquidity_score": 0.8, "chop_score": 0.3}]
 
     def on_event(payload: dict) -> None:
         events.append(payload)
@@ -322,10 +326,13 @@ def test_runtime_risk_gate_rejects_stale_market_data() -> None:
         on_reject_persist=lambda r: rejects.append(r),
     )
     asyncio.run(orchestrator._scan_once())
-    assert rejects
-    assert rejects[0].get("signal_id")
-    assert rejects[0].get("reason") == "STALE_MARKET_DATA"
-    assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
+    assert rejects == [] and events == []
+    with orchestrator._universe_evidence_engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT eligibility_state, exclusion_reasons_json FROM universe_selection_candidates"
+        )).one()
+    assert row.eligibility_state == "STALE"
+    assert "MARKET_EVIDENCE_STALE" in json.loads(row.exclusion_reasons_json)
 
 
 def test_runtime_exception_persists_diagnostic_error_lifecycle() -> None:
@@ -645,12 +652,95 @@ def test_execution_reject_metric_uses_db_canonical_count_not_process_counter(
     runtime._persist_burnin_periodic_metrics()
 
     with engine.connect() as conn:
-        execution_rejects = int(conn.execute(text("""
-            SELECT execution_rejects FROM burnin_execution_metrics
+        row = conn.execute(text("""
+            SELECT execution_rejects,status,timeout_rate,
+                   spread_baseline,slippage_baseline,latency_baseline,
+                   fill_probability_baseline,reconciliation_quality
+            FROM burnin_execution_metrics
             WHERE burnin_run_id=:bid ORDER BY id DESC LIMIT 1
-        """), {"bid": runtime._burnin_run_id}).scalar_one())
-    assert execution_rejects == 1
+        """), {"bid": runtime._burnin_run_id}).mappings().one()
+    assert int(row["execution_rejects"]) == 1
+    assert row["status"] == "INSUFFICIENT_EVIDENCE"
+    assert row["timeout_rate"] is None
+    assert row["spread_baseline"] is None
+    assert row["slippage_baseline"] is None
+    assert row["latency_baseline"] is None
+    assert row["fill_probability_baseline"] is None
+    assert row["reconciliation_quality"] == runtime._reconciliation_status
     assert _canonical_rejected_count(engine, campaign_id) == 1
+
+
+def test_periodic_metrics_persist_measured_drawdown_evidence(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, _, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "measured-drawdown")
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_paper_portfolio_risk_state",
+        lambda self, _symbol, now_ts: {
+            "equity": 950.0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.05,
+            "max_drawdown_pct": 0.10,
+            "max_drawdown_peak_equity": 1000.0,
+            "max_drawdown_trough_equity": 900.0,
+            "consecutive_loss_count": 2,
+            "risk_state_complete": True,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": [],
+        },
+    )
+
+    runtime._persist_burnin_periodic_metrics()
+
+    with engine.connect() as conn:
+        row=conn.execute(text("""
+            SELECT peak_equity,trough_equity,drawdown_pct,
+                   consecutive_losses,resolved,payload_json
+            FROM burnin_drawdown_events
+            WHERE burnin_run_id=:bid ORDER BY id DESC LIMIT 1
+        """), {"bid": runtime._burnin_run_id}).mappings().one()
+    payload=json.loads(row["payload_json"])
+    assert float(row["peak_equity"]) == pytest.approx(1000.0)
+    assert float(row["trough_equity"]) == pytest.approx(900.0)
+    assert float(row["drawdown_pct"]) == pytest.approx(0.10)
+    assert int(row["consecutive_losses"]) == 2
+    assert int(row["resolved"]) == 0
+    assert payload["evidence_status"] == "COMPLETE"
+    assert payload["evidence_source"] == "BURNIN_CAMPAIGN_EVIDENCE"
+    assert payload["risk_state_complete"] is True
+    assert payload["current_drawdown_pct"] == pytest.approx(0.05)
+
+
+def test_periodic_metrics_do_not_fabricate_drawdown_when_risk_state_incomplete(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, _, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "incomplete-drawdown")
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_paper_portfolio_risk_state",
+        lambda self, _symbol, now_ts: {
+            "equity": None,
+            "rolling_peak_equity": None,
+            "rolling_drawdown_pct": None,
+            "max_drawdown_pct": None,
+            "max_drawdown_peak_equity": None,
+            "max_drawdown_trough_equity": None,
+            "consecutive_loss_count": None,
+            "risk_state_complete": False,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": ["closed_trade_outcome_missing:t1"],
+        },
+    )
+
+    runtime._persist_burnin_periodic_metrics()
+
+    with engine.connect() as conn:
+        count=int(conn.execute(text("""
+            SELECT COUNT(*) FROM burnin_drawdown_events
+            WHERE burnin_run_id=:bid
+        """), {"bid": runtime._burnin_run_id}).scalar_one())
+    assert count == 0
 
 
 def test_runtime_reject_core_and_forward_evidence_share_decision_id(
@@ -857,6 +947,13 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
         "decision_timestamp": "2026-01-01T00:00:00Z",
         "execution_ctx": {"spread_pct": .001, "expected_slippage_pct": .001, "fee_pct": .001,
                           "funding_rate_pct": 0.0, "latency_ms": 10},
+        "execution_safety": {
+            "failed_gate_evidence": [{
+                "gate": "LOW_EFFECTIVE_RR", "observed": 1.1, "threshold": 1.1,
+                "comparison": "<", "source": "EXECUTION_SAFETY_CONTRACT",
+            }],
+            "all_failed_gates": ["LOW_EFFECTIVE_RR"],
+        },
         "mtf": {"generation": {"mode": "REGIME_GUIDED", "candidate": None,
                                 "evidence_status": "INCOMPLETE"},
                 "setup": {"candidate_ready": False, "trade_side": None,
@@ -873,6 +970,8 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
     assert canonical["legacy_shadow_geometry"]["rr"] == pytest.approx(1.2)
     assert canonical["legacy_shadow_geometry"]["geometry_status"] == "COMPLETE"
     assert canonical["legacy_shadow_geometry"]["attributable"] is False
+    assert "LOW_EFFECTIVE_RR" in canonical["legacy_shadow_geometry"]["all_failed_gates"]
+    assert "LOW_EFFECTIVE_RR" not in canonical["all_failed_gates"]
     assert canonical["reason"] == "MTF_EXECUTION_COUNTER_REGIME"
 
     asyncio.run(orchestrator._persist_reject(source))
@@ -886,6 +985,7 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
     assert tuple(pending[:4]) == ("LONG", 100.0, 90.0, 112.0)
     assert provenance["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
     assert provenance["reject_quality_attributable"] is False
+    assert "LOW_EFFECTIVE_RR" not in provenance["all_failed_gates"]
 
 
 def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> None:
@@ -1055,19 +1155,57 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
             return {"status": "timeout", "order_id": "abc-1"}
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        now = time.time()
+        return [{
+            "symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
+            "rr": 3.0, "side": "LONG", "market_ts": now,
+            "volume_24h_usdt": 90_000_000,
+            "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
+            "spread_pct": 0.0002, "spread_status": "MEASURED", "spread_source": "FIXTURE",
+            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED", "slippage_source": "FIXTURE",
+            "latency_ms": 50.0, "latency_status": "MEASURED", "latency_source": "FIXTURE",
+            "liquidity_score": 0.9, "liquidity_status": "MEASURED", "liquidity_source": "FIXTURE",
+            "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "FIXTURE",
+            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED", "orderbook_source": "FIXTURE",
+            "spoof_risk": 0.1, "spoof_status": "MEASURED", "spoof_source": "FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.5, "absorption_status": "MEASURED", "absorption_source": "FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED", "liquidity_depth_source": "FIXTURE",
+            "microstructure_observed_at": now,
+            "volatility_regime": "normal", "volatility_status": "MEASURED", "volatility_source": "FIXTURE",
+            "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
+            "volatility_pct": 0.4, "trend_strength": 0.9, "chop_score": 0.1,
+        }]
 
     orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, live_trading_enabled=True, allow_live_orders=True, operator_live_acknowledged=True),
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.LIVE,
+            live_trading_enabled=True,
+            allow_live_orders=True,
+            operator_live_acknowledged=True,
+            execution_account_scope="test-timeout-account",
+        ),
         ai_brain=_AlwaysAcceptBrain(),
         market_scanner=scanner,
         real_execution_adapter=_Adapter(),
+        execution_ownership_engine=init_db("sqlite+pysqlite:///:memory:"),
         on_lifecycle_event=lambda e: events.append(e),
     )
     orchestrator._qualification_report = type("Qualified", (), {"qualified": True, "verdict": "LIVE_READY"})()
     orchestrator._reconciliation_status = "CLEAN"
+    orchestrator._derivatives_contract_live_eligible = True
     asyncio.run(orchestrator._scan_once())
-    assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
+    # RECONCILIATION_REPAIR is not a canonical persisted lifecycle state.
+    # Preserve the attempted repair as an audited ERROR, matching the real sink.
+    repairs = [evt for evt in events
+               if evt["details"].get("attempted_state") == "RECONCILIATION_REPAIR"]
+    assert repairs
+    assert all(evt["lifecycle_event_type"] == "ERROR" for evt in repairs)
+    assert all(evt["details"]["failure_reason"] == "INVALID_LIFECYCLE_TRANSITION"
+               for evt in repairs)
+    assert any(evt["details"]["reason"] == "reconcile_timeout" for evt in repairs)
 
 
 def test_live_start_blocks_placeholder_bootstrap_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1162,6 +1300,55 @@ def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
     assert payload["risk_reward"] == pytest.approx(3.25)
 
 
+def test_pre_ai_duplicate_position_keeps_score_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    rejects: list[dict] = []
+
+    class _MustNotScoreBrain:
+        def before_real_order(self, *args, **kwargs):
+            raise AssertionError("pre-AI risk reject must not invoke scoring")
+
+    async def capture_reject(self, payload: dict) -> None:
+        rejects.append(self._canonical_reject_payload(payload))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_reject", capture_reject)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.BACKTEST,
+            mtf_guided_signal_generation_enabled=False,
+        ),
+        ai_brain=_MustNotScoreBrain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+    )
+    orchestrator._active_positions["BTCUSDT"] = 10.0
+    selection = SimpleNamespace(
+        symbol="BTCUSDT",
+        regime_hint="TRENDING",
+        diagnostics={"inputs": {
+            "market_ts": time.time(),
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp": 102.0,
+            "rr": 2.0,
+            "side": "LONG",
+            "volume_24h_usdt": 90_000_000.0,
+            "spread_pct": 0.0002,
+            "expected_slippage_pct": 0.0002,
+            "funding_rate_pct": 0.0,
+            "latency_ms": 10.0,
+            "liquidity_score": 0.9,
+            "volatility_regime": "MODERATE",
+        }},
+    )
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects
+    payload = rejects[-1]
+    assert payload["reason"] == "DUPLICATE_POSITION"
+    assert payload["score"] is None
+    assert "LOW_SCORE" not in payload["all_failed_gates"]
+
+
 def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[dict] = []
     portfolio_evidence: dict = {}
@@ -1174,7 +1361,7 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest
     monkeypatch.setattr(runtime_module, "evaluate_portfolio_risk", capture_portfolio_evidence)
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "TEST", "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -1284,20 +1471,21 @@ def test_mtf_reject_starts_new_same_symbol_signal_after_open_position(
 
 
 def test_paper_accepted_observation_follows_pending_position_persistence(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[object] = []
 
     async def scanner() -> list[dict]:
         return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
                  "rr": 3.0, "side": "LONG", "market_ts": time.time(),
                  "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
+                 "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "TEST",
                  "volatility_pct": 0.4, "trend_strength": 0.9,
                  "liquidity_score": 0.9, "chop_score": 0.1}]
 
     monkeypatch.setattr(
         RuntimeOrchestrator,
         "_persist_pending_paper_position",
-        lambda self, *args, **kwargs: calls.append("pending_position"),
+        lambda self, *args, **kwargs: (calls.append("pending_position"), 10.0)[1],
     )
     monkeypatch.setattr(
         RuntimeOrchestrator,
@@ -1328,6 +1516,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=scanner,
+        execution_ownership_engine=init_db(f"sqlite+pysqlite:///{tmp_path / 'paper-ownership.db'}"),
     )
     orchestrator._campaign_id = "campaign"
     orchestrator._burnin_run_id = "run"
@@ -1342,7 +1531,8 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
     market = {"entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG",
               "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
-              "liquidity_score": .9}
+              "liquidity_score": .9, "funding_rate_pct": .00005,
+              "funding_status": "MEASURED", "funding_source": "TEST"}
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
                                 diagnostics={"inputs": market})
     orchestrator = RuntimeOrchestrator(
@@ -1363,7 +1553,7 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
 
 def test_effective_rr_gate_still_rejects_before_paper_portfolio_and_execution() -> None:
     rejects: list[dict] = []
-    market = {"entry": 100.0, "sl": 99.0, "tp": 101.05, "rr": 1.05, "side": "LONG",
+    market = {"entry": 100.0, "sl": 99.9, "tp": 100.13, "rr": 1.30, "side": "LONG",
               "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
               "liquidity_score": .9}
@@ -1386,7 +1576,7 @@ def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:
     rejects: list[dict] = []
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 101.0, "rr": 1.1, "side": "LONG", "market_ts": 9999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0001, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 101.0, "rr": 1.1, "side": "LONG", "market_ts": time.time(), "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0001, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -1563,6 +1753,8 @@ class _ParityBrain:
     def score_signal(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
         class _Score:
             total_score = 0.88
+            components = {}
+            probabilistic = {"raw_expectancy": 0.2, "expectancy_after_costs": 0.2}
         return _Score()
 
     def choose_order_plan(self, signal_payload, market_ctx, score_ctx):
@@ -1604,18 +1796,27 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
     adapter = _MutationTrapAdapter()
 
     async def scanner() -> list[dict]:
+        now = time.time()
         return [{
             "symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
-            "rr": 3.0, "side": "LONG", "market_ts": time.time(),
+            "rr": 3.0, "side": "LONG", "market_ts": now,
             "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
             "volume_24h_usdt": 90_000_000,
-            "spread_pct": 0.0002, "spread_status": "MEASURED",
-            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED",
-            "latency_ms": 50.0, "latency_status": "MEASURED",
-            "liquidity_score": 0.9, "liquidity_status": "MEASURED",
-            "funding_rate_pct": 0.00005, "funding_status": "MEASURED",
-            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED",
-            "volatility_regime": "normal", "volatility_status": "MEASURED",
+            "fee_pct": 0.0004, "fee_status": "CONFIGURED", "fee_source": "TEST_FEE_SCHEDULE",
+            "spread_pct": 0.0002, "spread_status": "MEASURED", "spread_source": "FIXTURE",
+            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED", "slippage_source": "FIXTURE",
+            "latency_ms": 50.0, "latency_status": "MEASURED", "latency_source": "FIXTURE",
+            "liquidity_score": 0.9, "liquidity_status": "MEASURED", "liquidity_source": "FIXTURE",
+            "funding_rate_pct": 0.00005, "funding_status": "MEASURED", "funding_source": "FIXTURE",
+            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED", "orderbook_source": "FIXTURE",
+            "spoof_risk": 0.1, "spoof_status": "MEASURED", "spoof_source": "FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.5, "absorption_status": "MEASURED", "absorption_source": "FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED", "liquidity_depth_source": "FIXTURE",
+            "microstructure_observed_at": now,
+            "volatility_regime": "normal", "volatility_status": "MEASURED", "volatility_source": "FIXTURE",
             "volatility_pct": 0.4, "trend_strength": 0.9, "chop_score": 0.1,
         }]
 
@@ -1802,6 +2003,7 @@ def _observed_coarse_chop_candidate(**overrides):
     candidate = {
         "symbol": "BTCUSDT",
         "source_exchange": "binance",
+        "market_ts": time.time(),
         "volume_24h_usdt": 7_625_253_360.2,
         "spread_pct": 1.2365196175849023e-06,
         "liquidity_score": 1.0,
@@ -1905,10 +2107,7 @@ def test_backtest_selector_retains_coarse_chop_hard_reject_semantics(monkeypatch
 
     asyncio.run(orchestrator._scan_once())
 
-    assert processed == []
-    assert orchestrator.metrics.symbols_selected == 0
-    assert orchestrator._last_scan_rejection_summary == {
-        "TOO_CHOPPY": 1,
-        "WEAK_TREND_AND_NO_RANGE_EDGE": 1,
-    }
+    assert len(processed) == 1
+    assert orchestrator.metrics.symbols_selected == 1
+    assert orchestrator._last_scan_rejection_summary == {}
     assert orchestrator._last_scan_advisory_summary == {}

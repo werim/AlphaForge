@@ -34,6 +34,10 @@ def test_provider_failure_classes_are_conservative():
     for exc in (socket.gaierror(-3, "dns"), error.URLError("network"),
                 TimeoutError("timeout"), ConnectionResetError("reset")):
         assert classify_provider_exception(exc) == "TRANSIENT_TRANSPORT"
+    rate_limit_ban = error.HTTPError("https://fapi.binance.com", 418, "ban", {}, None)
+    setattr(rate_limit_ban, "_alphaforge_binance_code", -1003)
+    assert classify_provider_exception(rate_limit_ban) == "TRANSIENT_TRANSPORT"
+    assert classify_provider_exception(error.HTTPError("https://example.com", 418, "other", {}, None)) == "PERMANENT_AUTH_OR_PROTOCOL"
     assert classify_provider_exception(error.HTTPError("https://example.com", 401, "auth", None, None)) == "PERMANENT_AUTH_OR_PROTOCOL"
     assert classify_provider_exception(ValueError("unclassified")) == "UNKNOWN"
 

@@ -100,7 +100,7 @@ def test_quality_preserves_zero_effective_rr():
     quality = QualityAgent().run(stage(AgentStage.QUALITY, payload, (signal,)))
     assert quality.status is DecisionStatus.REJECT
     assert quality.evidence["quality_diagnostics"]["effective_rr"] == 0.0
-    assert "RR_TOO_LOW" in quality.evidence["all_reject_reasons"]
+    assert "LOW_EFFECTIVE_RR" in quality.evidence["all_reject_reasons"]
 
 
 def test_phase_b_persistence_is_queryable_null_safe_and_duplicate_safe():

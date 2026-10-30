@@ -128,8 +128,7 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
         self.assertEqual(result.next_offset, 31)
         self.assertEqual(result.responses_sent, 1)
         self.assertEqual(executor.commands, [])
-        self.assertIn("/status /health /help", http.send_calls[0]["text"])
-        self.assertNotIn("/report", http.send_calls[0]["text"])
+        self.assertIn("/status /health /report /rejects /labels /errors /help", http.send_calls[0]["text"])
 
     def test_unauthorized_user_causes_no_executor_and_no_command_response(self):
         http = FakeTelegramHttpClient([{"ok": True, "result": [make_update(update_id=40, user_id=7, text="/status")]}])

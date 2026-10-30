@@ -7,10 +7,11 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from alphaforge.burnin import CRITICAL_COST_FIELDS, LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, update_burnin_run_counters
+from alphaforge.burnin import CRITICAL_COST_FIELDS, LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, derive_burnin_run_counters, persist_burnin_run_counters, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
+from alphaforge.regime_authority import REGIME_AUTHORITY_VERSION, is_qualifiable_regime
 
 VERDICTS={"BURN_IN_INSUFFICIENT","BURN_IN_FAILED","CANARY_QUALIFIED","CANARY_SUSPENDED"}
 REQUIRED_TABLES={"burnin_runs","burnin_trade_outcomes","burnin_reject_outcomes","burnin_regime_metrics","burnin_execution_metrics","burnin_calibration_metrics","burnin_drawdown_events","burnin_qualification_snapshots","burnin_suspension_events"}
@@ -25,6 +26,7 @@ class BurnInThresholds:
     minimum_regime_sample: int = 20
     minimum_regime_coverage: int = 3
     minimum_calibration_sample: int = 50
+    minimum_geometry_viability_sample: int = 20
     min_lower_confidence_bound_expectancy: float = 0.01
     max_drawdown_pct: float = 0.08
     max_cost_drag_per_trade: float = 0.20
@@ -138,7 +140,7 @@ class BurnInQualificationEngine:
             cal=conn.execute(text("SELECT * FROM burnin_calibration_metrics WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
             execm=conn.execute(text("SELECT * FROM burnin_execution_metrics WHERE burnin_run_id=:id ORDER BY id DESC LIMIT 1"),{"id":burnin_run_id}).mappings().first()
             dds=conn.execute(text("SELECT * FROM burnin_drawdown_events WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
-            derived = update_burnin_run_counters(conn, burnin_run_id)
+            derived = derive_burnin_run_counters(conn, burnin_run_id)
             decision_predicate = canonical_decision_sql("o")
             obs_counts = conn.execute(text(f"SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations o WHERE burnin_run_id=:id AND {decision_predicate}"), {"id": burnin_run_id}).mappings().first() or {}
             canonical_reject_ids={str(r[0]) for r in conn.execute(text(f"SELECT json_extract(metrics_json,'$.reject_decision_id') FROM burnin_observations o WHERE burnin_run_id=:id AND UPPER(COALESCE(decision,''))='REJECTED' AND {decision_predicate}"), {"id":burnin_run_id}).all() if r[0]}
@@ -157,6 +159,13 @@ class BurnInQualificationEngine:
             except SQLAlchemyError:
                 pending_reject_identity = {}
             observation_metrics=[r[0] for r in conn.execute(text("SELECT metrics_json FROM burnin_observations WHERE burnin_run_id=:id"), {"id":burnin_run_id}).all()]
+            canonical_observation_metrics=[
+                r[0] for r in conn.execute(
+                    text(f"SELECT metrics_json FROM burnin_observations o "
+                         f"WHERE burnin_run_id=:id AND {decision_predicate}"),
+                    {"id": burnin_run_id},
+                ).all()
+            ]
             runtime_error_count = self._runtime_error_count(conn, burnin_run_id)
             metrics["runtime_error_count"] = runtime_error_count
             if runtime_error_count > self.thresholds.max_runtime_error_count:
@@ -209,6 +218,10 @@ class BurnInQualificationEngine:
             for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",qualified_closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
                 if obs < limit: sample_status="INSUFFICIENT"; blockers.append(f"{name}:{obs}<{limit}")
             metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=qualified_closed,qualified_closed_trade_count=qualified_closed,operational_closed_trade_count=operational_closed,incomplete_closed_trade_count=operational_closed-qualified_closed,open_trade_count=max(0,accepted-operational_closed),completed_rejected_forward_outcomes=len(attributable_rejects),diagnostic_completed_rejected_forward_outcomes=len(completed_rejects),identity_linked_rejected_forward_outcomes=len(identity_linked_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),orphan_rejected_forward_outcomes=len(completed_rejects)-len(identity_linked_rejects),qualification_reject_identity_unit="CANONICAL_DECISION",qualification_reject_identity_mode=identity_mode,pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(qualification_ambiguous_rejects),diagnostic_ambiguous_rejected_forward_outcomes=len(diagnostic_ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
+            self._check_guided_geometry_viability(
+                canonical_observation_metrics, blockers, warnings, metrics,
+                canonical_decision_count=samples,
+            )
             incomplete_trade_count=operational_closed-qualified_closed
             if incomplete_trade_count: blockers.append(f"INCOMPLETE_COST_EVIDENCE:{incomplete_trade_count}")
             self._compute_expectancy(qualification_trades, blockers, metrics)
@@ -224,6 +237,12 @@ class BurnInQualificationEngine:
             evidence_status="PASS" if not any(b in {"BURNIN_SCHEMA_OR_EVIDENCE_MISSING"} or b.startswith("MISSING_PROVENANCE") or b.startswith("INCOMPLETE_COST") for b in blockers) else "FAIL"
             missing_markers=("MISSING","INSUFFICIENT","NO_","BURNIN_SCHEMA")
             status="CANARY_QUALIFIED" if not blockers else ("BURN_IN_INSUFFICIENT" if any(any(m in b for m in missing_markers) for b in blockers) or sample_status=="INSUFFICIENT" else "BURN_IN_FAILED")
+
+            # Qualification analysis is intentionally read-only until this point.
+            # SQLite begins the transaction deferred, so expensive analysis does not
+            # own the single writer slot. Only final counter/snapshot persistence
+            # upgrades the same evidence snapshot to a short write transaction.
+            persist_burnin_run_counters(conn, derived)
             snap=self._snapshot(burnin_run_id,release_id,status,blockers,warnings,th,metrics,sample_status,expectancy_status,exec_status,regime_status,reject_status,cal_status,dd_status,conc_status,rec_status,evidence_status)
             self.persist_snapshot(conn,snap)
             suspension=self.suspension_reasons(snap)
@@ -232,6 +251,176 @@ class BurnInQualificationEngine:
             if suspension:
                 self.persist_suspension(conn,snap,suspension)
             return snap
+    def _check_guided_geometry_viability(
+        self,
+        observation_metrics: list[Any],
+        blockers: list[str],
+        warnings: list[str],
+        metrics: dict[str, Any],
+        *,
+        canonical_decision_count: int,
+    ) -> None:
+        """Audit actual guided-MTF decision geometry before qualification.
+
+        This is an evidence gate, not strategy tuning.  It never widens stops or
+        changes execution thresholds.  It makes structural funnel suppression
+        explicit when every sufficiently sampled guided candidate is below the
+        configured minimum stop distance.
+        """
+        rows: list[dict[str, Any]] = []
+        for raw in observation_metrics:
+            try:
+                payload = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            mtf = payload.get("mtf") if isinstance(payload.get("mtf"), dict) else {}
+            generation = (
+                mtf.get("generation")
+                if isinstance(mtf.get("generation"), dict)
+                else {}
+            )
+            if str(generation.get("mode") or "").upper() != "REGIME_GUIDED":
+                continue
+            if not isinstance(generation.get("candidate"), dict):
+                continue
+            rows.append(payload)
+
+        def number(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        evaluable = 0
+        below_min = 0
+        above_max = 0
+        within_policy = 0
+        executable_zero = 0
+        stop_distances: list[float] = []
+        candidate_rrs: list[float] = []
+        executable_rrs: list[float] = []
+        effective_rrs: list[float] = []
+        fill_geometry_losses: list[float] = []
+        residual_penalties: list[float] = []
+        gate_counts: dict[str, int] = {}
+        primary_counts: dict[str, int] = {}
+
+        for payload in rows:
+            stop_distance = number(payload.get("stop_distance_pct"))
+            if stop_distance is None:
+                entry = number(payload.get("entry"))
+                stop = number(payload.get("sl"))
+                if entry is not None and entry > 0 and stop is not None:
+                    stop_distance = abs(entry - stop) / entry * 100.0
+            min_stop = number(payload.get("min_stop_pct"))
+            max_stop = number(payload.get("max_stop_pct"))
+            if (
+                stop_distance is not None
+                and min_stop is not None
+                and max_stop is not None
+            ):
+                evaluable += 1
+                stop_distances.append(stop_distance)
+                if stop_distance < min_stop:
+                    below_min += 1
+                elif stop_distance > max_stop:
+                    above_max += 1
+                else:
+                    within_policy += 1
+
+            candidate_rr = number(payload.get("candidate_rr", payload.get("rr")))
+            executable_rr = number(payload.get("executable_raw_rr"))
+            effective_rr = number(payload.get("effective_rr"))
+            residual = number(payload.get("remaining_execution_penalty"))
+            if candidate_rr is not None:
+                candidate_rrs.append(candidate_rr)
+            if executable_rr is not None:
+                executable_rrs.append(executable_rr)
+                if executable_rr <= 0.0:
+                    executable_zero += 1
+            if effective_rr is not None:
+                effective_rrs.append(effective_rr)
+            if candidate_rr is not None and executable_rr is not None:
+                fill_geometry_losses.append(candidate_rr - executable_rr)
+            if residual is not None:
+                residual_penalties.append(residual)
+
+            failed = payload.get("all_failed_gates")
+            if isinstance(failed, str):
+                try:
+                    failed = json.loads(failed)
+                except json.JSONDecodeError:
+                    failed = []
+            if isinstance(failed, list):
+                for gate in failed:
+                    name = str(gate or "").upper()
+                    if name:
+                        gate_counts[name] = gate_counts.get(name, 0) + 1
+            primary = str(
+                payload.get("primary_reject_reason")
+                or payload.get("reject_reason")
+                or ""
+            ).upper()
+            if primary:
+                primary_counts[primary] = primary_counts.get(primary, 0) + 1
+
+        guided_count = len(rows)
+        rate = lambda count, denominator: (
+            None if denominator <= 0 else count / denominator
+        )
+        average = lambda values: (
+            None if not values else sum(values) / len(values)
+        )
+        metrics.update(
+            guided_candidate_decisions=guided_count,
+            guided_post_mtf_funnel_reach_rate=rate(
+                guided_count, canonical_decision_count
+            ),
+            guided_geometry_evaluable_decisions=evaluable,
+            guided_geometry_unavailable_decisions=guided_count - evaluable,
+            guided_below_min_stop_count=below_min,
+            guided_below_min_stop_rate=rate(below_min, evaluable),
+            guided_above_max_stop_count=above_max,
+            guided_above_max_stop_rate=rate(above_max, evaluable),
+            guided_within_stop_policy_count=within_policy,
+            guided_within_stop_policy_rate=rate(within_policy, evaluable),
+            guided_executable_rr_zero_count=executable_zero,
+            guided_executable_rr_zero_rate=rate(executable_zero, guided_count),
+            guided_stop_distance_pct_min=min(stop_distances) if stop_distances else None,
+            guided_stop_distance_pct_avg=average(stop_distances),
+            guided_stop_distance_pct_max=max(stop_distances) if stop_distances else None,
+            guided_candidate_rr_avg=average(candidate_rrs),
+            guided_executable_rr_avg=average(executable_rrs),
+            guided_effective_rr_avg=average(effective_rrs),
+            guided_fill_geometry_loss_r_avg=average(fill_geometry_losses),
+            guided_residual_execution_penalty_r_avg=average(residual_penalties),
+            guided_failed_gate_counts=gate_counts,
+            guided_primary_reject_reason_counts=primary_counts,
+        )
+
+        minimum = int(self.thresholds.minimum_geometry_viability_sample)
+        if guided_count == 0:
+            metrics["guided_geometry_viability_status"] = "NO_EVIDENCE"
+            return
+        if evaluable < minimum:
+            metrics["guided_geometry_viability_status"] = "INSUFFICIENT"
+            warnings.append(
+                f"GUIDED_GEOMETRY_VIABILITY_SAMPLE_INSUFFICIENT:{evaluable}<{minimum}"
+            )
+            return
+        if below_min == evaluable:
+            metrics["guided_geometry_viability_status"] = "FAIL"
+            blockers.append(
+                f"GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:{below_min}/{evaluable}"
+            )
+            return
+        metrics["guided_geometry_viability_status"] = "PASS"
+        if above_max == evaluable:
+            warnings.append(f"GUIDED_GEOMETRY_ALL_ABOVE_MAX_POLICY:{above_max}/{evaluable}")
+
     def _compute_expectancy(self,trades,blockers,metrics):
         complete=list(trades)
         netrs=sorted(float(r["net_r"]) for r in complete); mean,lcb,ucb=confidence_interval(netrs)
@@ -257,14 +446,31 @@ class BurnInQualificationEngine:
             "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RUNTIME_RECOVERY_REQUIRED"
         }
     def _check_regimes(self,regimes,blockers,metrics):
-        material=0; status="PASS"; by={}
+        material=0; status="PASS"; by={}; qualifiable=set(); excluded={}
         for r in regimes:
-            reg=str(r.get("regime") or "UNKNOWN").upper(); sc=int(r.get("sample_count") or 0); by[reg]=dict(r)
-            if reg=="UNKNOWN" and str(r.get("status") or "").upper()=="PASS": blockers.append("UNKNOWN_REGIME_CANNOT_PASS"); status="FAIL"
-            if sc>=self.thresholds.minimum_regime_sample: material+=1
-            if sc>=self.thresholds.minimum_regime_sample and r.get("lower_confidence_bound_expectancy") is not None and float(r["lower_confidence_bound_expectancy"])<0: blockers.append(f"NEGATIVE_MATERIAL_REGIME:{reg}"); status="FAIL"
+            reg=str(r.get("regime") or "UNKNOWN").upper()
+            sc=int(r.get("sample_count") or 0)
+            authority_eligible=is_qualifiable_regime(reg)
+            row=dict(r); row["regime_authority_eligible"]=authority_eligible; by[reg]=row
+            if reg=="UNKNOWN" and str(r.get("status") or "").upper()=="PASS":
+                blockers.append("UNKNOWN_REGIME_CANNOT_PASS"); status="FAIL"
+            if not authority_eligible:
+                if sc>0:
+                    excluded[reg]=sc
+                    if str(r.get("status") or "").upper()=="PASS":
+                        blockers.append(f"UNQUALIFIED_REGIME_AUTHORITY:{reg}"); status="FAIL"
+                continue
+            if sc>=self.thresholds.minimum_regime_sample:
+                material+=1; qualifiable.add(reg)
+            if sc>=self.thresholds.minimum_regime_sample and r.get("lower_confidence_bound_expectancy") is not None and float(r["lower_confidence_bound_expectancy"])<0:
+                blockers.append(f"NEGATIVE_MATERIAL_REGIME:{reg}"); status="FAIL"
         metrics["regime_metrics"]=by
-        if material<self.thresholds.minimum_regime_coverage: blockers.append("INSUFFICIENT_REGIME_COVERAGE"); return "INSUFFICIENT"
+        metrics["regime_authority_version"]=REGIME_AUTHORITY_VERSION
+        metrics["qualifiable_regime_coverage"]=material
+        metrics["qualifiable_regimes"]=sorted(qualifiable)
+        metrics["excluded_regime_samples"]=excluded
+        if material<self.thresholds.minimum_regime_coverage:
+            blockers.append("INSUFFICIENT_REGIME_COVERAGE"); return "INSUFFICIENT"
         return status
     def _compute_reject_quality(self,rejects,trades,blockers,metrics):
         false=sum(1 for r in rejects if float(r.get("missed_profit") or 0)>0); avoided=sum(1 for r in rejects if float(r.get("avoided_loss") or 0)>0); invalid=sum(1 for r in rejects if int(r.get("execution_invalidated") or 0)==1)
@@ -289,26 +495,226 @@ class BurnInQualificationEngine:
         if worst>self.thresholds.max_calibration_error: blockers.append("CALIBRATION_QUALITY_INSUFFICIENT"); return "FAIL"
         return "PASS"
     def _compute_drawdown(self,dds,blockers,metrics):
-        maxdd=max([float(d.get("drawdown_pct") or 0) for d in dds], default=0.0); unresolved=sum(1 for d in dds if not int(d.get("resolved") or 0)); rolling=min([float(d.get("rolling_expectancy")) for d in dds if d.get("rolling_expectancy") is not None], default=None)
-        recovery_status="INSUFFICIENT" if unresolved else "RECOVERED"
-        metrics.update(max_drawdown_pct=maxdd,unresolved_drawdown_events=unresolved,rolling_expectancy=rolling,loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",drawdown_recovery_status=recovery_status,recovery_status=recovery_status)
-        if maxdd>self.thresholds.max_drawdown_pct or unresolved: blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER"); return "FAIL"
+        if not dds:
+            blockers.append("DRAWDOWN_INSUFFICIENT_EVIDENCE")
+            metrics.update(
+                max_drawdown_pct=None,
+                unresolved_drawdown_events=None,
+                rolling_expectancy=None,
+                loss_cluster_state="UNKNOWN",
+                drawdown_recovery_status="INSUFFICIENT",
+                recovery_status="INSUFFICIENT",
+                drawdown_evidence_count=0,
+                drawdown_missing_fields=["burnin_drawdown_events"],
+            )
+            return "INSUFFICIENT_EVIDENCE"
+
+        valid_rows=[]
+        gaps=[]
+        for index,d in enumerate(dds):
+            event_id=str(d.get("drawdown_event_id") or f"row_{index}")
+            missing=[
+                field for field in (
+                    "peak_equity","trough_equity","drawdown_pct",
+                    "consecutive_losses","resolved","payload_json",
+                ) if d.get(field) is None
+            ]
+            payload={}
+            try:
+                payload=json.loads(d.get("payload_json") or "")
+            except (TypeError,json.JSONDecodeError):
+                missing.append("payload_json")
+            if not isinstance(payload,dict):
+                missing.append("payload_json")
+                payload={}
+
+            numeric={}
+            for field in ("peak_equity","trough_equity","drawdown_pct"):
+                value=d.get(field)
+                if value is None:
+                    continue
+                try:
+                    parsed=float(value)
+                except (TypeError,ValueError):
+                    missing.append(field)
+                    continue
+                if not math.isfinite(parsed):
+                    missing.append(field)
+                    continue
+                numeric[field]=parsed
+            try:
+                consecutive_losses=int(d.get("consecutive_losses"))
+                if consecutive_losses < 0:
+                    missing.append("consecutive_losses")
+            except (TypeError,ValueError):
+                consecutive_losses=None
+                missing.append("consecutive_losses")
+            try:
+                resolved=int(d.get("resolved"))
+                if resolved not in (0,1):
+                    missing.append("resolved")
+            except (TypeError,ValueError):
+                resolved=None
+                missing.append("resolved")
+
+            if payload.get("evidence_status") != "COMPLETE":
+                missing.append("payload.evidence_status")
+            if not payload.get("evidence_source"):
+                missing.append("payload.evidence_source")
+            if payload.get("risk_state_complete") is not True:
+                missing.append("payload.risk_state_complete")
+
+            peak=numeric.get("peak_equity")
+            trough=numeric.get("trough_equity")
+            drawdown=numeric.get("drawdown_pct")
+            if peak is not None and peak <= 0:
+                missing.append("peak_equity")
+            if peak is not None and trough is not None:
+                if trough < 0 or trough > peak:
+                    missing.append("trough_equity")
+                elif drawdown is not None and peak > 0:
+                    expected=max(0.0,(peak-trough)/peak)
+                    if not math.isclose(drawdown,expected,rel_tol=1e-6,abs_tol=1e-9):
+                        missing.append("drawdown_pct_consistency")
+            if drawdown is not None and not 0.0 <= drawdown <= 1.0:
+                missing.append("drawdown_pct")
+
+            if missing:
+                gaps.append(f"{event_id}:" + ",".join(sorted(set(missing))))
+                continue
+            valid_rows.append({
+                **dict(d),
+                "_drawdown_pct": drawdown,
+                "_consecutive_losses": consecutive_losses,
+                "_resolved": resolved,
+            })
+
+        if gaps:
+            metrics.update(
+                max_drawdown_pct=None,
+                unresolved_drawdown_events=None,
+                rolling_expectancy=None,
+                loss_cluster_state="UNKNOWN",
+                drawdown_recovery_status="INSUFFICIENT",
+                recovery_status="INSUFFICIENT",
+                drawdown_evidence_count=len(valid_rows),
+                drawdown_missing_fields=gaps,
+            )
+            blockers.append("DRAWDOWN_INSUFFICIENT_EVIDENCE:" + "|".join(gaps))
+            return "INSUFFICIENT_EVIDENCE"
+
+        maxdd=max(float(d["_drawdown_pct"]) for d in valid_rows)
+        unresolved=sum(1 for d in valid_rows if int(d["_resolved"]) == 0)
+        max_consecutive_losses=max(int(d["_consecutive_losses"]) for d in valid_rows)
+        rolling=min(
+            [float(d.get("rolling_expectancy")) for d in valid_rows
+             if d.get("rolling_expectancy") is not None],
+            default=None,
+        )
+        recovery_status="UNRESOLVED" if unresolved else "RECOVERED"
+        metrics.update(
+            max_drawdown_pct=maxdd,
+            unresolved_drawdown_events=unresolved,
+            max_consecutive_losses=max_consecutive_losses,
+            rolling_expectancy=rolling,
+            loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",
+            drawdown_recovery_status=recovery_status,
+            recovery_status=recovery_status,
+            drawdown_evidence_count=len(valid_rows),
+            drawdown_missing_fields=[],
+        )
+        if maxdd>self.thresholds.max_drawdown_pct or unresolved:
+            blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER")
+            return "FAIL"
         return "PASS"
     def _compute_execution(self,execm,blockers,metrics):
-        if not execm: blockers.append("EXECUTION_INSUFFICIENT_EVIDENCE"); return "INSUFFICIENT_EVIDENCE"
-        def ratio(cur,base): return None if cur is None or base in (None,0) else float(cur)/float(base)
-        sr=ratio(execm.get("spread_current"),execm.get("spread_baseline")); slr=ratio(execm.get("slippage_current"),execm.get("slippage_baseline")); lr=ratio(execm.get("latency_current"),execm.get("latency_baseline")); fill_delta=None if execm.get("fill_probability_current") is None or execm.get("fill_probability_baseline") is None else float(execm.get("fill_probability_baseline"))-float(execm.get("fill_probability_current"))
-        stale=float(execm.get("stale_data_count") or 0)/max(1,int(execm.get("execution_rejects") or 0)+1)
-        metrics.update(spread_degradation_ratio=sr,slippage_degradation_ratio=slr,latency_degradation_ratio=lr,fill_probability_change=fill_delta,timeout_rate=execm.get("timeout_rate"),stale_data_rate=stale,execution_status=execm.get("status"))
+        if not execm:
+            blockers.append("EXECUTION_INSUFFICIENT_EVIDENCE")
+            metrics.update(
+                execution_status="INSUFFICIENT_EVIDENCE",
+                execution_missing_fields=["burnin_execution_metrics"],
+            )
+            return "INSUFFICIENT_EVIDENCE"
+
+        mandatory_fields = (
+            "spread_baseline", "spread_current",
+            "slippage_baseline", "slippage_current",
+            "latency_baseline", "latency_current",
+            "fill_probability_baseline", "fill_probability_current",
+            "timeout_rate", "stale_data_count", "execution_rejects",
+            "reconciliation_quality",
+        )
+        missing = [field for field in mandatory_fields if execm.get(field) is None]
+        numeric_fields = (
+            "spread_baseline", "spread_current",
+            "slippage_baseline", "slippage_current",
+            "latency_baseline", "latency_current",
+            "fill_probability_baseline", "fill_probability_current",
+            "timeout_rate",
+        )
+        invalid_numeric = []
+        for field in numeric_fields:
+            value = execm.get(field)
+            if value is None:
+                continue
+            try:
+                if not math.isfinite(float(value)):
+                    invalid_numeric.append(field)
+            except (TypeError, ValueError):
+                invalid_numeric.append(field)
+        if missing or invalid_numeric:
+            evidence_gaps = sorted(set(missing + invalid_numeric))
+            metrics.update(
+                spread_degradation_ratio=None,
+                slippage_degradation_ratio=None,
+                latency_degradation_ratio=None,
+                fill_probability_change=None,
+                timeout_rate=execm.get("timeout_rate"),
+                stale_data_rate=None,
+                execution_status="INSUFFICIENT_EVIDENCE",
+                execution_missing_fields=evidence_gaps,
+            )
+            blockers.append(
+                "EXECUTION_INSUFFICIENT_EVIDENCE:"
+                + ",".join(evidence_gaps)
+            )
+            return "INSUFFICIENT_EVIDENCE"
+
+        def ratio(cur,base):
+            cur_value=float(cur); base_value=float(base)
+            if base_value == 0.0:
+                return 1.0 if cur_value == 0.0 else math.inf
+            return cur_value/base_value
+
+        sr=ratio(execm.get("spread_current"),execm.get("spread_baseline"))
+        slr=ratio(execm.get("slippage_current"),execm.get("slippage_baseline"))
+        lr=ratio(execm.get("latency_current"),execm.get("latency_baseline"))
+        fill_delta=float(execm.get("fill_probability_baseline"))-float(execm.get("fill_probability_current"))
+        stale=float(execm.get("stale_data_count"))/max(1,int(execm.get("execution_rejects"))+1)
+        metrics.update(
+            spread_degradation_ratio=sr,
+            slippage_degradation_ratio=slr,
+            latency_degradation_ratio=lr,
+            fill_probability_change=fill_delta,
+            timeout_rate=float(execm.get("timeout_rate")),
+            stale_data_rate=stale,
+            execution_status=execm.get("status"),
+            execution_missing_fields=[],
+        )
         reasons=[]
-        if str(execm.get("status") or "").upper() in {"DEGRADED","SEVERELY_DEGRADED","INSUFFICIENT_EVIDENCE"}: reasons.append(f"EXECUTION_{str(execm.get('status')).upper()}")
-        if sr and sr>self.thresholds.max_spread_degradation_ratio: reasons.append("SPREAD_DEGRADATION")
-        if slr and slr>self.thresholds.max_slippage_degradation_ratio: reasons.append("SLIPPAGE_SPIKE")
-        if lr and lr>self.thresholds.max_latency_degradation_ratio: reasons.append("LATENCY_DEGRADATION")
-        if fill_delta and fill_delta>self.thresholds.max_fill_degradation_ratio: reasons.append("FILL_DEGRADATION")
+        status=str(execm.get("status") or "").upper()
+        if status in {"DEGRADED","SEVERELY_DEGRADED","INSUFFICIENT_EVIDENCE","FAIL"}:
+            reasons.append(f"EXECUTION_{status}")
+        if sr>self.thresholds.max_spread_degradation_ratio: reasons.append("SPREAD_DEGRADATION")
+        if slr>self.thresholds.max_slippage_degradation_ratio: reasons.append("SLIPPAGE_SPIKE")
+        if lr>self.thresholds.max_latency_degradation_ratio: reasons.append("LATENCY_DEGRADATION")
+        if fill_delta>self.thresholds.max_fill_degradation_ratio: reasons.append("FILL_DEGRADATION")
         if stale>self.thresholds.max_stale_data_rate: reasons.append("STALE_DATA_CLUSTER")
         blockers.extend(reasons)
+        if status == "INSUFFICIENT_EVIDENCE":
+            return "INSUFFICIENT_EVIDENCE"
         return "PASS" if not reasons else "FAIL"
+
     def _compute_concentration(self,trades,blockers,metrics):
         complete=list(trades)
         total=sum(max(0.0,float(r.get("net_pnl") if r.get("net_pnl") is not None else r.get("net_r") or 0)) for r in complete)
@@ -402,6 +808,8 @@ class BurnInQualificationEngine:
         if float(m.get("max_drawdown_pct") or 0)>self.thresholds.max_drawdown_pct: reasons.append("DRAWDOWN_BREACH")
         if int(m.get("runtime_error_count") or 0)>self.thresholds.max_runtime_error_count: reasons.append("RUNTIME_ERROR_CLUSTER")
         if "PERSISTENCE_FAILURE" in b: reasons.append("PERSISTENCE_FAILURE")
+        if any(item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:") for item in b):
+            reasons.append("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION")
         for src,dst in mapping.items():
             if src in b: reasons.append(dst)
         return sorted(set(reasons))

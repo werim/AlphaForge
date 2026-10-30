@@ -1,5 +1,302 @@
 # AlphaForge SQL/operator cheat sheet
 
+
+## PINNED — Campaign Monitor
+
+> **Use this first for live PAPER/burn-in campaign inspection.**
+> Read-only only: every SQLite access below uses `sqlite3 -readonly`.
+> `NULL` / unavailable evidence is **not** PASS and is **not** zero.
+
+### Live terminal monitor — auto-select newest campaign DB
+
+Run from the AlphaForge repository root. Override `DB`, `CID`, or `INTERVAL` before running when needed.
+
+```bash
+DB="${DB:-$(find data/campaign -type f -name '*.db' -print0 2>/dev/null \
+  | xargs -0 ls -1t 2>/dev/null \
+  | head -1)}"
+
+if [[ -z "$DB" || ! -f "$DB" ]]; then
+  echo "ERROR: campaign DB not found"
+  exit 1
+fi
+
+CID="${CID:-$(sqlite3 -readonly "$DB" "
+SELECT campaign_id
+FROM burnin_campaigns
+ORDER BY created_at DESC
+LIMIT 1;
+")}"
+
+INTERVAL="${INTERVAL:-5}"
+
+echo "Monitoring:"
+echo "DB  = $DB"
+echo "CID = $CID"
+echo "Refresh = ${INTERVAL}s"
+sleep 1
+
+while true; do
+  printf '\033[2J\033[H'
+
+  echo "======================================================================"
+  echo " ALPHAFORGE CAMPAIGN MONITOR"
+  echo " $(date '+%Y-%m-%d %H:%M:%S')"
+  echo " DB:  $DB"
+  echo " CID: $CID"
+  echo "======================================================================"
+
+  sqlite3 -readonly -header -column "$DB" <<SQL
+
+.timeout 3000
+
+SELECT
+  campaign_status AS status,
+  active_run_id,
+  worker_pid,
+  restart_count,
+  last_heartbeat_at,
+  ROUND(
+    (julianday('now') - julianday(last_heartbeat_at)) * 86400,
+    1
+  ) AS heartbeat_age_sec,
+  qualification_status AS qual,
+  evidence_completeness_status AS evidence,
+  last_error
+FROM burnin_campaigns
+WHERE campaign_id='$CID';
+
+
+SELECT
+  cr.continuation_sequence AS seq,
+  cr.burnin_run_id AS run_id,
+  cr.status,
+  r.sample_count AS samples,
+  r.accepted_count AS accepted,
+  r.rejected_count AS rejected,
+  r.closed_trade_count AS closed,
+  r.open_trade_count AS open
+FROM burnin_campaign_runs cr
+JOIN burnin_runs r
+  ON r.burnin_run_id=cr.burnin_run_id
+WHERE cr.campaign_id='$CID'
+ORDER BY cr.continuation_sequence DESC
+LIMIT 5;
+
+
+WITH runs AS (
+  SELECT burnin_run_id
+  FROM burnin_campaign_runs
+  WHERE campaign_id='$CID'
+)
+SELECT 'DECISIONS' AS metric, COUNT(*) AS n
+FROM burnin_observations o
+JOIN runs r USING(burnin_run_id)
+
+UNION ALL
+SELECT 'ACCEPTED', COUNT(*)
+FROM burnin_observations o
+JOIN runs r USING(burnin_run_id)
+WHERE UPPER(COALESCE(o.decision,'')) IN ('ACCEPT','ACCEPTED')
+
+UNION ALL
+SELECT 'REJECTED', COUNT(*)
+FROM burnin_observations o
+JOIN runs r USING(burnin_run_id)
+WHERE UPPER(COALESCE(o.decision,''))='REJECTED'
+
+UNION ALL
+SELECT 'REJECT PENDING', COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+  AND UPPER(status) IN ('PENDING','READY','RESOLVING')
+
+UNION ALL
+SELECT 'REJECT RESOLVED', COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+  AND UPPER(status) IN ('RESOLVED','AMBIGUOUS')
+
+UNION ALL
+SELECT 'REJECT FAILED', COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+  AND UPPER(status)='FAILED'
+
+UNION ALL
+SELECT 'POSITIONS OPEN', COUNT(*)
+FROM burnin_pending_position_outcomes
+WHERE campaign_id='$CID'
+  AND UPPER(status)='OPEN'
+
+UNION ALL
+SELECT 'POSITIONS CLOSED', COUNT(*)
+FROM burnin_pending_position_outcomes
+WHERE campaign_id='$CID'
+  AND UPPER(status) IN ('CLOSED','RESOLVED')
+
+UNION ALL
+SELECT 'POSITION MGMT EVENTS', COUNT(*)
+FROM burnin_position_management_events
+WHERE campaign_id='$CID';
+
+
+SELECT
+  status,
+  COUNT(*) AS n,
+  MIN(due_at) AS oldest_due,
+  SUM(
+    CASE
+      WHEN due_at <= datetime('now')
+       AND status IN ('PENDING','READY','RESOLVING')
+      THEN 1 ELSE 0
+    END
+  ) AS overdue
+FROM burnin_pending_reject_labels
+WHERE campaign_id='$CID'
+GROUP BY status
+ORDER BY status;
+
+
+SELECT
+  q.generated_at,
+  q.status,
+  q.sample_status AS sample,
+  q.expectancy_status AS expectancy,
+  q.execution_status AS execution,
+  q.reject_quality_status AS reject_quality,
+  q.drawdown_status AS drawdown,
+  q.reconciliation_status AS reconciliation,
+  q.evidence_completeness_status AS evidence
+FROM burnin_qualification_snapshots q
+WHERE q.campaign_id='$CID'
+   OR q.burnin_run_id IN (
+      SELECT burnin_run_id
+      FROM burnin_campaign_runs
+      WHERE campaign_id='$CID'
+   )
+ORDER BY q.generated_at DESC, q.id DESC
+LIMIT 1;
+
+
+SELECT
+  substr(o.observed_at,12,8) AS time,
+  o.symbol,
+  o.decision,
+  ROUND(
+    COALESCE(
+      CAST(json_extract(o.metrics_json,'$.score') AS REAL),
+      d.score
+    ),4
+  ) AS score,
+  ROUND(
+    COALESCE(
+      CAST(json_extract(o.metrics_json,'$.raw_rr') AS REAL),
+      CAST(json_extract(o.metrics_json,'$.candidate_raw_rr') AS REAL),
+      d.rr
+    ),3
+  ) AS raw_rr,
+  ROUND(
+    COALESCE(
+      CAST(json_extract(o.metrics_json,'$.effective_rr') AS REAL),
+      d.effective_rr
+    ),3
+  ) AS eff_rr,
+  COALESCE(
+    d.reject_reason,
+    json_extract(o.metrics_json,'$.primary_reject_reason'),
+    json_extract(o.metrics_json,'$.reject_reason'),
+    '-'
+  ) AS reason
+FROM burnin_observations o
+JOIN burnin_campaign_runs cr
+  ON cr.burnin_run_id=o.burnin_run_id
+LEFT JOIN order_decisions d
+  ON d.decision_id=json_extract(o.metrics_json,'$.reject_decision_id')
+WHERE cr.campaign_id='$CID'
+  AND UPPER(
+    COALESCE(
+      json_extract(o.metrics_json,'$.observation_kind'),
+      'CANONICAL_DECISION'
+    )
+  )='CANONICAL_DECISION'
+ORDER BY o.observed_at DESC, o.id DESC
+LIMIT 15;
+
+
+SELECT
+  substr(event_time,12,8) AS time,
+  event_type,
+  burnin_run_id,
+  substr(COALESCE(details_json,''),1,90) AS details
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+ORDER BY id DESC
+LIMIT 8;
+
+SQL
+
+  echo
+  echo "=== WORKER PROCESS ==="
+
+  PID="$(sqlite3 -readonly "$DB" \
+    "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")"
+
+  if [[ -n "$PID" ]]; then
+    ps -p "$PID" -o pid=,etime=,%cpu=,%mem=,command= 2>/dev/null \
+      || echo "PID $PID NOT RUNNING"
+  else
+    echo "No worker PID"
+  fi
+
+  echo
+  echo "Refresh: ${INTERVAL}s | Ctrl-C to exit"
+  sleep "$INTERVAL"
+done
+```
+
+### Monitor a specific DB / campaign
+
+```bash
+DB="data/campaign/POST550.db"
+CID="camp_..."
+INTERVAL=3
+```
+
+Then run the monitor block above.
+
+### One-shot campaign status
+
+Use this when you do not need the refresh loop:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+SELECT
+  campaign_id,
+  campaign_status,
+  active_run_id,
+  worker_pid,
+  restart_count,
+  last_heartbeat_at,
+  ROUND((julianday('now')-julianday(last_heartbeat_at))*86400,1) AS heartbeat_age_sec,
+  qualification_status,
+  evidence_completeness_status,
+  last_error
+FROM burnin_campaigns
+WHERE campaign_id='$CID';
+"
+```
+
+### Monitor interpretation
+
+- Growing `heartbeat_age_sec`: inspect runtime/worker liveness.
+- Persisted `worker_pid` but `ps` reports it missing: persisted campaign state and process state have diverged.
+- Growing resolver `overdue`: inspect reject resolver/backlog health.
+- `NULL`, unavailable, stale, malformed, or cross-scoped qualification evidence must not be interpreted as favorable evidence.
+- This monitor is observational only. Do not bootstrap schemas, migrate, repair, resume, restart, or mutate an active campaign from this workflow.
+
+---
+
 ## 1. Purpose
 
 This is the read-only SQL reference for AlphaForge PAPER, BURN-IN, qualification, reject-forward-outcome, runtime-health, and execution-quality audits. It records the current repository schema and the joins that are safe to use when inspecting a campaign.
@@ -95,7 +392,7 @@ sqlite3 -readonly -header -column "$DB" "SELECT c.campaign_id,c.release_id,c.cam
 | Burn-in campaign | `burnin_campaigns`, `burnin_campaign_runs`, `burnin_runs` | Campaign identity, continuation lineage, release/config hashes, and run-level counters. |
 | Burn-in decisions | `burnin_observations` | Campaign/run-scoped decision evidence. `metrics_json` carries `signal_id`, `reject_decision_id`, MTF, and provenance. Use the canonical-decision predicate when counting KPI rows because diagnostic observations can coexist. |
 | Reject forward outcome | `burnin_pending_reject_labels` → `burnin_reject_outcomes` | Pending labels are campaign/run scoped. Resolved outcomes are run scoped and carry campaign/pending/reject identity in `payload_json`. |
-| Accepted trade outcome | `burnin_pending_position_outcomes` → `burnin_trade_outcomes` | Pending positions are campaign/run scoped; realized trade outcomes are run scoped and include cost, net-R, PnL, hold, and exit evidence. |
+| Accepted trade outcome | `burnin_pending_position_outcomes` → `burnin_position_management_events` → `burnin_trade_outcomes` | Entry evidence in the pending position is immutable; post-entry stop/remaining-exposure/partial/protective changes are append-only management events; realized trade outcomes bind the final cost, net-R, PnL, hold, and management ledger. |
 | Qualification | `burnin_qualification_snapshots` | Historical, immutable-looking qualification snapshots keyed by `qualification_id`; current campaign linkage is direct in current schemas. |
 | Runtime health | `runtime_heartbeats`, `runtime_state_snapshots`, `runtime_recovery_events`, `exchange_reconciliation_events` | Operational liveness, recovery, fail-closed, kill-switch, and exchange reconciliation evidence. |
 | Readiness/release | `release_gate_snapshots`, `operator_acknowledgements`, `canary_run_events`, `rollback_verification_events`, `runbook_evidence`, `live_readiness_reports` | Release/readiness evidence; not a substitute for campaign decision/lifecycle evidence. |
@@ -115,6 +412,27 @@ sqlite3 -readonly -header -column "$DB" "SELECT c.campaign_id,c.release_id,c.cam
 
 The following is the current column inventory. `id` is the ordinary row primary key unless another key is stated. Columns ending in `_json`, `payload`, `execution_ctx`, `evidence_json`, or `diagnostics_json` are serialized JSON/text and should be inspected with `json_valid`/`json_extract` before assuming a shape.
 
+Universe evidence storage is versioned independently of strategy/evidence hashes.
+For `candidate-batch-v3`, `universe_selection_cycles.payload_json` contains one
+SHA256-checked, size-bounded lossless candidate-detail batch; candidate-row
+`observed_inputs_json` and `evidence_availability_json` contain cycle-local
+`_cycle_detail` references. Ranking, eligibility, reasons, selected flags and row
+count remain indexed SQL projections. Use
+`alphaforge.universe_evidence.load_persisted_universe_selection(conn, cycle_id)`
+to reconstruct and verify the complete original selection. Do not interpret a
+reference JSON object as missing observations or evidence. Full v1 and
+`candidate-rows-v2` records remain readable and are never rewritten. Older
+binaries cannot consume v3; rollback requires a compatible reader and must not
+resume a v3 database with an older reader. No live-database migration, evidence
+sampling, strategy hash change, or retention/threshold change is implied.
+The detail frame declares its decoded length and SHA256; decoding is bounded to
+64MiB per cycle and rejects truncated/trailing streams, mismatched counts,
+invalid references, unknown codecs and digest failures. Oversized new frames
+fail before insertion rather than silently changing representation or evidence.
+An existing legacy record may still be verified idempotently without creating
+any new frame or rewriting its historical bytes.
+
+
 ### 6.1 Core decision, execution, and evidence tables
 
 | Table | Class / purpose | Primary/logical keys and important joins | Columns (current observed order) | Code |
@@ -123,7 +441,9 @@ The following is the current column inventory. `id` is the ordinary row primary 
 | `order_decisions` | Canonical decision/reject artifact | `decision_id`; `signal_id`; reject labels use `reject_decision_id → decision_id` | `id, decision_id, signal_id, order_id, symbol, timeframe, mode, decision, reject_reason, score, rr, effective_rr, expectancy_bucket, payload, execution_ctx, execution_ctx_missing, input_snapshot_hash, no_submit_verified, parity_result, created_at, updated_at, phase, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, execution_regime, volatility_regime, portfolio_reject_reason, portfolio_risk_state, portfolio_diagnostics_json, risk_flags` | `persistence.py` |
 | `ai_decision_features` | Feature/penalty sidecar | `decision_id`; unique index in current DB | `id, decision_id, features, penalties, reason_flags, execution_features, created_at` | `persistence.py` |
 | `trade_lifecycle_events` | Canonical lifecycle timeline | `event_id`; current unique index on `(signal_id,event_ts,lifecycle_state)`; joins by `signal_id`, `order_id`, `trade_id`, `lifecycle_id` | `id, event_id, signal_id, order_id, symbol, mode, trade_id, lifecycle_state, state, event_type, payload, decision, reject_reason, score, rr, effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload` | `persistence.py`, `lifecycle_contract.py` |
-| `decision_evidence` | SQL-backed readiness/export evidence surface | `evidence_id`; optional `run_id`, `signal_id`, `order_id`, `position_id`, `lifecycle_id` | `id, evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type, setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr, effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason, entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes, volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score, volatility_regime, cost_penalty, total_cost_pct, total_explicit_cost_pct, spread_source, slippage_source, fee_pct, fee_source, funding_source, latency_ms, latency_source, liquidity_status, volatility_penalty_pct, volatility_source, reject_flags, unavailable_fields, diagnostics_json, portfolio_equity, available_balance, open_position_count, max_open_positions, total_notional_exposure, max_notional_exposure, symbol_notional_exposure, max_symbol_notional, side_exposure_long, side_exposure_short, net_exposure, gross_exposure, daily_realized_pnl, daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct, consecutive_loss_count, correlation_group, correlation_group_exposure, correlated_position_count, risk_flags, portfolio_reject_reason, portfolio_risk_state, portfolio_diagnostics_json, signal_id, order_id, position_id, lifecycle_id, lifecycle_seq, created_at` | `persistence.py`, `live_readiness.py` |
+| `decision_evidence` | SQL-backed readiness/export evidence surface | `evidence_id`; optional `run_id`, `signal_id`, `order_id`, `position_id`, `lifecycle_id` | `id, evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type, setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr, candidate_raw_rr, executable_raw_rr, remaining_execution_penalty, rr_basis, execution_cost_semantics, effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason, entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes, volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score, volatility_regime, cost_penalty, total_cost_pct, total_explicit_cost_pct, spread_source, slippage_source, fee_pct, fee_source, funding_source, latency_ms, latency_source, liquidity_status, volatility_penalty_pct, volatility_source, reject_flags, unavailable_fields, diagnostics_json, portfolio_equity, available_balance, open_position_count, max_open_positions, total_notional_exposure, max_notional_exposure, symbol_notional_exposure, max_symbol_notional, side_exposure_long, side_exposure_short, net_exposure, gross_exposure, daily_realized_pnl, daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct, consecutive_loss_count, correlation_group, correlation_group_exposure, correlated_position_count, risk_flags, portfolio_reject_reason, portfolio_risk_state, portfolio_diagnostics_json, signal_id, order_id, position_id, lifecycle_id, lifecycle_seq, created_at` | `persistence.py`, `live_readiness.py` |
+`decision_evidence.raw_rr` is a compatibility alias for candidate/structural RR on fresh evidence. Use `candidate_raw_rr`, `executable_raw_rr`, `remaining_execution_penalty`, `rr_basis`, and `execution_cost_semantics` for economic-stage analysis. Historical overloaded `raw_rr` rows are marked `LEGACY_AMBIGUOUS_RAW_RR` and are not authoritative staged RR evidence.
+
 | `orders` | Runtime/PAPER order state | `order_id`; joins by `signal_id`, `position_id` | `id, order_id, signal_id, position_id, symbol, timeframe, mode, side, status, created_at, updated_at` | `persistence.py` |
 | `fills` | Fill ledger | `fill_id`; joins by `order_id`, `position_id`, `signal_id` | `id, fill_id, order_id, position_id, signal_id, symbol, side, qty, price, fee, filled_at, created_at` | `persistence.py` |
 | `positions` | Runtime/PAPER position state | `position_id`; joins by `signal_id` and order/fill position IDs | `id, position_id, signal_id, symbol, timeframe, mode, side, qty, entry_price, status, created_at, updated_at` | `persistence.py` |
@@ -146,7 +466,8 @@ The following is the current column inventory. `id` is the ordinary row primary 
 | `burnin_observations` | Run-scoped decision/evidence observations | unique `observation_id`; `burnin_run_id`; campaign through `burnin_campaign_runs` | `id, observation_id, burnin_run_id, release_id, observed_at, execution_mode, symbol, interval, regime, decision, lifecycle_state, evidence_complete, missing_fields_json, metrics_json, source_provenance_json, schema_version` |
 | `burnin_pending_reject_labels` | Reject resolver queue | unique `pending_label_id` and `reject_decision_id`; direct campaign/run joins; `reject_decision_id → order_decisions.decision_id` | `id, pending_label_id, campaign_id, burnin_run_id, reject_decision_id, signal_id, symbol, side, decision_timestamp, timeframe, horizon_bars, entry, stop, target, horizon_seconds, execution_cost_assumptions_json, regime, reject_reason, source_provenance_json, due_at, status, evidence_complete, last_error, claim_token, claimed_at, created_at, resolved_at, schema_version` |
 | `burnin_reject_outcomes` | Canonical resolved reject forward outcome | unique `reject_outcome_id`; `burnin_run_id`; explicit identities in `payload_json` | `id, reject_outcome_id, burnin_run_id, release_id, reject_reason, symbol, regime, decision_time, hypothetical_entry, hypothetical_stop, hypothetical_target, forward_label, would_tp, would_sl, timeout, ambiguous, hypothetical_gross_r, hypothetical_net_r_after_costs, avoided_loss, missed_profit, execution_invalidated, evidence_horizon, evidence_complete, payload_json, schema_version` |
-| `burnin_pending_position_outcomes` | Accepted PAPER position/outcome queue | unique `pending_position_id` and `trade_id`; direct campaign/run joins; `source_decision_id` | `id, pending_position_id, trade_id, campaign_id, burnin_run_id, signal_id, source_decision_id, decision_time, symbol, side, setup_type, entry_time, planned_entry, simulated_fill, stop, target, quantity, notional, entry_spread, entry_slippage, entry_fee, regime, source_provenance_json, status, exit_time, exit_price, exit_reason, gross_pnl, gross_r, exit_spread, exit_slippage, exit_fee, funding, latency_impact_penalty, total_execution_cost, net_pnl, net_r, hold_duration_seconds, mfe, mae, evidence_complete, missing_fields_json, created_at, resolved_at, schema_version` |
+| `burnin_pending_position_outcomes` | Accepted PAPER position/outcome queue | unique `pending_position_id` and `trade_id`; direct campaign/run joins; `source_decision_id` | `id, pending_position_id, trade_id, campaign_id, burnin_run_id, signal_id, source_decision_id, decision_time, symbol, side, setup_type, entry_time, planned_entry, simulated_fill, stop, target, quantity, notional, entry_spread, entry_slippage, entry_fee, regime, source_provenance_json, status, exit_time, exit_price, exit_reason, gross_pnl, gross_r, exit_spread, exit_slippage, exit_fee, funding, latency_impact_penalty, total_execution_cost, net_pnl, net_r, hold_duration_seconds, mfe, mae, evidence_complete, missing_fields_json, created_at, resolved_at, schema_version, current_stop, current_target, remaining_quantity, remaining_notional, realized_gross_pnl, realized_execution_cost, realized_net_pnl, trailing_enabled, management_version, last_management_at` |
+| `burnin_position_management_events` | Append-only PAPER post-entry management evidence | unique `management_event_id`; `request_hash` binds replay identity; joins by `trade_id,campaign_id,burnin_run_id` | `id, management_event_id, request_hash, trade_id, campaign_id, burnin_run_id, event_time, action, requested_quantity, execution_price, previous_stop, new_stop, previous_remaining_quantity, new_remaining_quantity, gross_pnl, execution_cost, net_pnl, evidence_json, created_at, schema_version` |
 | `burnin_trade_outcomes` | Canonical realized burn-in trade outcome | unique `outcome_id`; `burnin_run_id` | `id, outcome_id, burnin_run_id, release_id, trade_id, symbol, regime, closed_at, gross_r, gross_pnl, spread_cost, entry_slippage_cost, exit_slippage_cost, fee_cost, funding_cost, latency_cost, volatility_penalty, liquidity_penalty, total_execution_cost, net_r, net_pnl, effective_rr_at_entry, realized_effective_rr, hold_duration_seconds, mfe, mae, exit_reason, evidence_complete, missing_cost_fields_json, payload_json, schema_version` |
 | `burnin_regime_metrics` | Run/regime derived qualification metrics | unique `(burnin_run_id,regime)` | `id, burnin_run_id, release_id, regime, sample_count, accepted_count, rejected_count, mean_net_r, lower_confidence_bound_expectancy, max_drawdown, cost_drag, slippage_distribution_json, reject_accuracy, execution_failure_count, status, generated_at, schema_version` |
 | `burnin_execution_metrics` | Run/window execution-quality aggregate | run/window logical key | `id, burnin_run_id, release_id, metric_window, spread_baseline, spread_current, slippage_baseline, slippage_current, latency_baseline, latency_current, fill_probability_baseline, fill_probability_current, liquidity_depth_baseline, liquidity_depth_current, timeout_rate, execution_rejects, stale_data_count, reconciliation_quality, funding_cost, price_impact_proxy, status, generated_at, schema_version` |
@@ -1178,6 +1499,18 @@ Accepted decision without downstream position is a review candidate, not a guara
 sqlite3 -readonly -header -column "$DB" "WITH accepted AS (SELECT DISTINCT json_extract(o.metrics_json,'$.signal_id') AS signal_id FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id='$CID' AND UPPER(COALESCE(o.decision,'')) IN ('ACCEPT','ACCEPTED')) SELECT a.signal_id FROM accepted a LEFT JOIN burnin_pending_position_outcomes p ON p.signal_id=a.signal_id AND p.campaign_id='$CID' LEFT JOIN positions pos ON pos.signal_id=a.signal_id WHERE p.signal_id IS NULL AND pos.signal_id IS NULL;"
 ```
 
+Post-entry management ledger for one campaign. `stop/target/quantity/notional` are immutable entry evidence; current exposure is `current_stop/current_target/remaining_quantity/remaining_notional`. A repeated `management_event_id` is valid only when its `request_hash` is unchanged.
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT e.event_time,e.trade_id,e.action,e.requested_quantity,e.execution_price,e.previous_stop,e.new_stop,e.previous_remaining_quantity,e.new_remaining_quantity,e.gross_pnl,e.execution_cost,e.net_pnl,e.request_hash FROM burnin_position_management_events e WHERE e.campaign_id='$CID' ORDER BY e.id;"
+```
+
+Current managed PAPER exposure:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT trade_id,symbol,side,status,simulated_fill,stop AS initial_stop,current_stop,target AS initial_target,current_target,quantity AS initial_quantity,remaining_quantity,notional AS initial_notional,remaining_notional,trailing_enabled,management_version,last_management_at FROM burnin_pending_position_outcomes WHERE campaign_id='$CID' ORDER BY id;"
+```
+
 Closed position without a canonical trade outcome is also a review candidate. Runtime positions lack a campaign key, so this is a cross-surface diagnostic, not a definitive campaign violation:
 
 ```bash
@@ -1359,7 +1692,11 @@ One row per failed gate:
 
     sqlite3 -readonly -header -column "$DB" "SELECT p.created_at,p.symbol,p.reject_decision_id,p.reject_reason,p.entry AS resolver_entry,p.stop,p.target,json_extract(p.source_provenance_json,'$.reject_execution_basis') AS execution_basis,json_extract(p.source_provenance_json,'$.planned_entry') AS planned_entry,json_extract(p.source_provenance_json,'$.executable_entry') AS executable_entry,json_extract(p.source_provenance_json,'$.candidate_raw_rr') AS candidate_raw_rr,json_extract(p.source_provenance_json,'$.executable_raw_rr') AS executable_raw_rr,json_extract(p.source_provenance_json,'$.remaining_execution_penalty') AS remaining_execution_penalty,json_extract(p.source_provenance_json,'$.effective_rr_at_decision') AS effective_rr,json_extract(p.source_provenance_json,'$.entry_slippage_embedded_in_fill') AS entry_slippage_embedded,json_extract(p.source_provenance_json,'$.embedded_entry_slippage_cost') AS embedded_entry_slippage_cost,json_extract(p.source_provenance_json,'$.fill_shift_initial_risk_ratio') AS fill_shift_initial_risk_ratio,json_extract(p.source_provenance_json,'$.reject_quality_attributable') AS attributable,json_extract(p.source_provenance_json,'$.non_attributable_reason') AS non_attributable_reason,p.execution_cost_assumptions_json FROM burnin_pending_reject_labels p WHERE p.campaign_id='$CID' ORDER BY p.created_at DESC;"
 
-Fresh authoritative execution-parity analysis uses reject_execution_basis = EXPECTED_FILL_RUNTIME_PARITY. PLANNED_ENTRY_LEGACY and LEGACY_SCANNER_SHADOW are diagnostic/legacy bases and must not be mixed into execution-aligned calibration.
+Fresh authoritative execution-parity analysis uses `reject_execution_basis = EXPECTED_FILL_RUNTIME_PARITY` together with `reject_quality_attributable = true`. `PLANNED_ENTRY_LEGACY` and `LEGACY_SCANNER_SHADOW` are diagnostic/legacy bases and must not be mixed into execution-aligned calibration. Do not hard-code `forward_label_subject = GUIDED_CANDIDATE`: complete prospective guided geometry rejects may use `GUIDED_GEOMETRY_REJECT`; legacy scanner shadow remains non-authoritative.
+
+For #547+ guided geometry rejects, exact gate-reproduction inputs are persisted in `source_provenance_json` as `decision_execution_entry`, `entry_zone_low`, `entry_zone_high`, `structural_stop`, `structural_target`, `setup_phase`, `setup_observed_direction`, `setup_recent_direction`, `execution_direction`, and `guided_geometry_evidence`. A complete but directionally invalid forward geometry remains non-attributable with an explicit reason.
+
+Duplicate-position evidence is episode-bound prospectively. Inspect `burnin_observations.metrics_json.setup_identity` together with `active_position_episode_id`; repeated 1m scans of the same setup during the same open-position episode must not be counted as independent canonical rejects.
 
 ### 25.3 Resolved outcome basis and no-double-count audit
 
@@ -1372,3 +1709,142 @@ For EXPECTED_FILL_RUNTIME_PARITY, hypothetical_entry should equal executable_ent
     sqlite3 -readonly -header -column "$DB" "SELECT COALESCE(json_extract(p.source_provenance_json,'$.reject_execution_basis'),'MISSING') AS execution_basis,COALESCE(json_extract(p.source_provenance_json,'$.reject_quality_attributable'),1) AS attributable,COUNT(*) AS n FROM burnin_pending_reject_labels p WHERE p.campaign_id='$CID' GROUP BY execution_basis,attributable ORDER BY n DESC;"
 
 Authoritative reject-forward expectancy rows should be backed by EXPECTED_FILL_RUNTIME_PARITY. Legacy rows can remain in the DB for diagnosis but must not silently enter execution-aligned calibration.
+
+## 26. Joint portfolio allocation evidence
+
+`portfolio_allocation_cycles` is the immutable cycle authority for #346. Its
+`candidate_set_hash`, `portfolio_snapshot_hash`, `config_hash`, and
+`universe_hash` bind the allocation to the complete simultaneous input set.
+`portfolio_allocation_candidates` records the deterministic preference inputs,
+hard-gate result, requested size, allocated size, correlation contribution,
+final action, and reasons. `HOLD_CASH` is a valid cycle action.
+
+Latest allocation cycles:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT timestamp,allocation_cycle_id,mode,action,candidate_set_hash,portfolio_snapshot_hash,config_hash,universe_hash,git_sha,release_id,runtime_identity,allocator_version,schema_version FROM portfolio_allocation_cycles ORDER BY timestamp DESC,allocation_cycle_id DESC LIMIT 20;"
+```
+
+Reconstruct one cycle in canonical allocation order:
+
+```bash
+ACID='palloc:replace-me'
+sqlite3 -readonly -header -column "$DB" "SELECT candidate_index,candidate_id,symbol,side,action,reason_codes_json,requested_notional,allocated_notional,requested_risk,allocated_risk,requested_quantity,allocated_quantity,correlation_group,correlation_contribution,concentration_contribution,hard_gate_accepted,hard_gate_reason,candidate_inputs_json,preference_components_json FROM portfolio_allocation_candidates WHERE allocation_cycle_id='$ACID' ORDER BY candidate_index;"
+```
+
+Check that no cycle allocated beyond its own requested notional and that reject
+rows did not receive capital:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT allocation_cycle_id,candidate_id,action,requested_notional,allocated_notional FROM portfolio_allocation_candidates WHERE allocated_notional<0 OR (requested_notional IS NOT NULL AND allocated_notional>requested_notional) OR (action='REJECT' AND allocated_notional<>0);"
+```
+
+Exact retry of an existing `allocation_cycle_id` is accepted only when the
+stored payload and evidence hash match. A conflicting reuse fails closed; do
+not update or delete immutable allocation evidence to make a replay pass.
+
+
+---
+
+## #612 — PAPER position-management shadow proposals
+
+`ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED=true` creates a
+**PAPER-only counterfactual ledger** on demand. The table is intentionally not
+part of the normal Phase 8 bootstrap when the feature is OFF, so existing
+authoritative campaign DB/schema surfaces remain unchanged.
+
+### `burnin_position_management_shadow_proposals`
+
+This table is **not production action authority**. Rows describe
+`WOULD_*` proposals or explicit denials and must never be treated as realized
+PnL or as `burnin_position_management_events`.
+
+Key columns:
+
+| Column | Meaning |
+|---|---|
+| `proposal_id` | deterministic replay/idempotency identity |
+| `proposal_hash` | full causal payload hash; same id + different hash is a conflict |
+| `campaign_id` | campaign identity |
+| `burnin_run_id` | active continuation that produced the proposal |
+| `position_entry_run_id` | continuation where the position originally entered |
+| `release_id`, `git_commit`, `config_hash`, `strategy_config_hash` | exact prospective identity |
+| `trade_id`, `symbol` | canonical position linkage |
+| `proposal_time` | deterministic closed-candle decision boundary |
+| `closed_candle_time` | latest causal closed candle used |
+| `proposed_action` | `WOULD_TIGHTEN_STOP`, `WOULD_PARTIAL_EXIT`, `WOULD_ENABLE_TRAILING`, or `WOULD_PROTECTIVE_EXIT` |
+| `eligibility_status` | `ELIGIBLE` or `DENIED` |
+| `reason` | explicit eligibility/denial reason |
+| `observed_price`, `mfe_r`, `mae_r` | as-of-proposal causal market evidence |
+| `payload_json` | full market/regime/execution evidence, parameters, estimated costs, and counterfactual net-R semantics |
+| `schema_version` | shadow-ledger schema version |
+
+### Latest shadow proposals for one campaign
+
+```sql
+SELECT
+  id,
+  proposal_time,
+  closed_candle_time,
+  symbol,
+  trade_id,
+  proposed_action,
+  eligibility_status,
+  reason,
+  observed_price,
+  mfe_r,
+  mae_r,
+  burnin_run_id,
+  position_entry_run_id,
+  git_commit,
+  config_hash
+FROM burnin_position_management_shadow_proposals
+WHERE campaign_id = :campaign_id
+ORDER BY id DESC
+LIMIT 100;
+```
+
+### Proposal/denial summary
+
+```sql
+SELECT
+  proposed_action,
+  eligibility_status,
+  reason,
+  COUNT(*) AS n
+FROM burnin_position_management_shadow_proposals
+WHERE campaign_id = :campaign_id
+GROUP BY proposed_action, eligibility_status, reason
+ORDER BY proposed_action, eligibility_status, n DESC;
+```
+
+### Verify shadow never became authoritative management
+
+```sql
+SELECT
+  (SELECT COUNT(*)
+     FROM burnin_position_management_shadow_proposals
+    WHERE campaign_id = :campaign_id) AS shadow_proposals,
+  (SELECT COUNT(*)
+     FROM burnin_position_management_events
+    WHERE campaign_id = :campaign_id) AS authoritative_management_events;
+```
+
+Do not infer a mutation from the two counts alone. For #612 campaigns the
+authoritative event count must be explained by independent canonical management
+authority; shadow rows themselves are never valid action inputs.
+
+### Replay/idempotency check
+
+```sql
+SELECT
+  proposal_id,
+  COUNT(*) AS n,
+  COUNT(DISTINCT proposal_hash) AS distinct_hashes
+FROM burnin_position_management_shadow_proposals
+WHERE campaign_id = :campaign_id
+GROUP BY proposal_id
+HAVING COUNT(*) != 1 OR COUNT(DISTINCT proposal_hash) != 1;
+```
+
+Expected result: **zero rows**.

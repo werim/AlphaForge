@@ -13,14 +13,24 @@ import time
 import uuid
 import subprocess
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Protocol
 
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
-from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
+from alphaforge.order import (
+    LifecycleState,
+    OrderCandidate,
+    OrderExecutionContext,
+    OrderRejection,
+    TradingMode,
+    build_order_candidate,
+    evaluate_signal_decision,
+    evaluate_trade_quality,
+    validate_live_order_authorization,
+)
 from alphaforge.execution import (
     PROVENANCE_ACTUAL,
     PROVENANCE_ESTIMATED,
@@ -32,35 +42,67 @@ from alphaforge.execution import (
     build_execution_cost_semantics,
     execution_context_is_unavailable,
     weighted_average_fill_price,
+    adverse_expected_fill_price,
+    build_decision_rr_metrics,
+    build_stop_risk_metrics,
+    evaluate_stop_risk_policy,
 )
+from alphaforge.execution_ownership import acquire_execution_ownership, release_execution_ownership, validate_execution_ownership
+from alphaforge.sqlite_safety import SQLiteBusyExhausted, run_sqlite_write_with_retry, sqlite_writer_guard
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
+from alphaforge.decision_invariant import (
+    assert_pre_submit_invariant_parity,
+    compare_pre_submit_invariants,
+    incomplete_pre_submit_fields,
+    project_pre_submit_invariant,
+)
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
-from alphaforge.runtime_heartbeat import is_sqlite_busy_error, save_runtime_heartbeat
+from alphaforge.runtime_heartbeat import (
+    SQLITE_BUSY_RETRY_ATTEMPTS,
+    SQLITE_BUSY_RETRY_BASE_SECONDS,
+    is_sqlite_busy_error,
+    save_runtime_heartbeat,
+)
 from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
-from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
+from alphaforge.readonly_snapshot_reader import ReadonlySnapshotReader
+from alphaforge.symbol_selector import (
+    SymbolSelectionResult,
+    UniverseConstraints,
+    build_selected_universe,
+    selection_results,
+    select_symbols,  # compatibility surface for external test/runtime adapters
+)
+from alphaforge.universe_evidence import persist_universe_selection, persist_burnin_universe_selection_link
+from alphaforge.portfolio_allocation_evidence import persist_portfolio_allocation
+from alphaforge.persistence import (
+    fetch_expectancy_stat_detail,
+    init_db,
+    save_decision_evidence,
+    save_rejected_decision_artifact,
+)
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, campaign_uses_dynamic_universe, DYNAMIC_UNIVERSE_SCOPE_MODE, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
-from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
+from alphaforge.portfolio_risk import allocate_portfolio_candidates, evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
     normalize_mtf_execution_confirmation_mode, runtime_filter_config)
-from alphaforge.config_registry import managed_config_value
+from alphaforge.config_registry import canonical_field_default
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
     bootstrap_agent_schema, create_agent_shadow_engine)
 from alphaforge.multi_timeframe import BinanceMTFProvider
 from alphaforge.state_direction_shadow import StateDirectionShadowStore, build_state_direction_shadow_draft
+from alphaforge.regime_targeting import build_regime_target_policy
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -98,103 +140,134 @@ class LiveReconciliationProvider(ExchangeSnapshotProvider, Protocol):
 
 @dataclass(slots=True)
 class RuntimeConfig:
-    execution_mode: ExecutionMode = ExecutionMode.PAPER
-    min_signal_score: float = 0.62
-    scan_interval_sec: float = 1.0
-    heartbeat_interval_sec: float = 30.0
-    max_symbols_per_scan: int = 5
-    max_reject_log_entries: int = 1000
-    max_concurrent_positions: int = 3
-    symbol_cooldown_sec: float = 120.0
-    max_notional_exposure: float = 100_000.0
-    max_symbol_notional: float = 50_000.0
-    max_open_positions: int = 3
-    max_daily_loss_pct: float = 0.03
+    storage_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_enabled"))
+    storage_high_bytes: int= field(default_factory=lambda: canonical_field_default("storage_high_bytes"))
+    storage_low_bytes: int= field(default_factory=lambda: canonical_field_default("storage_low_bytes"))
+    storage_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_min_age_sec"))
+    storage_check_interval_sec: float= field(default_factory=lambda: canonical_field_default("storage_check_interval_sec"))
+    storage_batch_rows: int= field(default_factory=lambda: canonical_field_default("storage_batch_rows"))
+    storage_batch_seconds: float= field(default_factory=lambda: canonical_field_default("storage_batch_seconds"))
+    storage_free_reserve_bytes: int= field(default_factory=lambda: canonical_field_default("storage_free_reserve_bytes"))
+    storage_growth_budget_bytes_per_sec: int= field(default_factory=lambda: canonical_field_default("storage_growth_budget_bytes_per_sec"))
+    storage_archive_dir: str= field(default_factory=lambda: canonical_field_default("storage_archive_dir"))
+    storage_stats_only_enabled: bool= field(default_factory=lambda: canonical_field_default("storage_stats_only_enabled"))
+    storage_stats_only_start_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_start_bytes"))
+    storage_stats_only_target_bytes: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_target_bytes"))
+    storage_stats_only_min_age_sec: float= field(default_factory=lambda: canonical_field_default("storage_stats_only_min_age_sec"))
+    storage_stats_only_recent_cycles: int= field(default_factory=lambda: canonical_field_default("storage_stats_only_recent_cycles"))
+    execution_mode: ExecutionMode = field(default_factory=lambda: ExecutionMode(canonical_field_default("execution_mode")))
+    min_signal_score: float= field(default_factory=lambda: canonical_field_default("min_signal_score"))
+    scan_interval_sec: float= field(default_factory=lambda: canonical_field_default("scan_interval_sec"))
+    heartbeat_interval_sec: float= field(default_factory=lambda: canonical_field_default("heartbeat_interval_sec"))
+    max_symbols_per_scan: int= field(default_factory=lambda: canonical_field_default("max_symbols_per_scan"))
+    universe_min_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_min_market_cap_usd"))
+    universe_max_market_cap_usd: float | None= field(default_factory=lambda: canonical_field_default("universe_max_market_cap_usd"))
+    universe_min_volume_24h_usd: float= field(default_factory=lambda: canonical_field_default("universe_min_volume_24h_usd"))
+    universe_candidate_pool_top_n_volume: int= field(default_factory=lambda: canonical_field_default("universe_candidate_pool_top_n_volume"))
+    universe_excluded_symbols: str= field(default_factory=lambda: canonical_field_default("universe_excluded_symbols"))
+    universe_max_evidence_age_sec: float= field(default_factory=lambda: canonical_field_default("universe_max_evidence_age_sec"))
+    max_reject_log_entries: int= field(default_factory=lambda: canonical_field_default("max_reject_log_entries"))
+    max_concurrent_positions: int= field(default_factory=lambda: canonical_field_default("max_concurrent_positions"))
+    symbol_cooldown_sec: float= field(default_factory=lambda: canonical_field_default("symbol_cooldown_sec"))
+    max_notional_exposure: float= field(default_factory=lambda: canonical_field_default("max_notional_exposure"))
+    max_symbol_notional: float= field(default_factory=lambda: canonical_field_default("max_symbol_notional"))
+    max_open_positions: int = field(default_factory=lambda: int(canonical_field_default("max_concurrent_positions")))
+    max_daily_loss_pct: float= field(default_factory=lambda: canonical_field_default("max_daily_loss_pct"))
     max_rolling_drawdown_pct: float = 0.08
-    max_correlation_group_exposure: float = 75_000.0
-    max_correlated_positions: int = 2
+    max_correlation_group_exposure: float= field(default_factory=lambda: canonical_field_default("max_correlation_group_exposure"))
+    max_correlated_positions: int= field(default_factory=lambda: canonical_field_default("max_correlated_positions"))
     reject_unknown_portfolio_risk: bool = True
-    stale_market_data_sec: float = 15.0
-    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
-    min_rr: float = 1.20
-    min_effective_rr: float = 1.10
-    max_spread_pct: float = 0.0025
-    max_expected_slippage_pct: float = 0.0020
-    max_total_cost_pct: float = 0.20
-    min_liquidity_score: float = 0.30
-    max_volatility_penalty_pct: float = 0.20
-    reject_unknown_execution_context: bool = True
-    max_latency_ms: int = 2500
-    paper_fee_bps: float | None = 4.0
-    paper_execution_latency_ms: float | None = 50.0
+    stale_market_data_sec: float= field(default_factory=lambda: canonical_field_default("stale_market_data_sec"))
+    max_clock_skew_ms: int= field(default_factory=lambda: canonical_field_default("max_clock_skew_ms"))
+    min_rr: float= field(default_factory=lambda: canonical_field_default("min_rr"))
+    min_effective_rr: float= field(default_factory=lambda: canonical_field_default("min_effective_rr"))
+    max_spread_pct: float= field(default_factory=lambda: canonical_field_default("max_spread_pct"))
+    max_expected_slippage_pct: float= field(default_factory=lambda: canonical_field_default("max_expected_slippage_pct"))
+    max_total_cost_pct: float= field(default_factory=lambda: canonical_field_default("max_total_cost_pct"))
+    min_liquidity_score: float= field(default_factory=lambda: canonical_field_default("min_liquidity_score"))
+    max_volatility_penalty_pct: float= field(default_factory=lambda: canonical_field_default("max_volatility_penalty_pct"))
+    reject_unknown_execution_context: bool= field(default_factory=lambda: canonical_field_default("reject_unknown_execution_context"))
+    max_latency_ms: int= field(default_factory=lambda: canonical_field_default("max_latency_ms"))
+    paper_fee_bps: float | None= field(default_factory=lambda: canonical_field_default("paper_fee_bps"))
+    paper_execution_latency_ms: float | None= field(default_factory=lambda: canonical_field_default("paper_execution_latency_ms"))
     # Explicit PAPER-only portfolio evidence. These values never substitute
     # for unknown LIVE/LIVE_PRECHECK account state.
     paper_initial_equity: float | None = 1_000.0
-    paper_candidate_notional: float | None = 10.0  # conservative 1% of the default ledger
-    market_data_base_url: str = "https://fapi.binance.com"
-    regime_timeframe: str = "1h"
-    setup_timeframe: str = "15m"
-    execution_timeframe: str = "1m"
-    mtf_guided_signal_generation_enabled: bool = True
-    mtf_execution_confirmation_mode: str = "ENFORCE"
-    regime_direction_threshold: float = 0.0005
-    setup_direction_threshold: float = 0.0003
-    execution_direction_threshold: float = 0.0005
-    enable_state_direction_resolution: bool = False
-    paper_decision_timeframe: str = "1m"  # deprecated alias
+    paper_candidate_notional: float | None= field(default_factory=lambda: canonical_field_default("paper_candidate_notional"))
+    paper_position_sizing_mode: str= field(default_factory=lambda: canonical_field_default("paper_position_sizing_mode"))
+    risk_pct_per_trade: float= field(default_factory=lambda: canonical_field_default("risk_pct_per_trade"))
+    paper_max_leverage: float= field(default_factory=lambda: canonical_field_default("paper_max_leverage"))
+    paper_max_liquidity_participation_pct: float= field(default_factory=lambda: canonical_field_default("paper_max_liquidity_participation_pct"))
+    paper_min_notional: float= field(default_factory=lambda: canonical_field_default("paper_min_notional"))
+    market_data_base_url: str = field(default_factory=lambda: str(canonical_field_default("binance_market_data_base_url")))
+    regime_timeframe: str= field(default_factory=lambda: canonical_field_default("regime_timeframe"))
+    setup_timeframe: str= field(default_factory=lambda: canonical_field_default("setup_timeframe"))
+    execution_timeframe: str= field(default_factory=lambda: canonical_field_default("execution_timeframe"))
+    mtf_guided_signal_generation_enabled: bool= field(default_factory=lambda: canonical_field_default("mtf_guided_signal_generation_enabled"))
+    mtf_execution_confirmation_mode: str= field(default_factory=lambda: canonical_field_default("mtf_execution_confirmation_mode"))
+    paper_position_management_shadow_enabled: bool= field(default_factory=lambda: canonical_field_default("paper_position_management_shadow_enabled"))
+    regime_direction_threshold: float= field(default_factory=lambda: canonical_field_default("regime_direction_threshold"))
+    setup_direction_threshold: float= field(default_factory=lambda: canonical_field_default("setup_direction_threshold"))
+    execution_direction_threshold: float= field(default_factory=lambda: canonical_field_default("execution_direction_threshold"))
+    enable_state_direction_resolution: bool= field(default_factory=lambda: canonical_field_default("enable_state_direction_resolution"))
+    paper_decision_timeframe: str = field(default_factory=lambda: str(canonical_field_default("execution_timeframe")))  # deprecated alias
     require_mtf_alignment: bool = False
-    max_abs_funding_rate_pct: float = 0.0010
-    min_liquidity_usd: float = 5_000_000.0
+    max_abs_funding_rate_pct: float= field(default_factory=lambda: canonical_field_default("max_abs_funding_rate_pct"))
+    min_liquidity_usd: float= field(default_factory=lambda: canonical_field_default("min_liquidity_usd"))
     # Keep every decision-filter field that can be environment-configured on
     # the runtime config.  Phase 8/9 campaign identity hashes this effective
     # filter configuration, so dropping any of these while building the
     # orchestrator would make a PAPER preflight compare two different payloads.
-    min_sl_pct: float = 0.15
-    max_sl_pct: float = 1.5
-    min_atr_pct: float = 0.25
-    max_atr_pct: float = 3.0
-    block_unknown_expectancy: bool = True
-    block_chop_market: bool = True
-    require_regime_alignment: bool = True
-    enable_orderbook_filter: bool = False
-    stop_too_wide_hard_reject: bool = True
-    stop_too_wide_soft_score_min: float = 9.0
-    stop_too_wide_soft_effective_rr_min: float = 1.75
-    stop_too_wide_max_risk_scale: float = 0.50
-    stop_too_wide_extreme_mult: float = 1.50
-    max_trades_global_per_day: int = 10
-    max_trades_symbol_per_day: int = 2
-    symbol_loss_streak_limit: int = 3
-    global_loss_streak_limit: int = 5
-    global_kill_switch: bool = False
-    require_live_qualification: bool = True
-    enable_shadow_mode: bool = False
-    enable_canary_mode: bool = False
-    operator_live_acknowledged: bool = False
-    allow_live_orders: bool = False
-    live_trading_enabled: bool = False
-    reconciliation_interval_sec: float = 5.0
-    reconciliation_timeout_sec: float = 2.0
-    provider_transient_outage_grace_seconds: float = 300.0
-    require_exchange_connectivity_for_live: bool = True
-    required_live_exchanges: tuple[str, ...] = ("binance",)
-    exchange_connectivity_timeout_sec: float = 2.0
-    enable_binance_readonly_reconciliation: bool = False
+    min_sl_pct: float= field(default_factory=lambda: canonical_field_default("min_sl_pct"))
+    max_sl_pct: float= field(default_factory=lambda: canonical_field_default("max_sl_pct"))
+    min_atr_pct: float= field(default_factory=lambda: canonical_field_default("min_atr_pct"))
+    max_atr_pct: float= field(default_factory=lambda: canonical_field_default("max_atr_pct"))
+    block_unknown_expectancy: bool= field(default_factory=lambda: canonical_field_default("block_unknown_expectancy"))
+    block_chop_market: bool= field(default_factory=lambda: canonical_field_default("block_chop_market"))
+    require_regime_alignment: bool= field(default_factory=lambda: canonical_field_default("require_regime_alignment"))
+    enable_orderbook_filter: bool= field(default_factory=lambda: canonical_field_default("enable_orderbook_filter"))
+    stop_too_wide_hard_reject: bool= field(default_factory=lambda: canonical_field_default("stop_too_wide_hard_reject"))
+    stop_too_wide_soft_score_min: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_soft_score_min"))
+    stop_too_wide_soft_effective_rr_min: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_soft_effective_rr_min"))
+    stop_too_wide_max_risk_scale: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_max_risk_scale"))
+    stop_too_wide_extreme_mult: float= field(default_factory=lambda: canonical_field_default("stop_too_wide_extreme_mult"))
+    max_trades_global_per_day: int= field(default_factory=lambda: canonical_field_default("max_trades_global_per_day"))
+    max_trades_symbol_per_day: int= field(default_factory=lambda: canonical_field_default("max_trades_symbol_per_day"))
+    symbol_loss_streak_limit: int= field(default_factory=lambda: canonical_field_default("symbol_loss_streak_limit"))
+    global_loss_streak_limit: int= field(default_factory=lambda: canonical_field_default("global_loss_streak_limit"))
+    global_kill_switch: bool= field(default_factory=lambda: canonical_field_default("global_kill_switch"))
+    require_live_qualification: bool= field(default_factory=lambda: canonical_field_default("require_live_qualification"))
+    enable_shadow_mode: bool= field(default_factory=lambda: canonical_field_default("enable_shadow_mode"))
+    enable_canary_mode: bool= field(default_factory=lambda: canonical_field_default("enable_canary_mode"))
+    operator_live_acknowledged: bool= field(default_factory=lambda: canonical_field_default("operator_live_acknowledged"))
+    allow_live_orders: bool= field(default_factory=lambda: canonical_field_default("allow_live_orders"))
+    execution_account_scope: str= field(default_factory=lambda: canonical_field_default("execution_account_scope"))
+    paper_account_model: str= field(default_factory=lambda: canonical_field_default("paper_account_model"))
+    execution_lease_ttl_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_ttl_sec"))
+    execution_lease_min_validity_sec: float= field(default_factory=lambda: canonical_field_default("execution_lease_min_validity_sec"))
+    live_trading_enabled: bool = field(default_factory=lambda: bool(canonical_field_default("live_enabled")))
+    reconciliation_interval_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_interval_sec"))
+    reconciliation_timeout_sec: float= field(default_factory=lambda: canonical_field_default("reconciliation_timeout_sec"))
+    provider_transient_outage_grace_seconds: float= field(default_factory=lambda: canonical_field_default("provider_transient_outage_grace_seconds"))
+    require_exchange_connectivity_for_live: bool= field(default_factory=lambda: canonical_field_default("require_exchange_connectivity_for_live"))
+    required_live_exchanges: tuple[str, ...] = field(default_factory=lambda: tuple(part.strip() for part in str(canonical_field_default("required_live_exchanges")).split(",") if part.strip()))
+    exchange_connectivity_timeout_sec: float= field(default_factory=lambda: canonical_field_default("exchange_connectivity_timeout_sec"))
+    enable_binance_readonly_reconciliation: bool= field(default_factory=lambda: canonical_field_default("enable_binance_readonly_reconciliation"))
     pending_order_timeout_sec: float = 300.0
     require_exchange_reconciliation_for_paper: bool = True
     diagnostic_mode: bool = False
     phase7_burnin_release_id: str = "default"
     phase7_burnin_snapshot_interval_sec: float = 300.0
-    reject_forward_horizon_bars: int = 240
-    reject_resolver_interval_sec: float = 60.0
-    agent_graph_enabled: bool = False
-    agent_graph_shadow: bool = True
-    agent_graph_max_steps: int = 12
-    agent_graph_max_reflection_retries: int = 1
-    agent_graph_stage_timeout_seconds: float = 5.0
-    agent_graph_persist_traces: bool = True
-    agent_graph_max_pending_runs: int = 64
-    agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
+    reject_forward_horizon_bars: int= field(default_factory=lambda: canonical_field_default("reject_forward_horizon_bars"))
+    reject_resolver_interval_sec: float= field(default_factory=lambda: canonical_field_default("reject_resolver_interval_sec"))
+    agent_graph_enabled: bool= field(default_factory=lambda: canonical_field_default("agent_graph_enabled"))
+    agent_graph_shadow: bool= field(default_factory=lambda: canonical_field_default("agent_graph_shadow"))
+    agent_graph_max_steps: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_steps"))
+    agent_graph_max_reflection_retries: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_reflection_retries"))
+    agent_graph_stage_timeout_seconds: float= field(default_factory=lambda: canonical_field_default("agent_graph_stage_timeout_seconds"))
+    agent_graph_persist_traces: bool= field(default_factory=lambda: canonical_field_default("agent_graph_persist_traces"))
+    agent_graph_max_pending_runs: int= field(default_factory=lambda: canonical_field_default("agent_graph_max_pending_runs"))
+    agent_graph_database_url: str= field(default_factory=lambda: canonical_field_default("agent_graph_database_url"))
 
     def __post_init__(self) -> None:
         self.mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(
@@ -202,6 +275,17 @@ class RuntimeConfig:
         )
         if int(self.max_clock_skew_ms) < 0:
             raise ValueError("max_clock_skew_ms must be >= 0")
+        self.execution_account_scope = str(self.execution_account_scope or "").strip()
+        self.paper_account_model = str(self.paper_account_model or "").strip().upper()
+        self.paper_position_sizing_mode = str(self.paper_position_sizing_mode or "").strip().upper()
+        if self.paper_position_sizing_mode not in {"FIXED", "SHADOW", "RISK_BASED"}:
+            raise ValueError("PAPER_POSITION_SIZING_MODE must be FIXED, SHADOW, or RISK_BASED")
+        if self.paper_position_sizing_mode == "RISK_BASED" and self.execution_mode is not ExecutionMode.PAPER:
+            raise ValueError("RISK_BASED position sizing is PAPER-only until shadow promotion evidence exists")
+        if self.paper_account_model != "ISOLATED_CAMPAIGN":
+            raise ValueError("PAPER_ACCOUNT_MODEL must be ISOLATED_CAMPAIGN")
+        if float(self.execution_lease_min_validity_sec) >= float(self.execution_lease_ttl_sec):
+            raise ValueError("execution_lease_min_validity_sec must be < execution_lease_ttl_sec")
         if (self.mtf_execution_confirmation_mode == "SHADOW"
                 and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
             raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
@@ -246,6 +330,7 @@ class RuntimeMetrics:
     mtf_alignment_pass: int = 0
     mtf_alignment_reject: int = 0
     mtf_regime_missing: int = 0
+    mtf_regime_neutral: int = 0
     mtf_setup_missing: int = 0
     mtf_execution_missing: int = 0
     mtf_execution_not_confirmed: int = 0
@@ -269,6 +354,17 @@ class RuntimeMetrics:
     heartbeat_persistence_failures: int = 0
     heartbeat_persistence_recoveries: int = 0
     heartbeat_persistence_degraded: bool = False
+    reject_persistence_failures: int = 0
+    reject_persistence_degraded: bool = False
+    lifecycle_persistence_failures: int = 0
+    lifecycle_persistence_recoveries: int = 0
+    lifecycle_persistence_degraded: bool = False
+    paper_position_persistence_failures: int = 0
+    execution_ownership_persistence_failures: int = 0
+    geometry_diagnostic_persistence_failures: int = 0
+    live_precheck_persistence_failures: int = 0
+    universe_selection_persistence_failures: int = 0
+    portfolio_allocation_persistence_failures: int = 0
     persistence_enabled: bool = False
 
 
@@ -286,18 +382,25 @@ class RuntimeOrchestrator:
     reject_candle_provider: Callable[[str, str, str], Any] | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+    on_reject_persist_atomic: Callable[[Any, dict[str, Any]], Any] | None = None
     state_direction_shadow_enabled: bool = False
     state_direction_shadow_store: StateDirectionShadowStore | None = None
     paper_slippage_bps: float = 2.0
     persistence_engine: Engine | None = None
+    execution_ownership_engine: Engine | None = None
     control_store: RuntimeControlStore | None = None
     selected_candidate_enricher: Callable[[list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]] | None = None
     mtf_context_provider: Any | None = None
+    _storage_controller: Any = field(default=None, init=False)
+    _storage_pressure: bool = field(default=False, init=False)
+    _storage_report: dict[str, Any] = field(default_factory=dict, init=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
+    _reconciliation_reader: ReadonlySnapshotReader = field(default_factory=ReadonlySnapshotReader, init=False)
     _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
     _shadow_worker_task: asyncio.Task[Any] | None = field(default=None, init=False)
     _agent_trace_repository: AgentTraceRepository | None = field(default=None, init=False)
+    _universe_evidence_engine: Engine | None = field(default=None, init=False)
     _agent_persistence_stats: AgentPersistenceStats = field(default_factory=AgentPersistenceStats, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     _persisted_reject_decision_ids: set[str] = field(default_factory=set, init=False)
@@ -314,6 +417,7 @@ class RuntimeOrchestrator:
     _campaign_intervals: tuple[str, ...] = field(default=(), init=False)
     _campaign_id: str | None = field(default=None, init=False)
     _campaign_symbols: frozenset[str] = field(default_factory=frozenset, init=False)
+    _campaign_dynamic_universe: bool = field(default=False, init=False)
     _campaign_source_exchanges: frozenset[str] = field(default_factory=frozenset, init=False)
     _fatal_task_exception: BaseException | None = field(default=None, init=False)
     _fatal_task_name: str | None = field(default=None, init=False)
@@ -329,6 +433,9 @@ class RuntimeOrchestrator:
     _resolver_provider_recovery_pending: bool = field(default=False, init=False)
     _pending_reconciliation_persistence_failures: list[dict[str, Any]] = field(default_factory=list, init=False)
     _exchange_read_only_status: str = field(default="UNKNOWN", init=False)
+    _derivatives_contract_status: str = field(default="UNKNOWN", init=False)
+    _derivatives_contract_live_eligible: bool = field(default=False, init=False)
+    _derivatives_contract_evidence: dict[str, Any] = field(default_factory=dict, init=False)
     _unreconciled_symbols: set[str] = field(default_factory=set, init=False)
     _orphan_orders: list[dict[str, Any]] = field(default_factory=list, init=False)
     _orphan_positions: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -339,10 +446,17 @@ class RuntimeOrchestrator:
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
     _active_position_sides: dict[str, str] = field(default_factory=dict, init=False)
+    _active_position_episode_ids: dict[str, str] = field(default_factory=dict, init=False)
+    _canonical_duplicate_position_keys: set[str] = field(default_factory=set, init=False)
     _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
     _qualification_report: QualificationReport | None = field(default=None, init=False)
     _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
     _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _execution_account_scope: str | None = field(default=None, init=False)
+    _execution_account_model: str | None = field(default=None, init=False)
+    _execution_fencing_token: int | None = field(default=None, init=False)
+    _execution_lease_expires_at: float | None = field(default=None, init=False)
+    _last_execution_ownership: dict[str, Any] = field(default_factory=dict, init=False)
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_advisory_summary: dict[str, int] = field(default_factory=dict, init=False)
@@ -365,37 +479,202 @@ class RuntimeOrchestrator:
         {
             "sample_id": "qp-001-btc-long",
             "symbol": "BTCUSDT",
-            "entry": 67250.0,
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp": 102.0,
             "market_ts": 1716200000.0,
             "side": "LONG",
-            "rr": 2.15,
-            "spread_pct": 0.0009,
+            "rr": 2.0,
+            "score": 0.91,
+            "expectancy": 0.30,
+            "setup_type": "TREND_CONTINUATION",
+            "setup_reason": "PARITY_FIXTURE",
+            "regime": "TRENDING",
+            "geometry_status": "COMPLETE",
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "notional": 10.0,
+            "quantity": 0.1,
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "risk_state_complete": True,
+            "daily_realized_pnl": 0.0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "spread_pct": 0.0005,
+            "spread_status": "MEASURED",
+            "spread_source": "PARITY_FIXTURE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MEASURED",
+            "slippage_source": "PARITY_FIXTURE",
+            "latency_ms": 25.0,
+            "latency_status": "MEASURED",
+            "latency_source": "PARITY_FIXTURE",
             "funding_rate_pct": 0.00005,
-            "liquidity_score": 0.86,
+            "funding_status": "MEASURED",
+            "funding_source": "PARITY_FIXTURE",
+            "liquidity_score": 0.90,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "PARITY_FIXTURE",
+            "orderbook_imbalance": 0.10,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "PARITY_FIXTURE",
+            "spoof_risk": 0.10,
+            "spoof_status": "MEASURED",
+            "spoof_source": "PARITY_FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.50,
+            "absorption_status": "MEASURED",
+            "absorption_source": "PARITY_FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED",
+            "liquidity_depth_source": "PARITY_FIXTURE",
+            "microstructure_observed_at": 1716200000.0,
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+            "volatility_source": "PARITY_FIXTURE",
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "PARITY_FIXTURE",
+            "atr_pct": 1.0,
             "timeframe": "5m",
         },
         {
             "sample_id": "qp-002-eth-short",
             "symbol": "ETHUSDT",
-            "entry": 3450.0,
+            "entry": 200.0,
+            "sl": 202.0,
+            "tp": 196.0,
             "market_ts": 1716200060.0,
             "side": "SHORT",
-            "rr": 1.95,
-            "spread_pct": 0.0008,
+            "rr": 2.0,
+            "score": 0.91,
+            "expectancy": 0.30,
+            "setup_type": "TREND_CONTINUATION",
+            "setup_reason": "PARITY_FIXTURE",
+            "regime": "TRENDING",
+            "geometry_status": "COMPLETE",
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "notional": 10.0,
+            "quantity": 0.05,
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "risk_state_complete": True,
+            "daily_realized_pnl": 0.0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "spread_pct": 0.0005,
+            "spread_status": "MEASURED",
+            "spread_source": "PARITY_FIXTURE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MEASURED",
+            "slippage_source": "PARITY_FIXTURE",
+            "latency_ms": 25.0,
+            "latency_status": "MEASURED",
+            "latency_source": "PARITY_FIXTURE",
             "funding_rate_pct": 0.00004,
-            "liquidity_score": 0.82,
+            "funding_status": "MEASURED",
+            "funding_source": "PARITY_FIXTURE",
+            "liquidity_score": 0.90,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "PARITY_FIXTURE",
+            "orderbook_imbalance": 0.10,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "PARITY_FIXTURE",
+            "spoof_risk": 0.10,
+            "spoof_status": "MEASURED",
+            "spoof_source": "PARITY_FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.50,
+            "absorption_status": "MEASURED",
+            "absorption_source": "PARITY_FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED",
+            "liquidity_depth_source": "PARITY_FIXTURE",
+            "microstructure_observed_at": 1716200060.0,
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+            "volatility_source": "PARITY_FIXTURE",
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "PARITY_FIXTURE",
+            "atr_pct": 1.0,
             "timeframe": "5m",
         },
         {
             "sample_id": "qp-003-sol-long",
             "symbol": "SOLUSDT",
-            "entry": 155.0,
+            "entry": 150.0,
+            "sl": 148.5,
+            "tp": 153.0,
             "market_ts": 1716200120.0,
             "side": "LONG",
-            "rr": 2.05,
-            "spread_pct": 0.0011,
+            "rr": 2.0,
+            "score": 0.91,
+            "expectancy": 0.30,
+            "setup_type": "TREND_CONTINUATION",
+            "setup_reason": "PARITY_FIXTURE",
+            "regime": "TRENDING",
+            "geometry_status": "COMPLETE",
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "notional": 10.0,
+            "quantity": 0.0666666667,
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "risk_state_complete": True,
+            "daily_realized_pnl": 0.0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "spread_pct": 0.0005,
+            "spread_status": "MEASURED",
+            "spread_source": "PARITY_FIXTURE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MEASURED",
+            "slippage_source": "PARITY_FIXTURE",
+            "latency_ms": 25.0,
+            "latency_status": "MEASURED",
+            "latency_source": "PARITY_FIXTURE",
             "funding_rate_pct": 0.00003,
-            "liquidity_score": 0.78,
+            "funding_status": "MEASURED",
+            "funding_source": "PARITY_FIXTURE",
+            "liquidity_score": 0.90,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "PARITY_FIXTURE",
+            "orderbook_imbalance": 0.10,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "PARITY_FIXTURE",
+            "spoof_risk": 0.10,
+            "spoof_status": "MEASURED",
+            "spoof_source": "PARITY_FIXTURE",
+            "spoof_confirmed": False,
+            "absorption_score": 0.50,
+            "absorption_status": "MEASURED",
+            "absorption_source": "PARITY_FIXTURE",
+            "absorption_execution_ok": True,
+            "liquidity_depth_usdt": 1_000_000.0,
+            "liquidity_depth_status": "MEASURED",
+            "liquidity_depth_source": "PARITY_FIXTURE",
+            "microstructure_observed_at": 1716200120.0,
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+            "volatility_source": "PARITY_FIXTURE",
+            "fee_pct": 0.0004,
+            "fee_status": "CONFIGURED",
+            "fee_source": "PARITY_FIXTURE",
+            "atr_pct": 1.0,
             "timeframe": "5m",
         },
     ), init=False)
@@ -451,6 +730,12 @@ class RuntimeOrchestrator:
         if session is not None:
             return session.get_bind()
         return None
+
+    def _resolve_execution_ownership_engine(self) -> Engine | None:
+        """Resolve account ownership independently from campaign evidence persistence."""
+        if self.execution_ownership_engine is not None:
+            return self.execution_ownership_engine
+        return self._resolve_persistence_engine()
 
     @staticmethod
     def _finite_numeric(*candidates: tuple[str, Any]) -> tuple[float | None, str | None]:
@@ -622,6 +907,7 @@ class RuntimeOrchestrator:
                 "mtf_alignment_pass": self.metrics.mtf_alignment_pass,
                 "mtf_alignment_reject": self.metrics.mtf_alignment_reject,
                 "mtf_regime_missing": self.metrics.mtf_regime_missing,
+                "mtf_regime_neutral": self.metrics.mtf_regime_neutral,
                 "mtf_setup_missing": self.metrics.mtf_setup_missing,
                 "mtf_execution_missing": self.metrics.mtf_execution_missing,
                 "mtf_execution_not_confirmed": self.metrics.mtf_execution_not_confirmed,
@@ -665,6 +951,8 @@ class RuntimeOrchestrator:
                 "heartbeat_persistence_degraded": self.metrics.heartbeat_persistence_degraded,
                 "heartbeat_persistence_failure_streak": self._heartbeat_persistence_failure_streak,
                 "heartbeat_persistence_failure_threshold": self._heartbeat_persistence_failure_threshold,
+                "reject_persistence_failures": self.metrics.reject_persistence_failures,
+                "reject_persistence_degraded": self.metrics.reject_persistence_degraded,
             },
         )
 
@@ -731,13 +1019,13 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "storage_policy": self._storage_report, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
 
     def _execution_reconciliation_blocked(self) -> bool:
         if self.config.execution_mode == ExecutionMode.BACKTEST:
             return False
-        return bool(self._reconciliation_persistence_unhealthy or self._fail_closed_reason
+        return bool(self._storage_pressure or self._reconciliation_persistence_unhealthy or self._fail_closed_reason
                     or self._recovery_required or self._unknown_exchange_state
                     or self._resolver_provider_unavailable or self._resolver_provider_recovery_pending
                     or self._exchange_read_only_status == "UNAVAILABLE"
@@ -829,7 +1117,73 @@ class RuntimeOrchestrator:
         if self._kill_switch_active():
             self._recovery_required = True; self._fail_closed_reason = self._fail_closed_reason or "KILL_SWITCH_ACTIVE"
 
+    async def _check_storage_pressure(self, *, startup: bool = False) -> bool:
+        if not self.metrics.persistence_enabled:
+            return False
+        engine = self._resolve_persistence_engine()
+        if engine is None or engine.dialect.name != "sqlite" or not engine.url.database or engine.url.database == ":memory:":
+            return False
+        from alphaforge.storage_policy import StorageController, StoragePolicy, database_path, disk_budget
+        if self._storage_controller is None:
+            self._storage_controller = StorageController(engine, StoragePolicy.from_config(self.config))
+        if startup:
+            budget = disk_budget(database_path(engine), self._storage_controller.policy)
+            if budget["status"] != "PASS":
+                self._storage_report = budget
+                self._runtime_status = "STARTUP_BLOCKED"
+                self._fail_closed_reason = "STORAGE_DISK_RESERVE_INSUFFICIENT"
+                raise RuntimeError(self._fail_closed_reason)
+            return False
+        report = await asyncio.to_thread(self._storage_controller.check)
+        if report is None:
+            return self._storage_pressure
+        self._storage_report = report
+        if report["blocked"]:
+            first_failure = not self._storage_pressure
+            self._storage_pressure = True
+            self._recovery_required = True
+            self._runtime_status = "RECOVERY_REQUIRED"
+            self._fail_closed_reason = "STORAGE_PRESSURE_RECOVERY_REQUIRED"
+            self._last_scan_gate_blockers = [self._fail_closed_reason]
+            if first_failure:
+                # Reserve is checked before physical exhaustion. Persist the
+                # recovery transition once, then keep management/reconciliation
+                # alive for outstanding exposure. Empty campaigns stop through
+                # the normal supervised finalization path.
+                try:
+                    await asyncio.to_thread(self._persist_runtime_state_snapshot, "RECOVERY_REQUIRED")
+                    report["recovery_state_persisted"] = True
+                except OperationalError as exc:
+                    from alphaforge.sqlite_safety import is_sqlite_full_error
+                    if not is_sqlite_full_error(exc) and not is_sqlite_busy_error(exc):
+                        raise
+                    # Capacity exhaustion is explicit missing mandatory evidence.
+                    # Do not invent successful persistence or abandon exposure.
+                    report["recovery_state_persisted"] = False
+                    report["persistence_failure_class"] = "SQLITE_FULL" if is_sqlite_full_error(exc) else "SQLITE_BUSY"
+                    self._burnin_evidence_incomplete = True
+                    logger.exception("STORAGE_PRESSURE_RECOVERY_STATE_NOT_PERSISTED")
+                if (not self._active_positions and not self._pending_orders
+                        and not self._unknown_exchange_state and self._reconciliation_status == "CLEAN"
+                        and report["recovery_state_persisted"]):
+                    self.shutdown()
+                logger.warning("storage_pressure report=%s", report)
+        # Clearing disk pressure never implicitly reopens execution. Recovery
+        # requires the existing reconciliation/restart workflow.
+        return self._storage_pressure
+
     async def start(self) -> None:
+        try:
+            await self._start_runtime()
+        finally:
+            # Startup reconciliation can time out before background tasks exist.
+            # Its transport still requires bounded drain and durable recovery.
+            if self._reconciliation_reader.has_unaccepted_read and not self._reconciliation_reader.closed:
+                await self._shutdown_tasks()
+                self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
+
+    async def _start_runtime(self) -> None:
+        await self._check_storage_pressure(startup=True)
         self._last_start_time = canonical_utc_timestamp()
         self._runtime_status = "STARTING"
         if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK}:
@@ -904,6 +1258,7 @@ class RuntimeOrchestrator:
         finally:
             self._runtime_status = "STOPPING"
             self._last_shutdown_time = canonical_utc_timestamp()
+            await self._shutdown_tasks()
             finalize_status = (
                 "FAILED" if self._fatal_task_exception
                 else "RECOVERY_REQUIRED" if self._recovery_required
@@ -927,7 +1282,8 @@ class RuntimeOrchestrator:
                 if not is_sqlite_busy_error(exc):
                     raise
                 logger.warning("shutdown_runtime_state_persistence_skipped reason=SQLITE_BUSY")
-            await self._shutdown_tasks()
+            if self._fatal_task_exception is None and not self._recovery_required:
+                self._release_execution_ownership()
         if self._fatal_task_exception is not None:
             reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
             raise RuntimeError(reason) from self._fatal_task_exception
@@ -951,13 +1307,20 @@ class RuntimeOrchestrator:
     def _phase8_execution_cost_config_hash(self) -> str:
         return self._phase8_runtime_hashes().get("execution_cost_config_hash", "")
 
-    def _phase8_runtime_hashes(self, symbols: list[str] | None = None, intervals: list[str] | None = None) -> dict[str, Any]:
+    def _phase8_runtime_hashes(self, symbols: list[str] | None = None, intervals: list[str] | None = None, *, dynamic_universe: bool = False) -> dict[str, Any]:
         cfg = self._canonical_filter_config()
         resolved_symbols = list(symbols if symbols is not None else (cfg.get("symbols") or cfg.get("active_symbols") or []))
         resolved_intervals = list(intervals if intervals is not None else (cfg.get("intervals") or cfg.get("timeframes") or []))
         configured_release = os.getenv("ALPHAFORGE_RELEASE_ID")
         release_id = configured_release or self.config.phase7_burnin_release_id
-        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=release_id, paper_slippage_bps=self.paper_slippage_bps)
+        ident = build_phase8_campaign_identity(
+            self.config,
+            resolved_symbols,
+            resolved_intervals,
+            release_id=release_id,
+            paper_slippage_bps=self.paper_slippage_bps,
+            dynamic_universe=dynamic_universe,
+        )
         return {**ident, "execution_mode": self.config.execution_mode.value, "release_id_source": "environment:ALPHAFORGE_RELEASE_ID" if configured_release else "runtime_config:phase7_burnin_release_id"}
 
 
@@ -969,6 +1332,9 @@ class RuntimeOrchestrator:
         if engine is None:
             self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_UNAVAILABLE"
             raise RuntimeError(self._fail_closed_reason)
+        from alphaforge.burnin_campaign import require_operational_campaign_evidence
+        with engine.connect() as archive_check:
+            require_operational_campaign_evidence(archive_check, campaign_id)
         observed = None
         mismatches: dict[str, dict[str, Any]] = {}
         reason_map = {
@@ -989,10 +1355,15 @@ class RuntimeOrchestrator:
             self._campaign_id = campaign_id
             self._campaign_intervals = tuple(str(value) for value in (campaign.get("intervals") or []))
             self._campaign_symbols = frozenset(str(value).upper() for value in (campaign.get("symbols") or []))
+            self._campaign_dynamic_universe = campaign_uses_dynamic_universe(campaign)
             provenance = dict(campaign.get("source_provenance") or {})
             observed_provider_scope = canonical_paper_source_exchanges(provenance)
             run_identity = run_attachment_identity(run) if run else {}
-            runtime_identity = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
+            runtime_identity = self._phase8_runtime_hashes(
+                campaign.get("symbols") or [],
+                campaign.get("intervals") or [],
+                dynamic_universe=self._campaign_dynamic_universe,
+            )
             expected_provider_scope = tuple(runtime_identity["config_payload"]["paper_source_exchanges"])
             self._campaign_source_exchanges = frozenset(expected_provider_scope)
             provider_drift = observed_provider_scope != expected_provider_scope
@@ -1033,21 +1404,29 @@ class RuntimeOrchestrator:
                 with contextlib.suppress(Exception): conn.commit()
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
-            if not self._campaign_symbols or not self._campaign_source_exchanges:
-                reason = ("PHASE8_CAMPAIGN_UNIVERSE_INVALID" if not self._campaign_symbols
+            invalid_symbol_scope = (
+                (self._campaign_dynamic_universe and bool(self._campaign_symbols))
+                or (not self._campaign_dynamic_universe and not self._campaign_symbols)
+            )
+            if invalid_symbol_scope or not self._campaign_source_exchanges:
+                reason = ("PHASE8_CAMPAIGN_UNIVERSE_INVALID" if invalid_symbol_scope
                           else "PHASE8_CAMPAIGN_PROVIDER_IDENTITY_INVALID")
                 fail_active_campaign_run(conn, campaign_id, reason,
                                          details={"source_provenance": provenance,
-                                                  "symbols": sorted(self._campaign_symbols)})
+                                                  "symbols": sorted(self._campaign_symbols),
+                                                  "dynamic_universe": self._campaign_dynamic_universe})
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
-            open_positions = conn.execute(text("SELECT signal_id,symbol,side,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
+            open_positions = conn.execute(text("SELECT trade_id,signal_id,symbol,side,COALESCE(remaining_notional,notional) AS notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
             for position in open_positions:
                 symbol = str(position.get("symbol") or "").upper()
                 if symbol:
                     self._active_positions[symbol] = float(position.get("notional") or 0.0)
                     self._active_position_sides[symbol] = str(position.get("side") or "UNKNOWN").upper()
+                    episode_id = str(position.get("trade_id") or position.get("signal_id") or "").strip()
+                    if episode_id:
+                        self._active_position_episode_ids[symbol] = episode_id
                     self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_OPENED.value
                     signal_id = str(position.get("signal_id") or "").strip()
                     if signal_id:
@@ -1185,15 +1564,30 @@ class RuntimeOrchestrator:
                 metrics = {k: payload.get(k) for k in ("score", "rr", "candidate_rr",
                     "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
                     "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
-                    "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
+                    "latency_ms", "funding_rate_pct", "expectancy_after_costs",
+                    "expectancy_sample_size", "expectancy_cost_basis",
+                    "entry", "sl", "tp",
                     "entry_source", "stop_source", "target_source", "setup_timeframe",
                     "execution_timeframe", "structural_stop", "structural_target",
                     "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
+                    "planned_stop_distance_pct", "executable_stop_distance_pct",
+                    "stop_distance_basis", "stop_risk_evidence_status",
+                    "stop_risk_missing_fields", "stop_too_wide_softened",
+                    "stop_too_wide_extreme", "stop_too_wide_soft_eligible",
+                    "risk_scale", "sizing_status", "sizing_reason",
+                    "original_notional", "effective_notional",
+                    "original_quantity", "effective_quantity", "target_policy",
+                    "portfolio_allocation_cycle_id",
+                    "allocation_action", "allocation_scale",
+                    "allocation_requested_notional", "allocated_notional",
+                    "allocated_risk",
                     "min_signal_score", "min_raw_rr", "min_effective_rr",
                     "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
+                                "active_position_episode_id": payload.get("active_position_episode_id"),
+                                "guided_reject_geometry": payload.get("guided_reject_geometry"),
                                 "campaign_id": campaign_id, "runtime_identity": runtime_identity,
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
@@ -1256,6 +1650,22 @@ class RuntimeOrchestrator:
                     "geometry_source": payload.get("geometry_source"),
                     "all_failed_gates": payload.get("all_failed_gates"),
                     "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                    "planned_stop_distance_pct": payload.get("planned_stop_distance_pct"),
+                    "executable_stop_distance_pct": payload.get("executable_stop_distance_pct"),
+                    "stop_distance_basis": payload.get("stop_distance_basis"),
+                    "stop_risk_evidence_status": payload.get("stop_risk_evidence_status"),
+                    "risk_scale": payload.get("risk_scale"),
+                    "portfolio_allocation_cycle_id": payload.get(
+                        "portfolio_allocation_cycle_id"
+                    ),
+                    "allocation_action": payload.get("allocation_action"),
+                    "allocation_scale": payload.get("allocation_scale"),
+                    "allocation_requested_notional": payload.get(
+                        "allocation_requested_notional"
+                    ),
+                    "allocated_notional": payload.get("allocated_notional"),
+                    "allocated_risk": payload.get("allocated_risk"),
+                    "stop_too_wide_softened": payload.get("stop_too_wide_softened"),
                     "reject_execution_basis": payload.get("reject_execution_basis"),
                     "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
                     "execution_ctx": execution_ctx,
@@ -1281,7 +1691,20 @@ class RuntimeOrchestrator:
                     lifecycle_state_after=lifecycle_state,
                     decision=payload.get("decision"),
                     score=payload.get("score"),
-                    raw_rr=payload.get("executable_raw_rr") if payload.get("executable_raw_rr") is not None else payload.get("rr"),
+                    raw_rr=payload.get("candidate_rr") if payload.get("candidate_rr") is not None else payload.get("rr"),
+                    candidate_raw_rr=payload.get("candidate_rr") if payload.get("candidate_rr") is not None else payload.get("rr"),
+                    executable_raw_rr=payload.get("executable_raw_rr"),
+                    remaining_execution_penalty=payload.get("remaining_execution_penalty"),
+                    rr_basis=(
+                        payload.get("reject_execution_basis")
+                        or (
+                            "EXPECTED_FILL_RUNTIME_PARITY"
+                            if payload.get("executable_raw_rr") is not None
+                            and payload.get("expected_fill") is not None
+                            else "PLANNED_ENTRY_LEGACY"
+                        )
+                    ),
+                    execution_cost_semantics=payload.get("execution_cost_semantics"),
                     effective_rr=payload.get("effective_rr"),
                     min_effective_rr=payload.get("min_effective_rr") if payload.get("min_effective_rr") is not None else float(self.config.min_effective_rr),
                     expectancy=payload.get("expectancy"),
@@ -1307,7 +1730,10 @@ class RuntimeOrchestrator:
                     latency_ms=execution_ctx.get("latency_ms"),
                     latency_source=execution_ctx.get("latency_source"),
                     liquidity_status=execution_ctx.get("liquidity_status"),
-                    volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+                    volatility_penalty_pct=payload.get(
+                        "volatility_penalty_pct",
+                        execution_ctx.get("volatility_penalty_pct"),
+                    ),
                     volatility_source=execution_ctx.get("volatility_source"),
                     reject_flags=payload.get("all_failed_gates") or payload.get("reject_reasons"),
                     unavailable_fields=execution_ctx.get("unavailable_fields"),
@@ -1404,12 +1830,45 @@ class RuntimeOrchestrator:
         if engine is None:
             return
         now = canonical_utc_timestamp()
+        drawdown_state = self._paper_portfolio_risk_state("", now_ts=time.time())
+        drawdown_complete = bool(
+            drawdown_state.get("risk_state_complete")
+            and drawdown_state.get("max_drawdown_pct") is not None
+            and drawdown_state.get("max_drawdown_peak_equity") is not None
+            and drawdown_state.get("max_drawdown_trough_equity") is not None
+            and drawdown_state.get("rolling_drawdown_pct") is not None
+            and drawdown_state.get("consecutive_loss_count") is not None
+        )
         try:
             with engine.begin() as conn:
                 canonical_run_rejects = self._canonical_persisted_reject_count(
                     conn, campaign_scope=False)
-                conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,:rejects,:stale,:recon,:status,:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": canonical_run_rejects, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "status": "STABLE" if self._reconciliation_status == "CLEAN" else "INSUFFICIENT_EVIDENCE", "ts": now})
-                conn.execute(text("""INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_pct,consecutive_losses,rolling_expectancy,resolved,payload_json,schema_version) VALUES (:id,:bid,:rel,NULL,NULL,0,0,NULL,1,:payload,'phase7_burnin_v1')"""), {"id": f"dd:{self._burnin_run_id}:{now}", "bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "payload": json.dumps({"runtime_status": self._runtime_status})})
+                conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,:rejects,:stale,:recon,'INSUFFICIENT_EVIDENCE',:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": canonical_run_rejects, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "ts": now})
+                if drawdown_complete:
+                    current_drawdown = float(drawdown_state["rolling_drawdown_pct"])
+                    consecutive_losses = int(drawdown_state["consecutive_loss_count"])
+                    resolved = int(current_drawdown <= 1e-12 and consecutive_losses == 0)
+                    drawdown_payload = {
+                        "runtime_status": self._runtime_status,
+                        "evidence_status": "COMPLETE",
+                        "evidence_source": drawdown_state.get("risk_state_source"),
+                        "risk_state_complete": True,
+                        "risk_state_missing_fields": [],
+                        "current_equity": drawdown_state.get("equity"),
+                        "current_drawdown_pct": current_drawdown,
+                        "max_drawdown_pct": float(drawdown_state["max_drawdown_pct"]),
+                    }
+                    conn.execute(text("""INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_pct,consecutive_losses,rolling_expectancy,resolved,payload_json,schema_version) VALUES (:id,:bid,:rel,:peak,:trough,:drawdown,:losses,NULL,:resolved,:payload,'phase7_burnin_v1')"""), {
+                        "id": f"dd:{self._burnin_run_id}:{now}",
+                        "bid": self._burnin_run_id,
+                        "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id),
+                        "peak": float(drawdown_state["max_drawdown_peak_equity"]),
+                        "trough": float(drawdown_state["max_drawdown_trough_equity"]),
+                        "drawdown": float(drawdown_state["max_drawdown_pct"]),
+                        "losses": consecutive_losses,
+                        "resolved": resolved,
+                        "payload": json.dumps(drawdown_payload, sort_keys=True),
+                    })
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             self._fail_closed_reason = "PHASE7_BURNIN_PERSISTENCE_FAILURE"
@@ -1426,6 +1885,15 @@ class RuntimeOrchestrator:
             self._burnin_evidence_incomplete = True
             return
         try:
+            # Continuations inherit the campaign's persisted retention contract.
+            # A runtime snapshot would become qualification authority and pin all
+            # stats-only cycles, including on pause/shutdown before compaction.
+            from alphaforge.burnin_campaign import campaign_uses_stats_only_retention
+            with engine.connect() as conn:
+                run = conn.execute(text("SELECT source_provenance_json FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": self._burnin_run_id}).mappings().first()
+            if run and campaign_uses_stats_only_retention(run):
+                self._last_burnin_snapshot_ts = time.time()
+                return
             snap = BurnInQualificationEngine(engine).evaluate(self._burnin_run_id)
             self.metrics.burnin_snapshots += 1
             self._last_burnin_snapshot_ts = time.time()
@@ -1596,26 +2064,367 @@ class RuntimeOrchestrator:
             payload.update({"evidence_status": "INCOMPLETE", "blocking_reasons": reasons})
         return payload
 
-    def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
-        order_plan = self.ai_brain.choose_order_plan(signal_payload, market_ctx, score_ctx)
-        explanation = self.ai_brain.explain_decision(signal_payload, score_ctx, order_plan)
-        raw_rr = signal_payload.get("risk_reward", signal_payload.get("rr", 0.0))
-        rr_metrics = self._execution_rr_metrics(
-            raw_rr, market_ctx, market_ctx.get("execution_ctx", market_ctx),
+    def _evaluate_pre_submit(
+        self,
+        signal_payload: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+        regime_ctx: Mapping[str, Any],
+        stats_ctx: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build a non-mutating protected pre-submit semantic projection.
+
+        This path exists only for parity/readiness evidence. It composes the
+        same authoritative candidate-quality, execution-safety, sizing and
+        portfolio-risk helpers as production, but never submits or persists an
+        order.
+        """
+        mode_text = str(
+            market_ctx.get("mode")
+            or signal_payload.get("mode")
+            or self.config.execution_mode.value
+        ).upper()
+        mode_enum = ExecutionMode(mode_text)
+        filter_config = self._canonical_filter_config(mode=mode_enum)
+        execution_ctx = (
+            dict(market_ctx.get("execution_ctx"))
+            if isinstance(market_ctx.get("execution_ctx"), Mapping)
+            else build_execution_context(market_ctx)
         )
+        original_notional = market_ctx.get("notional")
+        original_quantity = market_ctx.get(
+            "quantity", market_ctx.get("qty")
+        )
+        if original_notional is None:
+            try:
+                original_notional = abs(
+                    float(market_ctx.get("entry")) * float(original_quantity)
+                )
+            except (TypeError, ValueError):
+                original_notional = None
+
+        threshold_provenance = {
+            key: f"runtime_filter_config:{filter_config.get(key)!r}"
+            for key in (
+                "MIN_RR",
+                "MIN_EFFECTIVE_RR",
+                "MIN_SL_PCT",
+                "MAX_SL_PCT",
+                "MAX_SPREAD_PCT",
+                "MAX_EXPECTED_SLIPPAGE_PCT",
+                "MAX_TOTAL_COST_PCT",
+            )
+        }
+        disabled = filter_config.get("DISABLED_BACKTEST_FILTERS")
+        if disabled:
+            threshold_provenance["DISABLED_BACKTEST_FILTERS"] = json.dumps(
+                sorted(str(item) for item in disabled),
+                separators=(",", ":"),
+            )
+
+        if mode_enum is ExecutionMode.BACKTEST:
+            # Project the stage actually used by the shared production decision;
+            # legacy simulator rows are not equivalent pre-submit evidence.
+            backtest_market = {
+                **dict(market_ctx),
+                "execution_ctx": execution_ctx,
+            }
+            backtest_market.setdefault("score", market_ctx.get("score"))
+            decision = evaluate_signal_decision(
+                backtest_market,
+                filter_config,
+                {
+                    "balance": market_ctx.get("equity"),
+                    "risk_pct": market_ctx.get("risk_pct", 0.01),
+                    "recent_stats": {},
+                },
+                execution_ctx,
+                TradingMode.BACKTEST,
+            )
+            diagnostics = dict(decision.diagnostics or {})
+            rr_stage = dict(diagnostics.get("canonical_rr_stage") or {})
+            risk_scale = diagnostics.get("risk_scale")
+            require_scale = bool(diagnostics.get("stop_too_wide_softened"))
+            sizing = scale_candidate_exposure(
+                original_notional=original_notional,
+                risk_scale=risk_scale,
+                original_quantity=original_quantity,
+                require_scale=require_scale,
+            )
+            if sizing.get("status") == "COMPLETE" and sizing.get("risk_scale") is None:
+                sizing["risk_scale"] = 1.0
+            execution_safety = evaluate_execution_safety(
+                execution_ctx,
+                effective_rr=decision.effective_rr,
+                min_effective_rr=self.config.min_effective_rr,
+                thresholds=filter_config,
+                require_measured=False,
+            )
+            candidate = decision.candidate
+            candidate_side = (
+                getattr(candidate, "side", None)
+                or market_ctx.get("side")
+                or signal_payload.get("side")
+                or "LONG"
+            )
+            snapshot = snapshot_from_state(
+                mode=mode_enum.value,
+                symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+                side=str(candidate_side),
+                candidate_notional=sizing.get("effective_notional"),
+                equity=market_ctx.get("equity"),
+                available_balance=market_ctx.get("available_balance"),
+                open_positions=market_ctx.get("open_positions", {}),
+                config=self.config,
+                now=market_ctx.get("market_ts"),
+                cooldown_until=market_ctx.get("symbol_cooldown_until"),
+                daily_realized_pnl=market_ctx.get("daily_realized_pnl"),
+                trades_today_symbol=market_ctx.get("trades_today_symbol"),
+                trades_today_global=market_ctx.get("trades_today_global"),
+                consecutive_loss_count=market_ctx.get("consecutive_loss_count"),
+                symbol_consecutive_loss_count=market_ctx.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                rolling_peak_equity=market_ctx.get("rolling_peak_equity"),
+                rolling_drawdown_pct=market_ctx.get("rolling_drawdown_pct"),
+                risk_state_complete=market_ctx.get("risk_state_complete"),
+                risk_state_source="PARITY_FIXTURE",
+            )
+            portfolio = evaluate_portfolio_risk(
+                {
+                    "symbol": signal_payload.get("symbol"),
+                    "side": candidate_side,
+                    "entry": market_ctx.get("entry"),
+                    "notional": sizing.get("effective_notional"),
+                    "quantity": sizing.get("effective_quantity"),
+                },
+                snapshot,
+                self.config,
+                mode=mode_enum.value,
+            )
+            primary = str(decision.reject_reason or "")
+            failed_gates = [primary] if primary else []
+            if not primary and sizing.get("status") != "COMPLETE":
+                primary = str(sizing.get("reason") or "INVALID_POSITION_SIZE")
+                failed_gates = [primary]
+            if not primary and not portfolio.accepted:
+                primary = str(portfolio.reject_reason or "UNKNOWN_PORTFOLIO_RISK")
+                failed_gates = list(portfolio.risk_flags or [primary])
+            final_decision = "REJECT" if primary else "ACCEPT"
+            return {
+                "decision": final_decision,
+                "primary_reject_reason": primary,
+                "reject_reason": primary,
+                "all_failed_gates": failed_gates,
+                "score": decision.score,
+                "candidate_rr": decision.raw_rr,
+                "executable_raw_rr": rr_stage.get("executable_raw_rr"),
+                "remaining_execution_penalty": rr_stage.get("remaining_execution_penalty"),
+                "effective_rr": decision.effective_rr,
+                "rr_basis": rr_stage.get("rr_basis", "UNAVAILABLE"),
+                "execution_cost_semantics": rr_stage.get("execution_cost_semantics"),
+                "threshold_provenance": threshold_provenance,
+                "execution_evidence_status": execution_safety.get(
+                    "execution_evidence_status"
+                ),
+                "execution_safety": execution_safety,
+                "portfolio_decision": {
+                    "accepted": bool(portfolio.accepted),
+                    "decision": "ACCEPT" if portfolio.accepted else "REJECT",
+                },
+                "original_notional": sizing.get("original_notional"),
+                "risk_scale": sizing.get("risk_scale"),
+                "effective_notional": sizing.get("effective_notional"),
+                "stop_distance_basis": str(
+                    diagnostics.get("stop_distance_basis") or "PLANNED_ENTRY"
+                ),
+                "geometry_status": str(
+                    market_ctx.get("geometry_status") or "UNKNOWN"
+                ),
+                "geometry_source": str(
+                    market_ctx.get("geometry_source") or "UNKNOWN"
+                ),
+                "lifecycle_pre_submit_terminal_state": (
+                    LifecycleState.ORDER_PLACED.value
+                    if final_decision == "ACCEPT"
+                    else LifecycleState.SIGNAL_REJECTED.value
+                ),
+                "order_type": "",
+                "confidence": None,
+                "explanation": "canonical_backtest_pre_submit",
+            }
+
+        score_ctx = self.ai_brain.score_signal(
+            signal_payload, market_ctx, regime_ctx, stats_ctx
+        )
+        order_plan = self.ai_brain.choose_order_plan(
+            signal_payload, market_ctx, score_ctx
+        )
+        explanation = self.ai_brain.explain_decision(
+            signal_payload, score_ctx, order_plan
+        )
+        raw_rr = signal_payload.get(
+            "risk_reward", signal_payload.get("rr", market_ctx.get("rr"))
+        )
+        rr_metrics = self._execution_rr_metrics(
+            raw_rr,
+            market_ctx,
+            execution_ctx,
+            mode=mode_enum,
+        )
+        effective_rr = float(rr_metrics.get("effective_rr") or 0.0)
+        quality_market = {
+            **dict(market_ctx),
+            **rr_metrics,
+            "execution_ctx": execution_ctx,
+            "mode": mode_enum.value,
+        }
+        quality = self._evaluate_authoritative_trade_quality(
+            symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+            market_ctx=quality_market,
+            signal_payload=signal_payload,
+            score_ctx=score_ctx,
+            effective_rr=effective_rr,
+            mode=mode_enum,
+        )
+        diagnostics = dict(quality.get("diagnostics") or {})
+        execution_safety = evaluate_execution_safety(
+            execution_ctx,
+            effective_rr=effective_rr,
+            min_effective_rr=self.config.min_effective_rr,
+            thresholds=filter_config,
+            require_measured=mode_enum in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK},
+        )
+        risk_scale = diagnostics.get("risk_scale")
+        require_scale = bool(diagnostics.get("stop_too_wide_softened"))
+        sizing = scale_candidate_exposure(
+            original_notional=original_notional,
+            risk_scale=risk_scale,
+            original_quantity=original_quantity,
+            require_scale=require_scale,
+        )
+        candidate = quality.get("candidate")
+        candidate_side = (
+            getattr(candidate, "side", None)
+            or signal_payload.get("side")
+            or market_ctx.get("side")
+            or "LONG"
+        )
+        snapshot = snapshot_from_state(
+            mode=mode_enum.value,
+            symbol=str(signal_payload.get("symbol") or market_ctx.get("symbol")),
+            side=str(candidate_side),
+            candidate_notional=sizing.get("effective_notional"),
+            equity=market_ctx.get("equity"),
+            available_balance=market_ctx.get("available_balance"),
+            open_positions=market_ctx.get("open_positions", {}),
+            config=self.config,
+            now=market_ctx.get("market_ts"),
+            cooldown_until=market_ctx.get("symbol_cooldown_until"),
+            daily_realized_pnl=market_ctx.get("daily_realized_pnl"),
+            trades_today_symbol=market_ctx.get("trades_today_symbol"),
+            trades_today_global=market_ctx.get("trades_today_global"),
+            consecutive_loss_count=market_ctx.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=market_ctx.get(
+                "symbol_consecutive_loss_count"
+            ),
+            rolling_peak_equity=market_ctx.get("rolling_peak_equity"),
+            rolling_drawdown_pct=market_ctx.get("rolling_drawdown_pct"),
+            risk_state_complete=market_ctx.get("risk_state_complete"),
+            risk_state_source="PARITY_FIXTURE",
+        )
+        portfolio = evaluate_portfolio_risk(
+            {
+                "symbol": signal_payload.get("symbol"),
+                "side": candidate_side,
+                "entry": market_ctx.get("entry"),
+                "notional": sizing.get("effective_notional"),
+                "quantity": sizing.get("effective_quantity"),
+            },
+            snapshot,
+            self.config,
+            mode=mode_enum.value,
+        )
+
+        primary = ""
+        failed_gates: list[str] = []
+        if order_plan.decision != "ACCEPTED":
+            primary = canonical_reject_reason(order_plan.reason)
+            failed_gates = [primary]
+        elif not bool(quality.get("accepted")):
+            primary = str(quality.get("reject_reason") or "UNKNOWN")
+            failed_gates = [primary]
+        elif not bool(execution_safety.get("accepted")):
+            primary = str(
+                execution_safety.get("primary_reject_reason")
+                or "BAD_EXECUTION"
+            )
+            failed_gates = list(
+                execution_safety.get("all_failed_gates") or [primary]
+            )
+        elif sizing.get("status") != "COMPLETE":
+            primary = str(sizing.get("reason") or "INVALID_POSITION_SIZE")
+            failed_gates = [primary]
+        elif not portfolio.accepted:
+            primary = str(portfolio.reject_reason or "UNKNOWN_PORTFOLIO_RISK")
+            failed_gates = list(portfolio.risk_flags or [primary])
+
+        final_decision = "REJECT" if primary else "ACCEPT"
         return {
-            "decision": order_plan.decision,
-            "reason": order_plan.reason,
+            "decision": final_decision,
+            "primary_reject_reason": primary,
+            "reject_reason": primary,
+            "all_failed_gates": failed_gates,
+            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
+            "candidate_rr": rr_metrics.get("candidate_rr"),
+            "executable_raw_rr": rr_metrics.get("executable_raw_rr"),
+            "remaining_execution_penalty": rr_metrics.get(
+                "remaining_execution_penalty"
+            ),
+            "effective_rr": rr_metrics.get("effective_rr"),
+            "rr_basis": (
+                "EXPECTED_FILL_RUNTIME_PARITY"
+                if rr_metrics.get("expected_fill") is not None
+                else "UNAVAILABLE"
+            ),
+            "execution_cost_semantics": rr_metrics.get(
+                "execution_cost_semantics"
+            ),
+            "threshold_provenance": threshold_provenance,
+            "execution_evidence_status": execution_safety.get(
+                "execution_evidence_status"
+            ),
+            "execution_safety": execution_safety,
+            "microstructure_evidence_status": (
+                execution_safety.get("microstructure", {}).get("evidence_status")
+            ),
+            "microstructure_live_equivalent": bool(
+                execution_safety.get("microstructure", {}).get("live_equivalent", False)
+            ),
+            "portfolio_decision": {
+                "accepted": bool(portfolio.accepted),
+                "decision": "ACCEPT" if portfolio.accepted else "REJECT",
+            },
+            "original_notional": sizing.get("original_notional"),
+            "risk_scale": sizing.get("risk_scale"),
+            "effective_notional": sizing.get("effective_notional"),
+            "stop_distance_basis": str(
+                diagnostics.get("stop_distance_basis") or ""
+            ),
+            "geometry_status": str(
+                market_ctx.get("geometry_status") or "UNKNOWN"
+            ),
+            "geometry_source": str(
+                market_ctx.get("geometry_source") or "UNKNOWN"
+            ),
+            "lifecycle_pre_submit_terminal_state": (
+                LifecycleState.ORDER_PLACED.value
+                if final_decision == "ACCEPT"
+                else LifecycleState.SIGNAL_REJECTED.value
+            ),
             "order_type": order_plan.order_type,
             "confidence": float(order_plan.confidence),
-            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
-            "reject_reason": canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
-            "raw_rr": float(raw_rr or 0.0),
-            "executable_raw_rr": rr_metrics["executable_raw_rr"],
-            "expected_fill": rr_metrics["expected_fill"],
-            "effective_rr": rr_metrics["effective_rr"],
             "explanation": explanation,
+            "trade_quality": diagnostics,
         }
 
     @staticmethod
@@ -1648,14 +2457,25 @@ class RuntimeOrchestrator:
         executable_rr = reward_distance / risk_distance
         return executable_rr if math.isfinite(executable_rr) else 0.0
 
-    def _expected_fill_price(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float | None, float | None]:
+    def _expected_fill_price(
+        self,
+        market_ctx: Mapping[str, Any],
+        execution_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> tuple[float | None, float | None]:
+        mode_value = (
+            mode if isinstance(mode, ExecutionMode)
+            else ExecutionMode(str(mode).upper()) if mode is not None
+            else self.config.execution_mode
+        )
         try:
             entry = float(market_ctx.get("entry"))
         except (TypeError, ValueError):
             return None, None
         if not math.isfinite(entry) or entry <= 0:
             return None, None
-        if self.config.execution_mode is ExecutionMode.PAPER:
+        if mode_value is ExecutionMode.PAPER:
             try:
                 if self.paper_slippage_bps is not None:
                     slippage_pct = max(float(self.paper_slippage_bps), 0.0) / 10_000.0
@@ -1673,119 +2493,267 @@ class RuntimeOrchestrator:
                 slippage_pct = max(float(raw_slippage), 0.0)
             except (TypeError, ValueError):
                 return None, None
-        side = str(market_ctx.get("side") or "LONG").strip().upper()
-        if side not in {"LONG", "SHORT"}:
+        try:
+            fill = adverse_expected_fill_price(
+                entry=entry,
+                side=market_ctx.get("side") or "LONG",
+                slippage_pct=slippage_pct,
+            )
+        except ValueError:
             return None, None
-        fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)
         return round(fill, 8), slippage_pct
 
-    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        candidate_rr = float(raw_rr or 0.0)
-        expected_fill, fill_slippage_pct = self._expected_fill_price(market_ctx, execution_ctx)
-        executable_raw_rr = self._fill_adjusted_raw_rr(
-            side=market_ctx.get("side"), fill=expected_fill,
-            stop=market_ctx.get("sl"), target=market_ctx.get("tp"),
+    def _execution_rr_metrics(
+        self,
+        raw_rr: Any,
+        market_ctx: Mapping[str, Any],
+        execution_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        mode_value = (
+            mode if isinstance(mode, ExecutionMode)
+            else ExecutionMode(str(mode).upper()) if mode is not None
+            else self.config.execution_mode
         )
-        model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
-        if executable_raw_rr is None:
-            executable_raw_rr = candidate_rr
-            remaining_penalty = model.total_penalty
-        else:
-            # Entry slippage is already represented by expected_fill. Keep only
-            # costs that the simulated/executable fill does not encode,
-            # including the modelled exit-slippage half.
-            remaining_penalty = max(model.total_penalty - model.slippage_penalty / 2.0, 0.0)
-        effective_rr = max(executable_raw_rr - remaining_penalty, 0.0)
-        cost_semantics = None
-        if expected_fill is not None:
-            try:
-                cost_semantics = build_execution_cost_semantics(
-                    entry=market_ctx.get("entry"),
-                    expected_fill=expected_fill,
-                    actual_fill=None,
-                    side=market_ctx.get("side"),
-                    expected_fill_provenance=(
-                        PROVENANCE_MODELLED
-                        if self.config.execution_mode is ExecutionMode.PAPER
-                        else PROVENANCE_ESTIMATED
-                    ),
-                    decision_timestamp=market_ctx.get("decision_timestamp"),
-                ).decision_time_dict()
-            except ValueError:
-                # Canonical metrics are unavailable when side/price evidence is
-                # incomplete; existing effective-RR behavior remains authoritative.
-                cost_semantics = None
-        return {
-            "candidate_rr": round(candidate_rr, 6),
-            "expected_fill": expected_fill,
-            "fill_slippage_pct": fill_slippage_pct,
-            "expected_execution_cost_price": (
-                cost_semantics.get("expected_execution_cost_price") if cost_semantics else None),
-            "expected_execution_cost_pct": (
-                cost_semantics.get("expected_execution_cost_pct") if cost_semantics else None),
-            "expected_execution_cost_bps": (
-                cost_semantics.get("expected_execution_cost_bps") if cost_semantics else None),
-            "execution_cost_semantics": cost_semantics,
-            "executable_raw_rr": round(executable_raw_rr, 6),
-            "remaining_execution_penalty": round(remaining_penalty, 6),
-            "effective_rr": round(effective_rr, 6),
-        }
+        return build_decision_rr_metrics(
+            raw_rr,
+            market_ctx,
+            execution_ctx,
+            mode=mode_value.value,
+            paper_slippage_bps=(
+                self.paper_slippage_bps if mode_value is ExecutionMode.PAPER else None
+            ),
+        )
 
-    def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
-        samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
+    def _build_mode_parity_evidence(
+        self,
+        *,
+        min_sample_count: int = 3,
+    ) -> dict[str, Any]:
+        """Compare protected BACKTEST/PAPER/LIVE_PRECHECK semantics fail closed.
+
+        Compare actual decision stages, retaining their cost provenance.
+        Incomplete or invalid evidence is never promoted to parity PASS, even
+        when all modes share the same missing values or invalid status.
+        """
+        samples = list(
+            self._qualification_samples[: max(0, int(min_sample_count))]
+        )
         comparisons: list[dict[str, Any]] = []
         mismatch_count = 0
         missing_field_count = 0
-        compare_fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
+        semantic_violation_count = 0
+        modes = (
+            ExecutionMode.BACKTEST,
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        )
+
         for row in samples:
             sample = dict(row)
             sample_id = str(sample["sample_id"])
-            paper_signal_payload = {
+            execution_ctx = build_execution_context(sample)
+            normalized_market = {
+                **sample,
+                "execution_ctx": execution_ctx,
+            }
+            signal_base = {
                 "signal_id": f"precheck:{sample_id}",
                 "symbol": sample["symbol"],
-                "mode": "PAPER",
                 "side": sample.get("side", "LONG"),
                 "timeframe": sample.get("timeframe", "5m"),
                 "entry_price": float(sample.get("entry", 0.0) or 0.0),
+                "stop_loss": sample.get("sl"),
+                "take_profit": sample.get("tp"),
                 "risk_reward": float(sample.get("rr", 0.0) or 0.0),
+                "setup": sample.get("setup_type", "TREND_CONTINUATION"),
+                "setup_type": sample.get(
+                    "setup_type", "TREND_CONTINUATION"
+                ),
+                "setup_reason": sample.get("setup_reason", "PARITY_FIXTURE"),
+                "regime": sample.get("regime", "TRENDING"),
+                "expectancy": sample.get("expectancy"),
+                "setup_quality": sample.get("setup_quality", 0.9),
             }
-            live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
-            regime_ctx = {"alignment": 0.8}
-            stats_ctx: dict[str, Any] = {}
-            execution_ctx = build_execution_context(sample)
-            normalized_market = {**sample, "execution_ctx": execution_ctx}
-            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**normalized_market, "mode": "PAPER"}, regime_ctx, stats_ctx)
-            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**normalized_market, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
-            missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
-            mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
-            missing_field_count += len(missing)
-            mismatch_count += len(mismatch)
-            comparisons.append({
-                "sample_id": sample_id,
-                "paper": {k: paper_eval.get(k) for k in compare_fields},
-                "live_precheck": {k: live_eval.get(k) for k in compare_fields},
-                "missing_fields": missing,
-                "mismatch_fields": mismatch,
-                "input_snapshot_hash": self._snapshot_hash({"signal": paper_signal_payload, "market": normalized_market, "regime": regime_ctx, "stats": stats_ctx}),
-                "symbol": sample.get("symbol"),
-                "timestamp": canonical_utc_timestamp(sample.get("market_ts")),
-                "execution_context": execution_ctx,
-                "no_submit_verified": True,
-                "parity_result": "PASS" if not missing and not mismatch else "FAIL",
-            })
+            regime_ctx = {
+                "alignment": float(sample.get("regime_alignment", 0.8)),
+                "regime": sample.get("regime", "TRENDING"),
+            }
+            stats_ctx: dict[str, Any] = {
+                "sample_size": int(sample.get("sample_size", 100)),
+                "setup": {},
+                "regime": {},
+                "symbol": {},
+            }
+
+            evaluations: dict[str, dict[str, Any]] = {}
+            projections: dict[str, dict[str, Any]] = {}
+            missing_by_mode: dict[str, list[str]] = {}
+            for mode in modes:
+                key = mode.value.lower()
+                signal_payload = {**signal_base, "mode": mode.value}
+                mode_market = {
+                    **normalized_market,
+                    "mode": mode.value,
+                }
+                evaluation = self._evaluate_pre_submit(
+                    signal_payload,
+                    mode_market,
+                    regime_ctx,
+                    stats_ctx,
+                )
+                evaluations[key] = evaluation
+                projected = project_pre_submit_invariant(evaluation)
+                projections[key] = asdict(projected)
+                missing_by_mode[key] = list(
+                    incomplete_pre_submit_fields(projected)
+                )
+
+            reference = project_pre_submit_invariant(
+                evaluations["backtest"]
+            )
+            mismatch_by_mode: dict[str, list[str]] = {}
+            for key in ("paper", "live_precheck"):
+                observed = project_pre_submit_invariant(evaluations[key])
+                mismatch_by_mode[key] = [
+                    mismatch.field
+                    for mismatch in compare_pre_submit_invariants(
+                        reference, observed
+                    )
+                ]
+
+            sample_missing_count = sum(
+                len(fields) for fields in missing_by_mode.values()
+            )
+            sample_mismatch_count = sum(
+                len(fields) for fields in mismatch_by_mode.values()
+            )
+            missing_field_count += sample_missing_count
+            mismatch_count += sample_mismatch_count
+
+            semantic_error = ""
+            try:
+                assert_pre_submit_invariant_parity(
+                    evaluations["backtest"],
+                    evaluations["paper"],
+                    evaluations["live_precheck"],
+                )
+            except ValueError as exc:
+                semantic_error = str(exc)
+                if sample_missing_count == 0 and sample_mismatch_count == 0:
+                    semantic_violation_count += 1
+
+            comparisons.append(
+                {
+                    "sample_id": sample_id,
+                    "backtest": projections["backtest"],
+                    "paper": projections["paper"],
+                    "live_precheck": projections["live_precheck"],
+                    "missing_fields": missing_by_mode,
+                    "mismatch_fields": mismatch_by_mode,
+                    "semantic_error": semantic_error,
+                    "input_snapshot_hash": self._snapshot_hash(
+                        {
+                            "signal": signal_base,
+                            "market": normalized_market,
+                            "regime": regime_ctx,
+                            "stats": stats_ctx,
+                        }
+                    ),
+                    "symbol": sample.get("symbol"),
+                    "timestamp": canonical_utc_timestamp(
+                        sample.get("market_ts")
+                    ),
+                    "execution_context": execution_ctx,
+                    "microstructure": {
+                        key: dict(
+                            evaluations[key]
+                            .get("execution_safety", {})
+                            .get("microstructure", {})
+                        )
+                        for key in ("backtest", "paper", "live_precheck")
+                    },
+                    "no_submit_verified": True,
+                    "parity_result": (
+                        "PASS" if not semantic_error else "FAIL"
+                    ),
+                }
+            )
+
+        enough_samples = len(samples) >= int(min_sample_count)
+        complete = (
+            enough_samples
+            and mismatch_count == 0
+            and missing_field_count == 0
+            and semantic_violation_count == 0
+        )
+        execution_blocking = {
+            "",
+            "UNKNOWN",
+            "UNAVAILABLE",
+            "UNAVAILABLE_BLOCKING",
+            "INVALID_FAKE_ZERO",
+            "INCOMPLETE",
+        }
+        execution_context_complete = all(
+            str(
+                sample.get(mode, {}).get(
+                    "execution_evidence_status", "UNKNOWN"
+                )
+            ).upper()
+            not in execution_blocking
+            for sample in comparisons
+            for mode in ("backtest", "paper", "live_precheck")
+        )
+        microstructure_live_equivalent = bool(comparisons) and all(
+            bool(
+                sample.get("microstructure", {})
+                .get("live_precheck", {})
+                .get("live_equivalent", False)
+            )
+            for sample in comparisons
+        )
+        microstructure_evidence_status = (
+            "COMPLETE_MEASURED"
+            if microstructure_live_equivalent
+            else "UNAVAILABLE_BLOCKING"
+        )
+        rr_breakdown_complete = all(
+            sample.get(mode, {}).get("executable_raw_rr") is not None
+            and sample.get(mode, {}).get(
+                "remaining_execution_penalty"
+            ) is not None
+            and sample.get(mode, {}).get("effective_rr") is not None
+            for sample in comparisons
+            for mode in ("backtest", "paper", "live_precheck")
+        )
         return {
-            "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
+            "evidence_status": "COMPLETE" if complete else "INCOMPLETE",
             "sample_count": len(samples),
             "min_sample_count": int(min_sample_count),
             "mismatch_count": mismatch_count,
             "missing_field_count": missing_field_count,
+            "semantic_violation_count": semantic_violation_count,
             "no_order_submission_verified": True,
             "no_submit_verified": True,
-            "execution_context_complete": all(
-                not execution_context_is_unavailable(c.get("execution_context"))
-                for c in comparisons
+            "execution_context_complete": execution_context_complete,
+            "execution_evidence_status": (
+                "COMPLETE"
+                if execution_context_complete
+                else "INCOMPLETE"
             ),
-            "comparison_fields": list(compare_fields),
+            "microstructure_evidence_status": microstructure_evidence_status,
+            "microstructure_live_equivalent": microstructure_live_equivalent,
+            "effective_rr_penalty_breakdown_complete": (
+                rr_breakdown_complete
+            ),
+            "modes_compared": [mode.value for mode in modes],
+            "comparison_fields": (
+                list(comparisons[0]["paper"].keys())
+                if comparisons
+                else []
+            ),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
         }
@@ -1811,11 +2779,142 @@ class RuntimeOrchestrator:
             logger.exception("MARKET_SCAN_LOOP_FAILED")
             raise
 
-    def _canonical_filter_config(self) -> dict[str, Any]:
-        return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
+    def _canonical_filter_config(
+        self,
+        *,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        mode_value = (
+            mode.value if isinstance(mode, ExecutionMode)
+            else str(mode).upper() if mode is not None
+            else self.config.execution_mode.value
+        )
+        return runtime_filter_config(self.config, mode=mode_value)
+
+    def _evaluate_authoritative_trade_quality(
+        self,
+        *,
+        symbol: str,
+        market_ctx: Mapping[str, Any],
+        signal_payload: Mapping[str, Any],
+        score_ctx: Any,
+        effective_rr: float,
+        mode: ExecutionMode | str | None = None,
+    ) -> dict[str, Any]:
+        """Project RuntimeOrchestrator inputs into the shared quality authority.
+
+        Runtime-specific portfolio, reconciliation, kill-switch and mutation
+        gates remain orchestration responsibilities. Candidate-quality policy
+        (score/RR/expectancy/regime/stop/microstructure/volatility) is owned by
+        alphaforge.order.evaluate_trade_quality.
+        """
+        quality_market_ctx = dict(market_ctx)
+        execution_ctx = (
+            dict(quality_market_ctx.get("execution_ctx") or {})
+            if isinstance(quality_market_ctx.get("execution_ctx"), Mapping)
+            else {}
+        )
+        score = getattr(score_ctx, "total_score", None)
+        score_probabilistic = getattr(score_ctx, "probabilistic", {})
+        if not isinstance(score_probabilistic, Mapping):
+            score_probabilistic = {}
+        raw_rr, _ = self._finite_numeric(
+            ("signal.risk_reward", signal_payload.get("risk_reward")),
+            ("market.candidate_rr", quality_market_ctx.get("candidate_rr")),
+            ("market.rr", quality_market_ctx.get("rr")),
+        )
+        expectancy, expectancy_source = self._finite_numeric(
+            (
+                "score.expectancy_after_costs",
+                score_probabilistic.get("expectancy_after_costs"),
+            ),
+            ("market.expectancy", quality_market_ctx.get("expectancy")),
+            ("signal.expectancy", signal_payload.get("expectancy")),
+        )
+        quality_market_ctx.update(
+            {
+                "symbol": symbol,
+                "side": signal_payload.get("side", quality_market_ctx.get("side")),
+                "entry": signal_payload.get("entry_price", quality_market_ctx.get("entry")),
+                "sl": signal_payload.get("stop_loss", quality_market_ctx.get("sl")),
+                "tp": signal_payload.get("take_profit", quality_market_ctx.get("tp")),
+                "setup_type": signal_payload.get(
+                    "setup",
+                    signal_payload.get("setup_type", quality_market_ctx.get("setup_type")),
+                ),
+                "setup_reason": signal_payload.get(
+                    "setup_reason", quality_market_ctx.get("setup_reason")
+                ),
+                "regime": signal_payload.get("regime", quality_market_ctx.get("regime")),
+                "score": score,
+                "rr": raw_rr,
+                "effective_rr": effective_rr,
+                "expectancy": expectancy,
+            }
+        )
+        for key in (
+            "spread_pct",
+            "expected_slippage_pct",
+            "funding_rate_pct",
+            "orderbook_imbalance",
+            "spoof_risk",
+            "orderbook_status",
+            "volatility_regime",
+        ):
+            if quality_market_ctx.get(key) is None and execution_ctx.get(key) is not None:
+                quality_market_ctx[key] = execution_ctx.get(key)
+
+        candidate = build_order_candidate(
+            symbol,
+            quality_market_ctx,
+            self._canonical_filter_config(mode=mode),
+        )
+        if isinstance(candidate, OrderRejection):
+            return {
+                "accepted": False,
+                "reject_reason": candidate.reject_reason,
+                "diagnostics": {
+                    **dict(candidate.diagnostics or {}),
+                    "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+                    "candidate_build_reject": True,
+                },
+                "candidate": None,
+            }
+
+        config = {
+            **self._canonical_filter_config(mode=mode),
+            "MODE": (
+                mode.value if isinstance(mode, ExecutionMode)
+                else str(mode).upper() if mode is not None
+                else self.config.execution_mode.value
+            ),
+            # AIBrain already owns score/expectancy acceptance and reject
+            # precedence in RuntimeOrchestrator. Re-running those gates here
+            # would create duplicate authority. Direct/backtest callers keep
+            # both gates enabled by default.
+            "SCORE_GATE_ACTIVE": False,
+            "EXPECTANCY_GATE_ACTIVE": False,
+            # Runtime portfolio/cooldown/daily-loss state has its own canonical
+            # authority and must not be re-evaluated from a second stats model.
+            "RUNTIME_LIMITS_ACTIVE": False,
+        }
+        decision = evaluate_trade_quality(candidate, quality_market_ctx, {}, config)
+        diagnostics = {
+            **dict(decision.diagnostics or {}),
+            "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+            "expectancy_source": expectancy_source,
+        }
+        return {
+            "accepted": bool(decision.accepted),
+            "reject_reason": str(decision.reject_reason or ""),
+            "diagnostics": diagnostics,
+            "candidate": candidate,
+        }
 
     async def _scan_once(self) -> None:
         self._sync_resolved_paper_positions()
+        if await self._check_storage_pressure():
+            return
         if self._kill_switch_active():
             self._last_scan_gate_blockers = ["KILL_SWITCH_ACTIVE"]
             return
@@ -1835,10 +2934,15 @@ class RuntimeOrchestrator:
         else:
             self._market_data_failure_streak = 0
             self._market_data_health_status = market_data_status
-        if self._burnin_run_id and self._campaign_symbols:
-            candidates = [candidate for candidate in candidates
-                          if str(candidate.get("symbol") or "").upper() in self._campaign_symbols
-                          and str(candidate.get("source_exchange") or "").lower() in self._campaign_source_exchanges]
+        if self._burnin_run_id and self._campaign_source_exchanges:
+            candidates = [
+                candidate for candidate in candidates
+                if str(candidate.get("source_exchange") or "").lower() in self._campaign_source_exchanges
+                and (
+                    self._campaign_dynamic_universe
+                    or str(candidate.get("symbol") or "").upper() in self._campaign_symbols
+                )
+            ]
             deduplicated: dict[str, dict[str, Any]] = {}
             for candidate in candidates:
                 deduplicated.setdefault(str(candidate.get("symbol") or "").upper(), candidate)
@@ -1856,8 +2960,75 @@ class RuntimeOrchestrator:
                 "TOO_CHOPPY",
                 "WEAK_TREND_AND_NO_RANGE_EDGE",
             )
-        pre_selection = select_symbols(candidates, selector_config)
-        selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
+        selection_timestamp = time.time()
+        universe_constraints = UniverseConstraints.from_mapping({
+            **selector_config,
+            "universe_min_market_cap_usd": self.config.universe_min_market_cap_usd,
+            "universe_max_market_cap_usd": self.config.universe_max_market_cap_usd,
+            "universe_min_volume_24h_usd": self.config.universe_min_volume_24h_usd,
+            "universe_candidate_pool_top_n_volume": self.config.universe_candidate_pool_top_n_volume,
+            "max_active_symbols": self.config.max_symbols_per_scan,
+            "universe_excluded_symbols": self.config.universe_excluded_symbols,
+            "universe_max_evidence_age_sec": self.config.universe_max_evidence_age_sec,
+        })
+        # Selector cycles must use the same strategy identity as campaign
+        # creation/attachment, including guided/state/shadow configuration.
+        strategy_config_hash = self._phase8_runtime_hashes()["strategy_config_hash"]
+        universe_selection = build_selected_universe(
+            candidates,
+            universe_constraints,
+            decision_timestamp=selection_timestamp,
+            execution_mode=self.config.execution_mode.value,
+            git_sha=self._git_commit(),
+            strategy_config_hash=strategy_config_hash,
+        )
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            # Directly-constructed unit/research orchestrators have no
+            # canonical runtime database. Keep their selection evidence
+            # process-local instead of bypassing the evidence contract.
+            if self._universe_evidence_engine is None:
+                self._universe_evidence_engine = init_db("sqlite+pysqlite:///:memory:")
+            engine = self._universe_evidence_engine
+
+        def _persist_selection_authority(conn: Any) -> None:
+            persist_universe_selection(conn, universe_selection)
+            if self._campaign_id and self._burnin_run_id:
+                persist_burnin_universe_selection_link(
+                    conn,
+                    universe_selection,
+                    campaign_id=self._campaign_id,
+                    burnin_run_id=self._burnin_run_id,
+                )
+
+        try:
+            run_sqlite_write_with_retry(
+                engine,
+                _persist_selection_authority,
+                operation_name="universe_selection_cycle",
+            )
+        except SQLiteBusyExhausted as exc:
+            logger.exception(
+                "universe_selection_persistence_failed cycle_id=%s",
+                universe_selection.cycle_id,
+            )
+            self._last_scan_gate_blockers = [
+                "UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED"
+            ]
+            self._mark_sqlite_persistence_recovery_required(
+                reason="UNIVERSE_SELECTION_EVIDENCE_PERSISTENCE_FAILED",
+                detail=str(exc),
+                metric_field="universe_selection_persistence_failures",
+            )
+            return
+        except Exception:
+            logger.exception(
+                "universe_selection_persistence_fatal cycle_id=%s",
+                universe_selection.cycle_id,
+            )
+            raise
+        pre_selection = selection_results(universe_selection, selector_config)
+        selected = [row for row in pre_selection if bool(row.diagnostics.get("selected"))]
         reject_reasons: dict[str, int] = {}
         advisory_reasons: dict[str, int] = {}
         for row in pre_selection:
@@ -1890,6 +3061,14 @@ class RuntimeOrchestrator:
                 ):
                     raise RuntimeError("selected_candidate_enricher changed candidate identity")
                 row.diagnostics["inputs"] = dict(after)
+
+        if selected and self.config.execution_mode in {
+            ExecutionMode.BACKTEST,
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        }:
+            if not self._allocate_selected_candidates(selected, universe_selection):
+                return
         self.metrics.last_scan_ts = canonical_utc_timestamp()
 
         for symbol_result in selected:
@@ -1918,16 +3097,205 @@ class RuntimeOrchestrator:
             if candle_key is not None and candle_ts is not None:
                 self._latest_execution_candle_by_market[candle_key] = candle_ts
 
+    def _allocate_selected_candidates(
+        self,
+        selected: list[SymbolSelectionResult],
+        universe_selection: Any,
+    ) -> bool:
+        """Jointly allocate one selected scan set before any portfolio mutation."""
+        allocation_now = float(universe_selection.decision_timestamp)
+        historical_by_symbol: dict[str, dict[str, Any]] = {}
+        attached_campaign = bool(
+            self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        )
+        if self.config.execution_mode is ExecutionMode.PAPER and attached_campaign:
+            for row in selected:
+                historical_by_symbol[row.symbol] = self._paper_portfolio_risk_state(
+                    row.symbol, now_ts=allocation_now
+                )
+
+        first = selected[0]
+        first_inputs = dict(first.diagnostics.get("inputs", {}))
+        first_history = historical_by_symbol.get(first.symbol, {})
+        equity = first_inputs.get("equity", first_inputs.get("available_balance"))
+        available_balance = first_inputs.get("available_balance", equity)
+        if first_history.get("risk_state_source") == "BURNIN_CAMPAIGN_EVIDENCE":
+            equity = first_history.get("equity")
+            available_balance = first_history.get("available_balance")
+        elif equity is None and self.config.execution_mode is ExecutionMode.PAPER:
+            equity = self.config.paper_initial_equity
+            available_balance = self.config.paper_initial_equity
+
+        snapshot = snapshot_from_state(
+            mode=self.config.execution_mode.value,
+            symbol=first.symbol,
+            side=str(first_inputs.get("side") or "LONG"),
+            equity=equity,
+            available_balance=available_balance,
+            open_positions={
+                symbol: {
+                    "notional": notional,
+                    "side": self._active_position_sides.get(symbol, "UNKNOWN"),
+                }
+                for symbol, notional in self._active_positions.items()
+            },
+            config=self.config,
+            now=allocation_now,
+            cooldown_until=self._symbol_cooldown_until,
+            daily_realized_pnl=first_history.get("daily_realized_pnl"),
+            trades_today_symbol=first_history.get("trades_today_symbol"),
+            trades_today_global=first_history.get("trades_today_global"),
+            consecutive_loss_count=first_history.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=first_history.get(
+                "symbol_consecutive_loss_count"
+            ),
+            rolling_peak_equity=first_history.get("rolling_peak_equity"),
+            rolling_drawdown_pct=first_history.get("rolling_drawdown_pct"),
+            risk_state_complete=first_history.get("risk_state_complete"),
+            risk_state_source=first_history.get("risk_state_source"),
+            risk_state_missing_fields=list(
+                first_history.get("risk_state_missing_fields") or []
+            ),
+        )
+        snapshot.timestamp = datetime.fromtimestamp(
+            allocation_now, tz=timezone.utc
+        ).isoformat()
+
+        allocation_candidates: list[dict[str, Any]] = []
+        for row in selected:
+            inputs = dict(row.diagnostics.get("inputs", {}))
+            requested_notional = next(
+                (
+                    inputs.get(key)
+                    for key in ("notional", "notional_usdt", "order_notional")
+                    if inputs.get(key) is not None
+                ),
+                None,
+            )
+            if requested_notional is None and self.config.execution_mode is ExecutionMode.PAPER:
+                requested_notional = self.config.paper_candidate_notional
+            if requested_notional is None:
+                requested_notional = min(
+                    float(self.config.max_symbol_notional or 0.0),
+                    float(self.config.max_notional_exposure or 0.0),
+                ) * 0.1
+            history = historical_by_symbol.get(row.symbol, {})
+            symbol_loss_count = history.get("symbol_consecutive_loss_count")
+            symbol_loss_active = (
+                None
+                if symbol_loss_count is None
+                else int(symbol_loss_count) >= int(self.config.symbol_loss_streak_limit)
+            )
+            cooldown_until = max(
+                float(self._symbol_cooldown_until.get(row.symbol, 0.0) or 0.0),
+                float(history.get("persisted_cooldown_until") or 0.0),
+            )
+            try:
+                entry = float(inputs.get("entry"))
+                stop = float(inputs.get("sl", inputs.get("stop")))
+                requested_risk = float(requested_notional) * abs(entry - stop) / entry
+            except (TypeError, ValueError, ZeroDivisionError):
+                requested_risk = None
+            allocation_candidates.append({
+                **inputs,
+                "candidate_id": f"{universe_selection.cycle_id}:{row.symbol}",
+                "symbol": row.symbol,
+                "notional": requested_notional,
+                "requested_risk": requested_risk,
+                "score": inputs.get("score", row.symbol_score),
+                "symbol_cooldown_remaining_sec": max(0.0, cooldown_until - allocation_now),
+                "trades_today_symbol": history.get("trades_today_symbol"),
+                "symbol_consecutive_loss_count": history.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                "symbol_loss_cluster_active": symbol_loss_active,
+                "risk_state_complete": history.get("risk_state_complete"),
+                "risk_state_source": history.get("risk_state_source"),
+            })
+
+        allocation_config = {
+            **{
+                name: getattr(self.config, name)
+                for name in self.config.__dataclass_fields__
+            },
+            "allocation_cycle_id": f"palloc:{universe_selection.cycle_id}",
+            "universe_hash": universe_selection.universe_hash,
+            "git_sha": self._git_commit(),
+            "release_id": os.getenv(
+                "ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id
+            ),
+            "runtime_identity": self.runtime_instance_id,
+        }
+        allocation = allocate_portfolio_candidates(
+            allocation_candidates,
+            snapshot,
+            allocation_config,
+            mode=self.config.execution_mode.value,
+        )
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            if self._universe_evidence_engine is None:
+                self._universe_evidence_engine = init_db("sqlite+pysqlite:///:memory:")
+            engine = self._universe_evidence_engine
+        try:
+            run_sqlite_write_with_retry(
+                engine,
+                lambda conn: persist_portfolio_allocation(conn, allocation),
+                operation_name="portfolio_allocation_cycle",
+            )
+        except SQLiteBusyExhausted as exc:
+            logger.exception(
+                "portfolio_allocation_persistence_failed cycle_id=%s",
+                allocation.allocation_cycle_id,
+            )
+            self._last_scan_gate_blockers = [
+                "PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED"
+            ]
+            self._mark_sqlite_persistence_recovery_required(
+                reason="PORTFOLIO_ALLOCATION_EVIDENCE_PERSISTENCE_FAILED",
+                detail=str(exc),
+                metric_field="portfolio_allocation_persistence_failures",
+            )
+            return False
+        except Exception:
+            logger.exception(
+                "portfolio_allocation_persistence_fatal cycle_id=%s",
+                allocation.allocation_cycle_id,
+            )
+            raise
+
+        by_id = {candidate.candidate_id: candidate for candidate in allocation.candidates}
+        for row in selected:
+            inputs = dict(row.diagnostics.get("inputs", {}))
+            candidate_id = f"{universe_selection.cycle_id}:{row.symbol}"
+            candidate_allocation = by_id[candidate_id]
+            inputs["portfolio_allocation_cycle_id"] = allocation.allocation_cycle_id
+            inputs["portfolio_allocation"] = candidate_allocation.to_dict()
+            row.diagnostics["inputs"] = inputs
+        return True
+
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
         """Fail closed and durably diagnose an attached-campaign scope violation."""
-        if not self._burnin_run_id or not self._campaign_symbols:
-            return
-        normalized_symbol = str(symbol or "").upper()
-        normalized_source = str(source_exchange or "").lower()
-        if normalized_symbol in self._campaign_symbols and normalized_source in self._campaign_source_exchanges:
+        scope_configured = bool(self._campaign_source_exchanges) and (
+            self._campaign_dynamic_universe or bool(self._campaign_symbols)
+        )
+        if not self._burnin_run_id or not scope_configured:
+            # Campaign/run identity may be used by persistence fixtures without
+            # attaching a universe contract. Enforce only once provider + fixed
+            # allowlist or provider + dynamic-selector scope is actually loaded.
             return
         campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        normalized_symbol = str(symbol or "").upper()
+        normalized_source = str(source_exchange or "").lower()
+        source_allowed = normalized_source in self._campaign_source_exchanges
+        symbol_allowed = (
+            self._campaign_dynamic_universe
+            or normalized_symbol in self._campaign_symbols
+        )
+        if source_allowed and symbol_allowed:
+            return
         details = {"campaign_id": campaign_id, "burnin_run_id": self._burnin_run_id,
+                   "universe_scope_mode": DYNAMIC_UNIVERSE_SCOPE_MODE if self._campaign_dynamic_universe else "FIXED_ALLOWLIST",
                    "declared_symbols": sorted(self._campaign_symbols),
                    "declared_source_exchanges": sorted(self._campaign_source_exchanges),
                    "observed_symbol": normalized_symbol, "observed_source_exchange": normalized_source,
@@ -2059,6 +3427,10 @@ class RuntimeOrchestrator:
             if finalized:
                 self.metrics.finalized_signal_replays_skipped += 1
             return
+        # Microstructure freshness is evaluated against decision time, not
+        # candle time; a fresh depth snapshot can legitimately arrive after
+        # the latest closed candle.
+        market_ctx["microstructure_reference_ts"] = time.time()
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
         legacy_candidate = {key: market_ctx.get(key) for key in (
@@ -2223,6 +3595,7 @@ class RuntimeOrchestrator:
                         mtf=dict(mtf or {}), execution_ctx=execution_ctx)
                     self.metrics.mtf_alignment_reject += 1
                     self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_regime_neutral += int("MTF_REGIME_NEUTRAL" in reasons)
                     self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
                     self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
                     self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
@@ -2342,13 +3715,17 @@ class RuntimeOrchestrator:
         if self.config.execution_mode in {
             ExecutionMode.PAPER,
             ExecutionMode.LIVE_PRECHECK,
+            ExecutionMode.LIVE,
         }:
             execution_safety = evaluate_execution_safety(
                 execution_ctx,
                 effective_rr=effective_rr,
                 min_effective_rr=self.config.min_effective_rr,
                 thresholds=self._canonical_filter_config(),
-                require_measured=self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
+                require_measured=self.config.execution_mode in {
+                    ExecutionMode.LIVE,
+                    ExecutionMode.LIVE_PRECHECK,
+                },
             )
             execution_ctx = {
                 **execution_ctx,
@@ -2362,16 +3739,127 @@ class RuntimeOrchestrator:
             }
             market_ctx["execution_ctx"] = execution_ctx
             market_ctx["execution_safety"] = execution_safety
+
+        # Stop levels remain structural market evidence.  Stop-risk viability,
+        # however, is decision-time execution evidence and therefore uses the
+        # same expected fill that already governs executable RR.
+        stop_risk = build_stop_risk_metrics(
+            planned_entry=market_ctx.get("entry"),
+            expected_fill=rr_metrics.get("expected_fill"),
+            stop=market_ctx.get("sl"),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
+        stop_risk.update(
+            min_stop_pct=float(self.config.min_sl_pct),
+            max_stop_pct=float(self.config.max_sl_pct),
+        )
+        market_ctx.update(stop_risk)
+
+        # Guided MTF structural geometry is market evidence, not a target to be
+        # widened until it passes policy. Reject a sub-minimum executable stop
+        # before AIBrain scoring so the causal geometry failure remains the
+        # authoritative primary reason. Wide-stop softening requires score and
+        # effective RR, so that policy deliberately remains downstream.
+        mtf_for_geometry = (
+            market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
+        )
+        generation_for_geometry = (
+            mtf_for_geometry.get("generation")
+            if isinstance(mtf_for_geometry.get("generation"), Mapping)
+            else {}
+        )
+        guided_geometry = (
+            self.config.execution_mode is ExecutionMode.PAPER
+            and str(generation_for_geometry.get("mode") or "").upper() == "REGIME_GUIDED"
+            and str(generation_for_geometry.get("evidence_status") or "").upper() == "COMPLETE"
+            and isinstance(generation_for_geometry.get("candidate"), Mapping)
+        )
+        if guided_geometry:
+            pre_score_stop_policy = evaluate_stop_risk_policy(
+                stop_risk,
+                score=None,
+                effective_rr=effective_rr,
+                config=self._canonical_filter_config(),
+            )
+            pre_score_stop_reason = str(
+                pre_score_stop_policy.get("reject_reason") or ""
+            ).upper()
+            if stop_risk.get("stop_risk_evidence_status") == "UNAVAILABLE_BLOCKING":
+                reject_reason = "UNKNOWN_EXECUTION_CONTEXT"
+            elif pre_score_stop_reason == "STOP_TOO_TIGHT":
+                reject_reason = "STOP_TOO_TIGHT"
+            else:
+                # Wide-stop softening depends on score and remains downstream
+                # in evaluate_trade_quality after AIBrain scoring.
+                reject_reason = None
+            if reject_reason is not None:
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": [reject_reason],
+                    "confidence": 0.0,
+                    "score": None,
+                    "rr": raw_rr,
+                    "candidate_rr": rr_metrics["candidate_rr"],
+                    "expected_fill": rr_metrics["expected_fill"],
+                    "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                    "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
+                    "effective_rr": effective_rr,
+                    "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
+                    "explanation": "guided_executable_stop_risk_gate",
+                    "execution_ctx": execution_ctx,
+                    "execution_safety": execution_safety,
+                    "spread_pct": execution_ctx.get("spread_pct"),
+                    "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                    "latency_ms": execution_ctx.get("latency_ms"),
+                    "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                    "liquidity_score": execution_ctx.get("liquidity_score"),
+                    "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                    "volatility_regime": execution_ctx.get("volatility_regime"),
+                    **stop_risk,
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
+                )
+                return
+
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
+        if risk_reject == "DUPLICATE_POSITION":
+            setup_identity = str(market_ctx.get("setup_identity") or "").strip()
+            active_position_episode_id = str(
+                self._active_position_episode_ids.get(selection.symbol) or ""
+            ).strip()
+            if setup_identity and active_position_episode_id:
+                if self._duplicate_position_reject_recorded(
+                    setup_identity, active_position_episode_id
+                ) and not self._kill_switch_active():
+                    return
+                market_ctx["active_position_episode_id"] = active_position_episode_id
+            else:
+                # The exposure guard stays fail-closed. Incomplete identity may
+                # be audited, but it cannot become qualification-quality evidence.
+                market_ctx["reject_quality_attributable"] = False
+                market_ctx["non_attributable_reason"] = "DUPLICATE_POSITION_IDENTITY_UNAVAILABLE"
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": None, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
         if risk_reject is not None:
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": None, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
+            # Do not cache success speculatively: the next scan proves durable
+            # canonical persistence before suppressing another evidence row.
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         legacy_pre_ai_execution_reason = None
@@ -2399,7 +3887,7 @@ class RuntimeOrchestrator:
                 "reason": legacy_pre_ai_execution_reason,
                 "primary_reject_reason": legacy_pre_ai_execution_reason,
                 "confidence": 0.0,
-                "score": 0.0,
+                "score": None,
                 "rr": raw_rr,
                 "candidate_rr": rr_metrics["candidate_rr"],
                 "expected_fill": rr_metrics["expected_fill"],
@@ -2423,7 +3911,12 @@ class RuntimeOrchestrator:
                 {**reject_payload, "reject_reason": legacy_pre_ai_execution_reason},
             )
             return
-        signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
+        signal_payload = self._build_signal(
+            selection,
+            market_ctx,
+            signal_id=signal_id,
+            decision_filters=self._canonical_filter_config(),
+        )
         signal_payload["reject_decision_id"] = self._canonical_reject_decision_id({
             **market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
         })
@@ -2462,6 +3955,15 @@ class RuntimeOrchestrator:
                 "confidence": order_plan.confidence,
                 "score": getattr(score_ctx, "total_score", None),
                 "score_components": getattr(score_ctx, "components", None),
+                "expectancy_after_costs": (
+                    getattr(score_ctx, "probabilistic", {}) or {}
+                ).get("expectancy_after_costs"),
+                "expectancy_sample_size": (
+                    getattr(score_ctx, "probabilistic", {}) or {}
+                ).get("sample_size"),
+                "expectancy_cost_basis": (
+                    getattr(score_ctx, "probabilistic", {}) or {}
+                ).get("expectancy_cost_basis", "AIBRAIN_HEURISTIC_EXECUTION_THRESHOLDS"),
                 "rr": signal_payload.get("risk_reward"),
                 "side": signal_payload.get("side", market_ctx.get("side")),
                 "setup_type": signal_payload.get("setup", signal_payload.get("setup_type")),
@@ -2491,11 +3993,79 @@ class RuntimeOrchestrator:
             })
             return
 
-        if effective_rr < self.config.min_effective_rr:
-            reject_reason = "LOW_EFFECTIVE_RR"
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+
+        quality = self._evaluate_authoritative_trade_quality(
+            symbol=selection.symbol,
+            market_ctx=market_ctx,
+            signal_payload=signal_payload,
+            score_ctx=score_ctx,
+            effective_rr=effective_rr,
+        )
+        quality_diagnostics = dict(quality.get("diagnostics") or {})
+        market_ctx["trade_quality"] = quality_diagnostics
+        for key in (
+            "planned_stop_distance_pct",
+            "executable_stop_distance_pct",
+            "stop_distance_pct",
+            "stop_distance_basis",
+            "stop_risk_evidence_status",
+            "stop_risk_missing_fields",
+            "min_stop_pct",
+            "max_stop_pct",
+            "stop_too_wide_softened",
+            "stop_too_wide_extreme",
+            "stop_too_wide_soft_eligible",
+            "risk_scale",
+        ):
+            if key in quality_diagnostics:
+                market_ctx[key] = quality_diagnostics.get(key)
+
+        if not bool(quality.get("accepted")):
+            reject_reason = str(quality.get("reject_reason") or "UNKNOWN")
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": reject_reason,
+                "reject_reason": reject_reason,
+                "primary_reject_reason": reject_reason,
+                "reject_reasons": [reject_reason],
+                "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "score_components": getattr(score_ctx, "components", None),
+                "rr": signal_payload.get("risk_reward"),
+                "candidate_rr": rr_metrics["candidate_rr"],
+                "expected_fill": rr_metrics["expected_fill"],
+                "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
+                "effective_rr": effective_rr,
+                "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
+                "side": signal_payload.get("side", market_ctx.get("side")),
+                "setup_type": signal_payload.get("setup", signal_payload.get("setup_type")),
+                "entry": signal_payload.get("entry_price", market_ctx.get("entry")),
+                "sl": signal_payload.get("stop_loss", market_ctx.get("sl")),
+                "tp": signal_payload.get("take_profit", market_ctx.get("tp")),
+                "regime": signal_payload.get("regime", market_ctx.get("regime")),
+                "explanation": "shared_trade_quality_gate",
+                "execution_ctx": execution_ctx,
+                "execution_safety": execution_safety,
+                "trade_quality": quality_diagnostics,
+                "spread_pct": execution_ctx.get("spread_pct"),
+                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                "latency_ms": execution_ctx.get("latency_ms"),
+                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                "liquidity_score": execution_ctx.get("liquidity_score"),
+                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                "volatility_regime": execution_ctx.get("volatility_regime"),
+            }
             await self._persist_reject({**market_ctx, **reject_payload})
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**market_ctx, **reject_payload},
+            )
             return
 
         if execution_safety is not None and not bool(execution_safety.get("accepted")):
@@ -2536,7 +4106,30 @@ class RuntimeOrchestrator:
             )
             return
 
-        candidate_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
+        mtf_target = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
+        regime_layer = mtf_target.get("regime") if isinstance(mtf_target.get("regime"), Mapping) else {}
+        setup_layer = mtf_target.get("setup") if isinstance(mtf_target.get("setup"), Mapping) else {}
+        target_policy = build_regime_target_policy(
+            side=market_ctx.get("side", signal_payload.get("side")),
+            entry=rr_metrics.get("expected_fill") or market_ctx.get("entry"),
+            stop=market_ctx.get("sl"),
+            target=market_ctx.get("structural_target") or market_ctx.get("tp"),
+            effective_rr=effective_rr,
+            min_effective_rr=self.config.min_effective_rr,
+            regime=regime_layer.get("regime") or market_ctx.get("regime"),
+            setup_phase=setup_layer.get("phase") or market_ctx.get("setup_phase"),
+            target_source=market_ctx.get("target_source"),
+        )
+        market_ctx["target_policy"] = target_policy
+
+        candidate_notional = next(
+            (
+                market_ctx.get(key)
+                for key in ("notional", "notional_usdt", "order_notional")
+                if market_ctx.get(key) is not None
+            ),
+            None,
+        )
         inferred_equity = market_ctx.get("equity", market_ctx.get("available_balance"))
         available_balance = market_ctx.get("available_balance", inferred_equity)
         portfolio_evidence_source = (
@@ -2597,34 +4190,300 @@ class RuntimeOrchestrator:
                 if not attached_campaign_id:
                     portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
                 market_ctx["notional"] = candidate_notional
+            market_ctx["portfolio_equity"] = inferred_equity
+            market_ctx["portfolio_available_balance"] = available_balance
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
-        snapshot = snapshot_from_state(
-            mode=self.config.execution_mode.value,
-            symbol=selection.symbol,
-            side=str(market_ctx.get("side", signal_payload.get("side", "LONG"))),
-            candidate_notional=candidate_notional,
-            equity=inferred_equity,
-            available_balance=available_balance,
-            open_positions={k: {"notional": v, "side": self._active_position_sides.get(k, "UNKNOWN")} for k, v in self._active_positions.items()},
-            config=self.config,
-            now=portfolio_now,
-            cooldown_until=cooldown_until,
-            daily_realized_pnl=historical_risk.get("daily_realized_pnl"),
-            trades_today_symbol=historical_risk.get("trades_today_symbol"),
-            trades_today_global=historical_risk.get("trades_today_global"),
-            consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
-            symbol_consecutive_loss_count=historical_risk.get("symbol_consecutive_loss_count"),
-            rolling_peak_equity=historical_risk.get("rolling_peak_equity"),
-            rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
-            risk_state_complete=historical_risk.get("risk_state_complete"),
-            risk_state_source=historical_risk.get("risk_state_source"),
-            risk_state_missing_fields=list(
-                historical_risk.get("risk_state_missing_fields") or []
+        def _portfolio_snapshot_for(candidate_value: float | None):
+            return snapshot_from_state(
+                mode=self.config.execution_mode.value,
+                symbol=selection.symbol,
+                side=str(market_ctx.get("side", signal_payload.get("side", "LONG"))),
+                candidate_notional=candidate_value,
+                equity=inferred_equity,
+                available_balance=available_balance,
+                open_positions={
+                    key: {
+                        "notional": value,
+                        "side": self._active_position_sides.get(key, "UNKNOWN"),
+                    }
+                    for key, value in self._active_positions.items()
+                },
+                config=self.config,
+                now=portfolio_now,
+                cooldown_until=cooldown_until,
+                daily_realized_pnl=historical_risk.get("daily_realized_pnl"),
+                trades_today_symbol=historical_risk.get("trades_today_symbol"),
+                trades_today_global=historical_risk.get("trades_today_global"),
+                consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
+                symbol_consecutive_loss_count=historical_risk.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                rolling_peak_equity=historical_risk.get("rolling_peak_equity"),
+                rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
+                risk_state_complete=historical_risk.get("risk_state_complete"),
+                risk_state_source=historical_risk.get("risk_state_source"),
+                risk_state_missing_fields=list(
+                    historical_risk.get("risk_state_missing_fields") or []
+                ),
+            )
+
+        risk_based_sizing = {
+            "status": "DISABLED",
+            "reason": "FIXED_POSITION_SIZING",
+            "authority": "NON_AUTHORITATIVE",
+        }
+        if (
+            self.config.execution_mode is ExecutionMode.PAPER
+            and self.config.paper_position_sizing_mode in {"SHADOW", "RISK_BASED"}
+        ):
+            capacity = _portfolio_snapshot_for(0.0)
+            drawdown_value = historical_risk.get("rolling_drawdown_pct")
+            if drawdown_value is None and portfolio_evidence_source == "CONFIGURED_PAPER_ACCOUNT":
+                drawdown_value = 0.0
+            risk_based_sizing = risk_based_candidate_exposure(
+                equity=inferred_equity,
+                entry=rr_metrics.get("expected_fill") or market_ctx.get("entry"),
+                stop=market_ctx.get("sl"),
+                risk_pct_per_trade=self.config.risk_pct_per_trade,
+                rolling_drawdown_pct=drawdown_value,
+                max_rolling_drawdown_pct=self.config.max_rolling_drawdown_pct,
+                expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
+                max_expected_slippage_pct=self.config.max_expected_slippage_pct,
+                volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+                max_volatility_penalty_pct=self.config.max_volatility_penalty_pct,
+                liquidity_depth_usdt=execution_ctx.get("liquidity_depth_usdt"),
+                max_liquidity_participation_pct=self.config.paper_max_liquidity_participation_pct,
+                max_leverage=self.config.paper_max_leverage,
+                min_notional=self.config.paper_min_notional,
+                hard_notional_caps={
+                    "portfolio_remaining": (
+                        None if capacity.max_notional_exposure is None or capacity.total_notional_exposure is None
+                        else float(capacity.max_notional_exposure) - float(capacity.total_notional_exposure)
+                    ),
+                    "symbol_remaining": (
+                        None if capacity.max_symbol_notional is None or capacity.symbol_notional_exposure is None
+                        else float(capacity.max_symbol_notional) - float(capacity.symbol_notional_exposure)
+                    ),
+                    "correlation_remaining": (
+                        None if capacity.max_correlation_group_exposure is None or capacity.correlation_group_exposure is None
+                        else float(capacity.max_correlation_group_exposure) - float(capacity.correlation_group_exposure)
+                    ),
+                    "available_balance": available_balance,
+                },
+                require_execution_limits=True,
+            )
+            risk_based_sizing["authority"] = (
+                "AUTHORITATIVE_PAPER"
+                if self.config.paper_position_sizing_mode == "RISK_BASED"
+                else "SHADOW_COUNTERFACTUAL"
+            )
+            market_ctx["risk_based_sizing"] = dict(risk_based_sizing)
+            if self.config.paper_position_sizing_mode == "RISK_BASED":
+                if risk_based_sizing.get("status") == "COMPLETE":
+                    candidate_notional = float(risk_based_sizing["selected_notional"])
+                    market_ctx["notional"] = candidate_notional
+                    market_ctx["quantity"] = float(risk_based_sizing["quantity"])
+                    market_ctx["qty"] = float(risk_based_sizing["quantity"])
+                else:
+                    candidate_notional = None
+                    for key in ("notional", "notional_usdt", "order_notional", "quantity", "qty"):
+                        market_ctx.pop(key, None)
+
+        original_quantity = next(
+            (
+                market_ctx.get(key)
+                for key in ("quantity", "qty")
+                if market_ctx.get(key) is not None
             ),
+            None,
         )
+        sizing_projection = scale_candidate_exposure(
+            original_notional=candidate_notional,
+            risk_scale=market_ctx.get("risk_scale"),
+            original_quantity=original_quantity,
+            require_scale=bool(market_ctx.get("stop_too_wide_softened")),
+        )
+        market_ctx.update({
+            "sizing_status": sizing_projection.get("status"),
+            "sizing_reason": sizing_projection.get("reason"),
+            "original_notional": sizing_projection.get("original_notional"),
+            "risk_scale": sizing_projection.get("risk_scale"),
+            "effective_notional": sizing_projection.get("effective_notional"),
+            "original_quantity": sizing_projection.get("original_quantity"),
+            "effective_quantity": sizing_projection.get("effective_quantity"),
+        })
+        if sizing_projection.get("status") != "COMPLETE":
+            # Missing/invalid sizing evidence is a portfolio-risk failure, but
+            # preserve the canonical portfolio snapshot and diagnostics rather
+            # than emitting a second, evidence-poor UNKNOWN path.
+            snapshot = _portfolio_snapshot_for(candidate_notional)
+            portfolio_decision = evaluate_portfolio_risk(
+                {
+                    "symbol": selection.symbol,
+                    "side": market_ctx.get("side"),
+                    "entry": market_ctx.get("entry"),
+                    "quantity": original_quantity,
+                    "notional": candidate_notional,
+                },
+                snapshot,
+                self.config,
+                mode=self.config.execution_mode.value,
+            )
+            portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
+            portfolio_decision.diagnostics["sizing_projection"] = dict(sizing_projection)
+            reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": reject_reason,
+                "reject_reason": reject_reason,
+                "primary_reject_reason": reject_reason,
+                "reject_reasons": [reject_reason],
+                "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "effective_rr": effective_rr,
+                "explanation": "canonical_risk_scaling_gate",
+                "execution_ctx": execution_ctx,
+                "portfolio_reject_reason": reject_reason,
+                "portfolio_risk_state": portfolio_decision.risk_state,
+                "portfolio_diagnostics": portfolio_decision.diagnostics,
+                "risk_flags": portfolio_decision.risk_flags,
+                "sizing_status": sizing_projection.get("status"),
+                "sizing_reason": sizing_projection.get("reason"),
+                "original_notional": sizing_projection.get("original_notional"),
+                "risk_scale": sizing_projection.get("risk_scale"),
+                "effective_notional": sizing_projection.get("effective_notional"),
+                "original_quantity": sizing_projection.get("original_quantity"),
+                "effective_quantity": sizing_projection.get("effective_quantity"),
+            }
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**market_ctx, **reject_payload},
+            )
+            return
+
+        allocation_evidence = market_ctx.get("portfolio_allocation")
+        if isinstance(allocation_evidence, Mapping):
+            allocation_action = str(
+                allocation_evidence.get("action") or "REJECT"
+            ).upper()
+            allocation_reasons = list(
+                allocation_evidence.get("reason_codes") or []
+            )
+            if allocation_action not in {"APPROVE", "REDUCE_SIZE"}:
+                reject_reason = str(
+                    allocation_reasons[0]
+                    if allocation_reasons
+                    else "NO_PORTFOLIO_CAPACITY"
+                )
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": allocation_reasons or [reject_reason],
+                    "confidence": order_plan.confidence,
+                    "score": getattr(score_ctx, "total_score", None),
+                    "rr": signal_payload.get("risk_reward"),
+                    "effective_rr": effective_rr,
+                    "explanation": "joint_portfolio_allocation_gate",
+                    "execution_ctx": execution_ctx,
+                    "portfolio_allocation_cycle_id": market_ctx.get(
+                        "portfolio_allocation_cycle_id"
+                    ),
+                    "portfolio_allocation": dict(allocation_evidence),
+                    "allocated_notional": 0.0,
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
+                )
+                return
+            try:
+                allocated_cap = float(allocation_evidence.get("allocated_notional"))
+            except (TypeError, ValueError):
+                allocated_cap = None
+            if allocated_cap is None or allocated_cap <= 0:
+                reject_reason = "PORTFOLIO_ALLOCATION_INVALID"
+                reject_payload = {
+                    "signal_id": signal_id,
+                    "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value,
+                    "phase": "final",
+                    "decision": "REJECTED",
+                    "reason": reject_reason,
+                    "reject_reason": reject_reason,
+                    "primary_reject_reason": reject_reason,
+                    "reject_reasons": [reject_reason],
+                    "confidence": order_plan.confidence,
+                    "score": getattr(score_ctx, "total_score", None),
+                    "rr": signal_payload.get("risk_reward"),
+                    "effective_rr": effective_rr,
+                    "explanation": "joint_portfolio_allocation_invalid",
+                    "execution_ctx": execution_ctx,
+                    "portfolio_allocation": dict(allocation_evidence),
+                }
+                await self._persist_reject({**market_ctx, **reject_payload})
+                await self._emit_lifecycle_event(
+                    LifecycleState.SIGNAL_REJECTED.value,
+                    selection.symbol,
+                    {**market_ctx, **reject_payload},
+                )
+                return
+            pre_allocation_notional = float(sizing_projection["effective_notional"])
+            downstream_notional = min(pre_allocation_notional, float(allocated_cap))
+            allocation_scale = downstream_notional / pre_allocation_notional
+            allocated_risk = allocation_evidence.get("allocated_risk")
+            if allocated_risk is not None:
+                try:
+                    allocated_risk = float(allocated_risk) * (
+                        downstream_notional / float(allocated_cap)
+                    )
+                except (TypeError, ValueError, ZeroDivisionError):
+                    allocated_risk = None
+            sizing_projection["effective_notional"] = downstream_notional
+            if sizing_projection.get("effective_quantity") is not None:
+                sizing_projection["effective_quantity"] = (
+                    float(sizing_projection["effective_quantity"]) * allocation_scale
+                )
+            market_ctx.update({
+                "allocation_action": allocation_action,
+                "allocation_scale": allocation_scale,
+                "allocation_requested_notional": allocation_evidence.get(
+                    "requested_notional"
+                ),
+                "allocated_notional": downstream_notional,
+                "allocated_risk": allocated_risk,
+                "effective_notional": downstream_notional,
+                "effective_quantity": sizing_projection.get("effective_quantity"),
+            })
+
+        candidate_notional = float(sizing_projection["effective_notional"])
+        market_ctx["notional"] = candidate_notional
+        for alias in ("notional_usdt", "order_notional"):
+            if alias in market_ctx:
+                market_ctx[alias] = candidate_notional
+        effective_quantity = sizing_projection.get("effective_quantity")
+        if effective_quantity is not None:
+            market_ctx["quantity"] = float(effective_quantity)
+            market_ctx["qty"] = float(effective_quantity)
+        snapshot = _portfolio_snapshot_for(candidate_notional)
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
         portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
+        portfolio_decision.diagnostics["sizing_projection"] = dict(sizing_projection)
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
@@ -2670,6 +4529,27 @@ class RuntimeOrchestrator:
             "executable_raw_rr": rr_metrics["executable_raw_rr"],
             "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
+            "planned_stop_distance_pct": market_ctx.get("planned_stop_distance_pct"),
+            "executable_stop_distance_pct": market_ctx.get("executable_stop_distance_pct"),
+            "stop_distance_pct": market_ctx.get("stop_distance_pct"),
+            "stop_distance_basis": market_ctx.get("stop_distance_basis"),
+            "stop_risk_evidence_status": market_ctx.get("stop_risk_evidence_status"),
+            "stop_risk_missing_fields": market_ctx.get("stop_risk_missing_fields"),
+            "stop_too_wide_softened": market_ctx.get("stop_too_wide_softened", False),
+            "stop_too_wide_extreme": market_ctx.get("stop_too_wide_extreme"),
+            "stop_too_wide_soft_eligible": market_ctx.get("stop_too_wide_soft_eligible"),
+            "risk_scale": market_ctx.get("risk_scale", 1.0),
+            "sizing_status": market_ctx.get("sizing_status"),
+            "sizing_reason": market_ctx.get("sizing_reason"),
+            "original_notional": market_ctx.get("original_notional"),
+            "effective_notional": market_ctx.get("effective_notional"),
+            "original_quantity": market_ctx.get("original_quantity"),
+            "effective_quantity": market_ctx.get("effective_quantity"),
+            "target_policy": market_ctx.get("target_policy"),
+            "paper_position_sizing_mode": self.config.paper_position_sizing_mode,
+            "risk_based_sizing": market_ctx.get("risk_based_sizing"),
+            "min_stop_pct": float(self.config.min_sl_pct),
+            "max_stop_pct": float(self.config.max_sl_pct),
             "min_effective_rr": float(self.config.min_effective_rr),
             "confidence": order_plan.confidence,
             "execution_ctx": execution_ctx,
@@ -2696,13 +4576,25 @@ class RuntimeOrchestrator:
             "portfolio_risk_state": portfolio_decision.risk_state,
             "portfolio_diagnostics": portfolio_decision.diagnostics,
             "risk_flags": portfolio_decision.risk_flags,
+            "portfolio_allocation_cycle_id": market_ctx.get(
+                "portfolio_allocation_cycle_id"
+            ),
+            "allocation_action": market_ctx.get("allocation_action"),
+            "allocation_scale": market_ctx.get("allocation_scale"),
+            "allocation_requested_notional": market_ctx.get(
+                "allocation_requested_notional"
+            ),
+            "allocated_notional": market_ctx.get("allocated_notional"),
+            "allocated_risk": market_ctx.get("allocated_risk"),
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),
              "entry": market_ctx.get("entry"), "sl": market_ctx.get("sl"),
              "tp": market_ctx.get("tp")}, actual_decision="ACCEPTED")
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
-            await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
+            precheck_persisted = await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
+            if not precheck_persisted:
+                return
             self._persist_burnin_decision(
                 accepted_burnin_payload,
                 lifecycle_state=LifecycleState.ORDER_PLACED.value,
@@ -2737,10 +4629,221 @@ class RuntimeOrchestrator:
         if executed is False:
             return
         if self.config.execution_mode == ExecutionMode.PAPER:
+            accepted_burnin_payload.update({
+                "execution_account_scope": self._last_execution_ownership.get("account_scope"),
+                "execution_account_model": self._last_execution_ownership.get("account_model"),
+                "execution_fencing_token": self._last_execution_ownership.get("fencing_token"),
+                "execution_ownership_reason": self._last_execution_ownership.get("reason"),
+            })
             self._persist_burnin_decision(
                 accepted_burnin_payload,
                 lifecycle_state=LifecycleState.POSITION_OPENED.value,
             )
+
+    def _execution_account_identity(self) -> dict[str, Any]:
+        mode = self.config.execution_mode
+        if mode is ExecutionMode.PAPER:
+            model = str(self.config.paper_account_model or "").strip().upper()
+            if model != "ISOLATED_CAMPAIGN":
+                raise RuntimeError("PAPER_ACCOUNT_MODEL_UNSUPPORTED")
+            campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+            if campaign_id:
+                scope = f"paper:campaign:{campaign_id}"
+                durable_required = True
+            else:
+                scope = f"paper:runtime:{self.runtime_instance_id}"
+                durable_required = False
+            return {
+                "account_scope": scope,
+                "account_model": model,
+                "durable_required": durable_required,
+                "mutation_mode": "PAPER",
+            }
+        if mode is ExecutionMode.LIVE:
+            configured = str(self.config.execution_account_scope or "").strip()
+            return {
+                "account_scope": f"live:{configured}" if configured else "",
+                "account_model": "SINGLE_OWNER_LIVE_ACCOUNT",
+                "durable_required": True,
+                "mutation_mode": "LIVE",
+            }
+        return {
+            "account_scope": "",
+            "account_model": "NO_MUTATION",
+            "durable_required": False,
+            "mutation_mode": mode.value,
+        }
+
+    def _mark_sqlite_persistence_recovery_required(
+        self,
+        *,
+        reason: str,
+        detail: str,
+        metric_field: str,
+    ) -> None:
+        setattr(
+            self.metrics,
+            metric_field,
+            int(getattr(self.metrics, metric_field, 0)) + 1,
+        )
+        self._burnin_evidence_incomplete = True
+        self._recovery_required = True
+        self._runtime_status = "RECOVERY_REQUIRED"
+        self._fail_closed_reason = self._fail_closed_reason or reason
+        self._last_error = detail
+        logger.error("runtime_sqlite_persistence_degraded reason=%s detail=%s", reason, detail)
+
+    def _authorize_execution_ownership(self) -> dict[str, Any]:
+        identity = self._execution_account_identity()
+        mode = self.config.execution_mode
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            evidence = {**identity, "acquired": True, "reason": "NO_MUTATION"}
+            self._last_execution_ownership = evidence
+            return evidence
+
+        scope = str(identity.get("account_scope") or "")
+        if not scope:
+            raise RuntimeError("EXECUTION_ACCOUNT_SCOPE_REQUIRED")
+
+        engine = self._resolve_execution_ownership_engine()
+        if engine is None:
+            if mode is ExecutionMode.PAPER and not bool(identity.get("durable_required")):
+                evidence = {
+                    **identity,
+                    "owner_instance_id": self.runtime_instance_id,
+                    "owner_startup_id": self.startup_id,
+                    "fencing_token": 0,
+                    "lease_expires_at": None,
+                    "acquired": True,
+                    "reason": "LOCAL_EPHEMERAL_ISOLATED",
+                }
+                self._execution_account_scope = scope
+                self._execution_account_model = str(identity["account_model"])
+                self._execution_fencing_token = 0
+                self._execution_lease_expires_at = None
+                self._last_execution_ownership = evidence
+                return evidence
+            raise RuntimeError("EXECUTION_OWNERSHIP_PERSISTENCE_UNAVAILABLE")
+
+        try:
+            lease = acquire_execution_ownership(
+                engine,
+                account_scope=scope,
+                mode=mode.value,
+                owner_instance_id=self.runtime_instance_id,
+                owner_startup_id=self.startup_id,
+                lease_ttl_sec=float(self.config.execution_lease_ttl_sec),
+            )
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+                detail=str(exc),
+                metric_field="execution_ownership_persistence_failures",
+            )
+            evidence = {
+                **identity,
+                "owner_instance_id": self.runtime_instance_id,
+                "owner_startup_id": self.startup_id,
+                "fencing_token": None,
+                "lease_expires_at": None,
+                "acquired": False,
+                "reason": "EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+            }
+            self._last_execution_ownership = evidence
+            return evidence
+        evidence = {**identity, **lease.as_dict()}
+        self._last_execution_ownership = evidence
+        if not lease.acquired:
+            raise RuntimeError(
+                "EXECUTION_OWNERSHIP_BLOCKED:" + (lease.reason or "UNKNOWN")
+            )
+        self._execution_account_scope = scope
+        self._execution_account_model = str(identity["account_model"])
+        self._execution_fencing_token = lease.fencing_token
+        self._execution_lease_expires_at = lease.lease_expires_at
+        return evidence
+
+    def _execution_ownership_snapshot(self) -> dict[str, Any]:
+        identity = self._execution_account_identity()
+        mode = self.config.execution_mode
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            return {**identity, "valid": True, "reason": "NO_MUTATION"}
+        if (
+            mode is ExecutionMode.PAPER
+            and self._execution_fencing_token == 0
+            and self._execution_account_scope == identity.get("account_scope")
+        ):
+            return {
+                **identity,
+                "owner_instance_id": self.runtime_instance_id,
+                "owner_startup_id": self.startup_id,
+                "fencing_token": 0,
+                "lease_expires_at": None,
+                "valid": True,
+                "reason": "LOCAL_EPHEMERAL_ISOLATED",
+            }
+        engine = self._resolve_execution_ownership_engine()
+        if engine is None or not self._execution_account_scope:
+            return {
+                **identity,
+                "valid": False,
+                "reason": "EXECUTION_OWNERSHIP_UNAVAILABLE",
+            }
+        try:
+            lease = validate_execution_ownership(
+                engine,
+                account_scope=self._execution_account_scope,
+                owner_instance_id=self.runtime_instance_id,
+                owner_startup_id=self.startup_id,
+                fencing_token=self._execution_fencing_token,
+                min_validity_sec=float(self.config.execution_lease_min_validity_sec),
+            )
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+                detail=str(exc),
+                metric_field="execution_ownership_persistence_failures",
+            )
+            return {
+                **identity,
+                "valid": False,
+                "reason": "EXECUTION_OWNERSHIP_PERSISTENCE_BUSY",
+            }
+        return {**identity, **lease.as_dict(), "valid": bool(lease.acquired)}
+
+    def _validate_execution_ownership(self) -> dict[str, Any]:
+        evidence = self._execution_ownership_snapshot()
+        self._last_execution_ownership = dict(evidence)
+        if not bool(evidence.get("valid")):
+            raise RuntimeError(
+                "EXECUTION_OWNERSHIP_FENCED:"
+                + str(evidence.get("reason") or "UNKNOWN")
+            )
+        return evidence
+
+    def _release_execution_ownership(self) -> bool:
+        if (
+            not self._execution_account_scope
+            or self._execution_fencing_token in (None, 0)
+        ):
+            return False
+        engine = self._resolve_execution_ownership_engine()
+        if engine is None:
+            return False
+        try:
+            released = release_execution_ownership(
+                engine,
+                account_scope=self._execution_account_scope,
+                owner_instance_id=self.runtime_instance_id,
+                owner_startup_id=self.startup_id,
+                fencing_token=self._execution_fencing_token,
+            )
+        except SQLiteBusyExhausted as exc:
+            logger.warning("execution_ownership_release_deferred reason=%s", exc)
+            return False
+        if released:
+            self._execution_lease_expires_at = time.time()
+        return released
 
     def _authoritative_live_authorization(self) -> dict[str, bool]:
         report = self._qualification_report
@@ -2763,6 +4866,8 @@ class RuntimeOrchestrator:
             "operator_acknowledged": bool(self.config.operator_live_acknowledged),
             "qualification_passed": qualification_passed,
             "reconciliation_passed": reconciliation_passed,
+            "derivatives_contract_passed": bool(self._derivatives_contract_live_eligible),
+            "execution_owner_valid": bool(self._execution_ownership_snapshot().get("valid")),
             # This method re-reads RuntimeControlStore on every invocation.
             "kill_switch_active": bool(self._kill_switch_active()),
         }
@@ -2876,6 +4981,7 @@ class RuntimeOrchestrator:
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
+        ownership_evidence = self._authorize_execution_ownership()
         if mode == ExecutionMode.PAPER:
             # The earlier decision gate can become stale across scoring and
             # lifecycle awaits. No await occurs between this check and fill.
@@ -2884,6 +4990,7 @@ class RuntimeOrchestrator:
                 await self._emit_lifecycle_event(LifecycleState.CANCELLED.value, symbol,
                     {"reason": reason, "signal_id": decision.get("signal_id"), "execution_attempted": False})
                 return False
+            ownership_evidence = self._validate_execution_ownership()
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
         elif mode == ExecutionMode.LIVE_PRECHECK:
             result = {"mode": mode.value, "status": "no_submit_verified", "symbol": symbol}
@@ -2892,11 +4999,13 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode requires real_execution_adapter")
             authorization_ctx = self._build_live_order_execution_context(symbol, market_ctx)
             validate_live_order_authorization(authorization_ctx)
+            ownership_evidence = self._validate_execution_ownership()
             result = await self.real_execution_adapter.submit(decision, market_ctx)
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
         result = self._canonical_execution_result(result, decision, market_ctx, mode=mode)
+        result["execution_ownership"] = dict(ownership_evidence)
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
@@ -2904,6 +5013,8 @@ class RuntimeOrchestrator:
         paper_notional = None
         if mode == ExecutionMode.PAPER and campaign_attached and result_status not in {"rejected", "exchange_reject", "timeout", "error", "missing_ack"}:
             paper_notional = self._persist_pending_paper_position(symbol, order_id, decision, market_ctx, result)
+            if paper_notional is None:
+                return False
         self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         if result_status == "no_submit_verified":
@@ -2926,9 +5037,12 @@ class RuntimeOrchestrator:
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._active_position_sides[symbol] = str(market_ctx.get("side") or "UNKNOWN").upper()
+        # The episode identity must equal the durable pending-position trade_id
+        # so restart/continuation reconstructs the exact same dedupe boundary.
+        self._active_position_episode_ids[symbol] = order_id
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
-    def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float:
+    def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float | None:
         campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         engine = self._resolve_persistence_engine()
         if not campaign_id or not self._burnin_run_id or engine is None:
@@ -2947,9 +5061,23 @@ class RuntimeOrchestrator:
             raise RuntimeError("PAPER_FILL_EVIDENCE_UNAVAILABLE")
         fill = float(actual_fill)
         planned_entry = float(market_ctx.get("entry"))
-        requested_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
+        requested_notional = next(
+            (
+                market_ctx.get(key)
+                for key in ("notional", "notional_usdt", "order_notional")
+                if market_ctx.get(key) is not None
+            ),
+            None,
+        )
         if requested_notional is None:
-            requested_quantity = market_ctx.get("quantity") or market_ctx.get("qty")
+            requested_quantity = next(
+                (
+                    market_ctx.get(key)
+                    for key in ("quantity", "qty")
+                    if market_ctx.get(key) is not None
+                ),
+                None,
+            )
             if requested_quantity is None:
                 requested_notional = self.config.paper_candidate_notional
                 if requested_notional is None:
@@ -2976,6 +5104,16 @@ class RuntimeOrchestrator:
         risk_usd = abs(fill - stop) * quantity
         if not math.isfinite(risk_usd) or risk_usd <= 0:
             raise RuntimeError("PAPER_POSITION_RISK_INVALID")
+        equity_at_entry = market_ctx.get("portfolio_equity", market_ctx.get("equity"))
+        try:
+            equity_at_entry = float(equity_at_entry) if equity_at_entry is not None else None
+        except (TypeError, ValueError):
+            equity_at_entry = None
+        if equity_at_entry is not None and (not math.isfinite(equity_at_entry) or equity_at_entry <= 0):
+            equity_at_entry = None
+        risk_at_stop_pct_equity = (
+            None if equity_at_entry is None else risk_usd / equity_at_entry
+        )
         fill_timestamp = str(result.get("fill_timestamp") or canonical_utc_timestamp())
         cost_semantics = build_execution_cost_semantics(
             entry=planned_entry,
@@ -3004,6 +5142,30 @@ class RuntimeOrchestrator:
             "fill_timestamp": fill_timestamp,
             "fill_state": "PARTIAL" if str(result.get("status") or "").lower() == "partial_fill" else "FILLED",
             "filled_quantity": quantity,
+            "sizing_status": market_ctx.get("sizing_status"),
+            "sizing_reason": market_ctx.get("sizing_reason"),
+            "original_notional": market_ctx.get("original_notional"),
+            "risk_scale": market_ctx.get("risk_scale"),
+            "effective_notional": market_ctx.get("effective_notional"),
+            "original_quantity": market_ctx.get("original_quantity"),
+            "effective_quantity": market_ctx.get("effective_quantity"),
+            "portfolio_allocation_cycle_id": market_ctx.get(
+                "portfolio_allocation_cycle_id"
+            ),
+            "allocation_action": market_ctx.get("allocation_action"),
+            "allocation_scale": market_ctx.get("allocation_scale"),
+            "allocation_requested_notional": market_ctx.get(
+                "allocation_requested_notional"
+            ),
+            "allocated_notional": market_ctx.get("allocated_notional"),
+            "allocated_risk": market_ctx.get("allocated_risk"),
+            "paper_position_sizing_mode": self.config.paper_position_sizing_mode,
+            "risk_based_sizing": market_ctx.get("risk_based_sizing"),
+            "portfolio_equity": equity_at_entry,
+            "selected_notional": notional,
+            "risk_at_stop_usdt": risk_usd,
+            "risk_at_stop_pct_equity": risk_at_stop_pct_equity,
+            "target_policy": market_ctx.get("target_policy"),
             "execution_cost_semantics": cost_semantics.as_dict(),
             "executable_raw_rr": market_ctx.get("executable_raw_rr"),
             "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),
@@ -3015,7 +5177,7 @@ class RuntimeOrchestrator:
             "execution_direction": execution.get("direction"),
             "mtf": mtf,
         }
-        with engine.begin() as conn:
+        def _persist(conn):
             decision_rows = conn.execute(text("""
                 SELECT decision_id FROM order_decisions
                 WHERE signal_id=:signal_id AND decision='ACCEPTED'
@@ -3035,7 +5197,21 @@ class RuntimeOrchestrator:
                 regime=regime.get("regime") or market_ctx.get("regime") or "UNKNOWN",
                 source_provenance=provenance,
             )
-        return notional
+            return notional
+
+        try:
+            return run_sqlite_write_with_retry(
+                engine,
+                _persist,
+                operation_name="paper_pending_position",
+            )
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="PAPER_POSITION_PERSISTENCE_FAILED",
+                detail=f"{exc}; trade_id={trade_id}; symbol={symbol}",
+                metric_field="paper_position_persistence_failures",
+            )
+            return None
 
     @staticmethod
     def _portfolio_risk_dt(value: Any) -> datetime | None:
@@ -3084,6 +5260,9 @@ class RuntimeOrchestrator:
                 "daily_realized_pnl": 0.0 if not missing else None,
                 "rolling_peak_equity": initial if not missing else None,
                 "rolling_drawdown_pct": 0.0 if not missing else None,
+                "max_drawdown_pct": 0.0 if not missing else None,
+                "max_drawdown_peak_equity": initial if not missing else None,
+                "max_drawdown_trough_equity": initial if not missing else None,
                 "consecutive_loss_count": 0 if not missing else None,
                 "symbol_consecutive_loss_count": 0 if not missing else None,
                 "trades_today_symbol": 0 if not missing else None,
@@ -3103,6 +5282,9 @@ class RuntimeOrchestrator:
                 "daily_realized_pnl": None,
                 "rolling_peak_equity": None,
                 "rolling_drawdown_pct": None,
+                "max_drawdown_pct": None,
+                "max_drawdown_peak_equity": None,
+                "max_drawdown_trough_equity": None,
                 "consecutive_loss_count": None,
                 "symbol_consecutive_loss_count": None,
                 "trades_today_symbol": None,
@@ -3147,6 +5329,9 @@ class RuntimeOrchestrator:
                 "daily_realized_pnl": None,
                 "rolling_peak_equity": None,
                 "rolling_drawdown_pct": None,
+                "max_drawdown_pct": None,
+                "max_drawdown_peak_equity": None,
+                "max_drawdown_trough_equity": None,
                 "consecutive_loss_count": None,
                 "symbol_consecutive_loss_count": None,
                 "trades_today_symbol": None,
@@ -3215,9 +5400,15 @@ class RuntimeOrchestrator:
         if initial is None:
             current_equity = None
             peak_equity = None
+            max_drawdown_pct = None
+            max_drawdown_peak_equity = None
+            max_drawdown_trough_equity = None
         else:
             current_equity = initial
             peak_equity = initial
+            max_drawdown_pct = 0.0
+            max_drawdown_peak_equity = initial
+            max_drawdown_trough_equity = initial
 
         daily_realized_pnl = 0.0
         consecutive_losses = 0
@@ -3259,6 +5450,18 @@ class RuntimeOrchestrator:
             if current_equity is not None and peak_equity is not None:
                 current_equity += net_pnl
                 peak_equity = max(peak_equity, current_equity)
+                current_drawdown = (
+                    max(0.0, (peak_equity - current_equity) / peak_equity)
+                    if peak_equity > 0 else None
+                )
+                if (
+                    current_drawdown is not None
+                    and max_drawdown_pct is not None
+                    and current_drawdown > max_drawdown_pct
+                ):
+                    max_drawdown_pct = current_drawdown
+                    max_drawdown_peak_equity = peak_equity
+                    max_drawdown_trough_equity = current_equity
             if closed_dt.date() == today:
                 daily_realized_pnl += net_pnl
 
@@ -3293,6 +5496,9 @@ class RuntimeOrchestrator:
             "daily_realized_pnl": daily_realized_pnl if complete else None,
             "rolling_peak_equity": peak_equity if complete else None,
             "rolling_drawdown_pct": rolling_drawdown_pct if complete else None,
+            "max_drawdown_pct": max_drawdown_pct if complete else None,
+            "max_drawdown_peak_equity": max_drawdown_peak_equity if complete else None,
+            "max_drawdown_trough_equity": max_drawdown_trough_equity if complete else None,
             "consecutive_loss_count": consecutive_losses if complete else None,
             "symbol_consecutive_loss_count": (
                 symbol_consecutive_losses if complete else None
@@ -3312,18 +5518,38 @@ class RuntimeOrchestrator:
         if engine is None:
             return
         with engine.connect() as conn:
-            open_symbols = {str(row[0]).upper() for row in conn.execute(text("SELECT symbol FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": self._campaign_id}).fetchall()}
+            open_rows = conn.execute(text(
+                "SELECT symbol,side,trade_id,signal_id,COALESCE(remaining_notional,notional) AS notional "
+                "FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"
+            ), {"cid": self._campaign_id}).mappings().all()
+        open_symbols = set()
+        for row in open_rows:
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            open_symbols.add(symbol)
+            self._active_positions[symbol] = float(row.get("notional") or 0.0)
+            self._active_position_sides[symbol] = str(row.get("side") or "UNKNOWN").upper()
+            episode_id = str(row.get("trade_id") or row.get("signal_id") or "").strip()
+            if episode_id:
+                self._active_position_episode_ids[symbol] = episode_id
         for symbol in set(self._active_positions) - open_symbols:
             self._active_positions.pop(symbol, None)
             self._active_position_sides.pop(symbol, None)
+            self._active_position_episode_ids.pop(symbol, None)
             self._pending_orders.pop(symbol, None)
             self._symbol_cooldown_until.pop(symbol, None)
             self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_CLOSED.value
 
-    async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> None:
+    async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> bool:
         engine = self._resolve_persistence_engine()
         if engine is None:
-            return
+            self._mark_sqlite_persistence_recovery_required(
+                reason="LIVE_PRECHECK_EVIDENCE_PERSISTENCE_FAILED",
+                detail="LIVE_PRECHECK persistence engine unavailable",
+                metric_field="live_precheck_persistence_failures",
+            )
+            return False
         from alphaforge.persistence import save_order_decision
         paper_signal = {**dict(signal_payload), "mode": ExecutionMode.PAPER.value}
         precheck_signal = {**dict(signal_payload), "mode": ExecutionMode.LIVE_PRECHECK.value}
@@ -3333,9 +5559,11 @@ class RuntimeOrchestrator:
         mismatch = [field for field in fields if paper_eval.get(field) != live_eval.get(field)]
         execution_ctx = dict(market_ctx.get("execution_ctx") or build_execution_context(market_ctx))
         input_hash = self._snapshot_hash({"signal": paper_signal, "market": {**dict(market_ctx), "mode": ExecutionMode.PAPER.value}, "regime": dict(regime_ctx), "stats": dict(stats_ctx)})
-        with sessionmaker(bind=engine, expire_on_commit=False, future=True)() as session:
-            save_order_decision(
-                session,
+        def _persist(conn):
+            persisted = save_order_decision(
+                conn,
+                _commit=False,
+                _raise_on_error=True,
                 decision_id=f"live_precheck:{signal_payload.get('signal_id')}",
                 signal_id=signal_payload.get("signal_id"),
                 symbol=symbol,
@@ -3362,7 +5590,23 @@ class RuntimeOrchestrator:
                 parity_result="PASS" if not mismatch else "FAIL",
                 order_payload={"paper": paper_eval, "live_precheck": live_eval, "mismatch_fields": mismatch, "no_submit_verified": True, "input_snapshot_hash": input_hash},
             )
-            session.commit()
+            if not persisted:
+                raise RuntimeError("LIVE_PRECHECK_DECISION_EVIDENCE_WRITE_FAILED")
+            return True
+
+        try:
+            return bool(run_sqlite_write_with_retry(
+                engine,
+                _persist,
+                operation_name="live_precheck_decision_evidence",
+            ))
+        except SQLiteBusyExhausted as exc:
+            self._mark_sqlite_persistence_recovery_required(
+                reason="LIVE_PRECHECK_EVIDENCE_PERSISTENCE_FAILED",
+                detail=f"{exc}; signal_id={signal_payload.get('signal_id')}",
+                metric_field="live_precheck_persistence_failures",
+            )
+            return False
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         execution_ctx = dict(market_ctx.get("execution_ctx") or {})
@@ -3410,15 +5654,63 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         canonical_persisted_count: int | None = None
         if engine is not None:
-            with engine.begin() as conn:
+            def persist_atomic(conn: Any) -> int | None:
                 if not record_rejected_signal_review(conn, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload):
                     raise RuntimeError("rejected_signal_review_persistence_failed")
                 self._persist_burnin_decision(
                     {**payload, "decision": "REJECTED"},
                     lifecycle_state=LifecycleState.SIGNAL_REJECTED.value, conn=conn)
                 self._persist_pending_reject(payload, conn=conn)
-                if self._burnin_run_id:
-                    canonical_persisted_count = self._canonical_persisted_reject_count(conn)
+                if self.on_reject_persist_atomic is not None:
+                    persisted = self.on_reject_persist_atomic(conn, payload)
+                    if persisted is None or persisted is False:
+                        raise RuntimeError("rejected_decision_artifact_persistence_failed")
+                return self._canonical_persisted_reject_count(conn) if self._burnin_run_id else None
+
+            with sqlite_writer_guard(engine):
+                for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
+                    conn = engine.connect()
+                    transaction = None
+                    old_timeout = None
+                    try:
+                        if engine.dialect.name == "sqlite":
+                            old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                            conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                            conn.commit()
+                        transaction = conn.begin()
+                        if engine.dialect.name == "sqlite":
+                            conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        canonical_persisted_count = persist_atomic(conn)
+                        transaction.commit()
+                        break
+                    except OperationalError as exc:
+                        if transaction is not None:
+                            transaction.rollback()
+                        if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+                            raise
+                        conn.invalidate()
+                        if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
+                            self.metrics.reject_persistence_failures += 1
+                            self.metrics.reject_persistence_degraded = True
+                            self._recovery_required = True
+                            self._runtime_status = "RECOVERY_REQUIRED"
+                            self._fail_closed_reason = self._fail_closed_reason or "REJECT_PERSISTENCE_FAILED"
+                            self._last_error = (
+                                "SQLITE_BUSY reject persistence after "
+                                f"{attempt + 1} attempts; reject_decision_id={payload['reject_decision_id']}"
+                            )
+                            logger.error("reject_persistence_degraded reason=%s", self._last_error)
+                            return
+                        time.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
+                    except BaseException:
+                        if transaction is not None:
+                            transaction.rollback()
+                        raise
+                    finally:
+                        if old_timeout is not None and not conn.invalidated:
+                            conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                            conn.commit()
+                        conn.close()
         else:
             self._persist_burnin_decision(
                 {**payload, "decision": "REJECTED"},
@@ -3430,10 +5722,21 @@ class RuntimeOrchestrator:
                 if canonical_persisted_count is not None
                 else len(self._persisted_reject_decision_ids)
             )
-        if self.on_reject_persist is not None:
+            if self.metrics.reject_persistence_degraded:
+                self.metrics.reject_persistence_degraded = False
+                if self._fail_closed_reason == "REJECT_PERSISTENCE_FAILED":
+                    self._fail_closed_reason = None
+                    self._recovery_required = False
+                    self._runtime_status = "OPERATING"
+                    self._last_error = None
+        if self.on_reject_persist is not None and (
+                engine is None or self.on_reject_persist_atomic is None):
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+            if engine is None:
+                self._persisted_reject_decision_ids.add(str(payload["reject_decision_id"]))
+                self.metrics.rejects_persisted = len(self._persisted_reject_decision_ids)
         self._record_state_direction_shadow(payload, actual_decision="REJECTED")
         self._schedule_agent_shadow(payload)
 
@@ -3529,7 +5832,17 @@ class RuntimeOrchestrator:
             payload.get("primary_reject_reason") or payload.get("reason") or payload.get("reject_reason")
         )
         if primary and primary != "UNKNOWN":
-            add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
+            expectancy_after_costs = number(payload.get("expectancy_after_costs"))
+            if primary == "NEGATIVE_EXPECTANCY_AFTER_COSTS" and expectancy_after_costs is not None:
+                add(
+                    primary,
+                    expectancy_after_costs,
+                    0.0,
+                    "<=",
+                    str(payload.get("expectancy_cost_basis") or "AIBRAIN_EXPECTANCY"),
+                )
+            else:
+                add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
 
         market_time_evidence = payload.get("market_time_evidence")
         if isinstance(market_time_evidence, Mapping):
@@ -3560,14 +5873,42 @@ class RuntimeOrchestrator:
         if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
             add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
 
-        entry = number(payload.get("entry", payload.get("entry_price")))
-        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
-        if entry is not None and entry > 0 and stop is not None:
-            stop_distance_pct = abs(entry - stop) / entry * 100.0
-            if stop_distance_pct < float(self.config.min_sl_pct):
-                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
-            if stop_distance_pct > float(self.config.max_sl_pct):
-                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+        stop_metrics = build_stop_risk_metrics(
+            planned_entry=payload.get("entry", payload.get("entry_price")),
+            expected_fill=payload.get("expected_fill"),
+            stop=payload.get("sl", payload.get("stop_loss", payload.get("stop"))),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
+        stop_policy = evaluate_stop_risk_policy(
+            stop_metrics,
+            score=payload.get("score"),
+            effective_rr=payload.get("effective_rr"),
+            config=self._canonical_filter_config(),
+            bypass_wide_reject=(
+                "STOP_TOO_WIDE" in {
+                    str(value).upper()
+                    for value in (payload.get("bypassed_reject_reasons") or [])
+                }
+            ),
+        )
+        stop_reason = str(stop_policy.get("reject_reason") or "").upper()
+        stop_observed = stop_policy.get("executable_stop_distance_pct")
+        if stop_reason == "STOP_TOO_TIGHT":
+            add(
+                "STOP_TOO_TIGHT",
+                stop_observed,
+                float(self.config.min_sl_pct),
+                "<",
+                "EXECUTABLE_STOP_RISK",
+            )
+        elif stop_reason == "STOP_TOO_WIDE":
+            add(
+                "STOP_TOO_WIDE",
+                stop_observed,
+                float(self.config.max_sl_pct),
+                ">",
+                "EXECUTABLE_STOP_RISK",
+            )
 
         spread = number(payload.get("spread_pct", execution.get("spread_pct")))
         if spread is not None and spread > float(self.config.max_spread_pct):
@@ -3616,47 +5957,167 @@ class RuntimeOrchestrator:
                                  "LEGACY_CANDIDATE")
         all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         if guided_without_candidate:
+            guided_geometry = (
+                generation.get("geometry_evidence")
+                if isinstance(generation.get("geometry_evidence"), Mapping)
+                else {}
+            )
+            alignment = (
+                mtf.get("alignment")
+                if isinstance(mtf.get("alignment"), Mapping)
+                else {}
+            )
+
+            # A missing guided candidate means scanner/shadow candidate economics
+            # are non-authoritative. Preserve them for diagnostics, but rebuild
+            # canonical reject attribution only from guided decision-time evidence.
             shadow_geometry = {key: result.get(key) for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
-                "take_profit", "rr", "raw_rr", "risk_reward", "effective_rr", "setup_type",
-                "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
+                "take_profit", "rr", "raw_rr", "risk_reward", "candidate_rr",
+                "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
+                "effective_rr", "execution_cost_semantics", "score", "score_components",
+                "expectancy", "expectancy_after_costs", "expectancy_bucket", "confidence",
+                "setup_type", "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
             )}
-            result["legacy_shadow_geometry"] = {
+            shadow_evidence = {
                 **shadow_geometry,
                 "attributable": False,
                 "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+                "primary_reject_reason": primary_reject_reason,
+                "reject_reason": primary_reject_reason,
+                "reject_reasons": list(reject_reasons),
                 "all_failed_gates": list(all_failed_gates),
                 "failed_gate_evidence": list(failed_gate_evidence),
             }
-            # The scanner-shadow gates are diagnostic only. Do not leak them
-            # back into canonical multi-gate evidence for a missing guided candidate.
+
+            # Packaged upstream audit results were computed against scanner/shadow
+            # candidate geometry. Once guided candidate authority is absent, only
+            # a fresh audit over the remaining canonical fields may contribute.
+            result.pop("execution_safety", None)
+            result.pop("all_failed_gates", None)
+            result.pop("failed_gate_evidence", None)
             all_failed_gates = []
             failed_gate_evidence = []
-            for key in (
-                "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
-                "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
-                "risk_reward", "effective_rr", "setup_type", "setup_reason", "geometry_source",
-            ):
-                result[key] = None
-            result["geometry_status"] = "UNAVAILABLE"
-            result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
-            result["reject_quality_attributable"] = False
-            result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
-            if primary_reject_reason == "LOW_EFFECTIVE_RR":
-                # LOW_EFFECTIVE_RR requires attributable canonical guided geometry.
-                # Preserve the legacy scanner diagnosis only as shadow evidence.
-                result["legacy_shadow_geometry"]["reject_reason"] = primary_reject_reason
-                result["source_primary_reject_reason"] = primary_reject_reason
-                primary_reject_reason = "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
-                reject_reasons = [
-                    primary_reject_reason,
-                    *[reason for reason in reject_reasons if reason != "LOW_EFFECTIVE_RR"],
-                ]
-                reject_reasons = list(dict.fromkeys(reject_reasons))
-                result["reason"] = primary_reject_reason
-                if result.get("reject_reason") is not None:
-                    result["reject_reason"] = primary_reject_reason
-                result["authoritative_reject_reason"] = primary_reject_reason
+
+            raw_alignment_reasons = alignment.get("reasons")
+            alignment_reasons = (
+                list(raw_alignment_reasons)
+                if isinstance(raw_alignment_reasons, (list, tuple))
+                else [raw_alignment_reasons]
+                if raw_alignment_reasons
+                else []
+            )
+            source_guided_reason = (
+                primary_reject_reason
+                if (
+                    str(primary_reject_reason or "").startswith("MTF_")
+                    or primary_reject_reason in {
+                        "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE",
+                        "KLINE_INSUFFICIENT_ROWS",
+                        "NO_STRUCTURAL_GEOMETRY",
+                        "INSUFFICIENT_STRUCTURAL_REWARD",
+                        "ZERO_RISK_GEOMETRY",
+                        "REGIME_SIDE_INVALID",
+                        "KLINE_MALFORMED_PAYLOAD",
+                        "OHLC_INVALID",
+                        "INVALID_TARGET",
+                    }
+                )
+                else None
+            )
+            guided_reason_candidates = [
+                generation.get("reason"),
+                guided_geometry.get("reason"),
+                *alignment_reasons,
+                source_guided_reason,
+            ]
+            guided_reasons = []
+            for raw_reason in guided_reason_candidates:
+                reason = canonical_reject_reason(raw_reason)
+                if reason in {"UNKNOWN", "MTF_GUIDED_GEOMETRY_UNAVAILABLE"}:
+                    continue
+                if reason not in guided_reasons:
+                    guided_reasons.append(reason)
+            if not guided_reasons:
+                guided_reasons = ["MTF_GUIDED_GEOMETRY_UNAVAILABLE"]
+
+            source_primary_reject_reason = primary_reject_reason
+            primary_reject_reason = guided_reasons[0]
+            reject_reasons = list(guided_reasons)
+            if source_primary_reject_reason != primary_reject_reason:
+                result["source_primary_reject_reason"] = source_primary_reject_reason
+            result["reason"] = primary_reject_reason
+            if result.get("reject_reason") is not None:
+                result["reject_reason"] = primary_reject_reason
+            result["authoritative_reject_reason"] = primary_reject_reason
+
+            guided_geometry_reason = canonical_reject_reason(
+                guided_geometry.get("reason")
+            )
+            guided_geometry_complete = (
+                str(guided_geometry.get("evidence_status") or "").upper() == "COMPLETE"
+                and guided_geometry_reason == primary_reject_reason
+                and primary_reject_reason != "UNKNOWN"
+            )
+            if guided_geometry_complete:
+                # Persist the exact guided decision-time geometry that produced
+                # the reject. Scanner geometry and scanner economics remain only
+                # under legacy_shadow_geometry.
+                result.update({
+                    "side": guided_geometry.get("side"),
+                    "entry": guided_geometry.get("execution_entry"),
+                    "sl": guided_geometry.get("structural_stop"),
+                    "tp": guided_geometry.get("structural_target"),
+                    "setup_type": guided_geometry.get("setup_type"),
+                    "geometry_status": "REJECTED",
+                    "geometry_reason": primary_reject_reason,
+                    "geometry_source": guided_geometry.get("geometry_source")
+                        or "MTF_SETUP_STRUCTURE",
+                    "guided_reject_geometry": dict(guided_geometry),
+                    "reject_quality_attributable": bool(
+                        guided_geometry.get("forward_geometry_valid")
+                    ),
+                    "non_attributable_reason": (
+                        None
+                        if guided_geometry.get("forward_geometry_valid")
+                        else "GUIDED_REJECT_FORWARD_GEOMETRY_INVALID"
+                    ),
+                    "rr": None,
+                    "raw_rr": None,
+                    "risk_reward": None,
+                    "candidate_rr": None,
+                    "expected_fill": None,
+                    "executable_raw_rr": None,
+                    "remaining_execution_penalty": None,
+                    "effective_rr": None,
+                    "execution_cost_semantics": None,
+                    "score": None,
+                    "score_components": None,
+                    "expectancy": None,
+                    "expectancy_after_costs": None,
+                    "expectancy_bucket": None,
+                    "confidence": None,
+                })
+                forward_label_subject = "GUIDED_GEOMETRY_REJECT"
+            else:
+                # No reproducible guided geometry exists. Retain scanner/shadow
+                # diagnostics only as explicitly non-authoritative evidence.
+                result["legacy_shadow_geometry"] = shadow_evidence
+                # Scanner-shadow gates were quarantined above; only canonical
+                # guided/market evidence survives into the fresh audit below.
+                for key in (
+                    "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
+                    "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
+                    "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
+                    "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
+                    "score", "score_components", "expectancy", "expectancy_after_costs",
+                    "expectancy_bucket", "confidence", "setup_type", "setup_reason", "geometry_source",
+                ):
+                    result[key] = None
+                result["geometry_status"] = "UNAVAILABLE"
+                result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
+                result["reject_quality_attributable"] = False
+                result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
         all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
@@ -3686,14 +6147,14 @@ class RuntimeOrchestrator:
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
         })
-        try:
-            entry_value = float(result.get("entry"))
-            stop_value = float(result.get("sl"))
-            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
-        except (TypeError, ValueError):
-            stop_distance_pct = None
+        stop_metrics = build_stop_risk_metrics(
+            planned_entry=result.get("entry", result.get("entry_price")),
+            expected_fill=result.get("expected_fill"),
+            stop=result.get("sl", result.get("stop_loss", result.get("stop"))),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
         result.update({
-            "stop_distance_pct": stop_distance_pct,
+            **stop_metrics,
             "min_signal_score": float(self.config.min_signal_score),
             "min_raw_rr": float(self.config.min_rr),
             "min_effective_rr": float(self.config.min_effective_rr),
@@ -3735,6 +6196,17 @@ class RuntimeOrchestrator:
         if engine is None or campaign_id is None:
             return None
         execution_ctx = dict(payload.get("execution_ctx") or {})
+        mtf_payload = payload.get("mtf") if isinstance(payload.get("mtf"), Mapping) else {}
+        generation_payload = (
+            mtf_payload.get("generation")
+            if isinstance(mtf_payload.get("generation"), Mapping)
+            else {}
+        )
+        guided_geometry_evidence = (
+            generation_payload.get("geometry_evidence")
+            if isinstance(generation_payload.get("geometry_evidence"), Mapping)
+            else {}
+        )
         costs = self._phase7_costs_from_execution_ctx(execution_ctx)
         signal_id = str(payload.get("signal_id") or "")
         shadow_geometry = (payload.get("legacy_shadow_geometry")
@@ -3832,10 +6304,27 @@ class RuntimeOrchestrator:
                                        "entry_slippage_embedded_in_fill": bool(execution_aligned),
                                        "embedded_entry_slippage_cost": embedded_entry_slippage_cost,
                                        "fill_shift_initial_risk_ratio": fill_shift_initial_risk_ratio,
+                                       "planned_stop_distance_pct": payload.get("planned_stop_distance_pct"),
+                                       "executable_stop_distance_pct": payload.get("executable_stop_distance_pct"),
                                        "stop_distance_pct": payload.get("stop_distance_pct"),
+                                       "stop_distance_basis": payload.get("stop_distance_basis"),
+                                       "stop_risk_evidence_status": payload.get("stop_risk_evidence_status"),
+                                       "stop_too_wide_softened": payload.get("stop_too_wide_softened"),
+                                       "risk_scale": payload.get("risk_scale"),
                                        "all_failed_gates": payload.get("all_failed_gates"),
                                        "failed_gate_evidence": payload.get("failed_gate_evidence"),
                                        "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),
+                                       "active_position_episode_id": payload.get("active_position_episode_id"),
+                                       "guided_geometry_evidence": dict(guided_geometry_evidence),
+                                       "decision_execution_entry": guided_geometry_evidence.get("execution_entry"),
+                                       "entry_zone_low": guided_geometry_evidence.get("entry_zone_low"),
+                                       "entry_zone_high": guided_geometry_evidence.get("entry_zone_high"),
+                                       "structural_stop": guided_geometry_evidence.get("structural_stop"),
+                                       "structural_target": guided_geometry_evidence.get("structural_target"),
+                                       "setup_phase": guided_geometry_evidence.get("setup_phase"),
+                                       "setup_observed_direction": guided_geometry_evidence.get("setup_observed_direction"),
+                                       "setup_recent_direction": guided_geometry_evidence.get("setup_recent_direction"),
+                                       "execution_direction": guided_geometry_evidence.get("execution_direction"),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,
@@ -4169,6 +6658,67 @@ class RuntimeOrchestrator:
             return True
         return False
 
+    def _duplicate_position_reject_key(
+        self, setup_identity: str, active_position_episode_id: str
+    ) -> str:
+        scope = self._reject_campaign_id() or self.runtime_instance_id
+        return "duplicate-position:" + canonical_hash({
+            "scope": scope,
+            "setup_identity": setup_identity,
+            "active_position_episode_id": active_position_episode_id,
+        })[:24]
+
+    def _duplicate_position_reject_recorded(
+        self, setup_identity: str, active_position_episode_id: str
+    ) -> bool:
+        """Return whether this setup already produced a reject in this position episode.
+
+        This helper controls evidence identity only. The active-position guard
+        itself remains fail-closed and continues to reject every duplicate order
+        attempt.
+        """
+        if not setup_identity or not active_position_episode_id:
+            return False
+        key = self._duplicate_position_reject_key(
+            setup_identity, active_position_episode_id
+        )
+        if key in self._canonical_duplicate_position_keys:
+            return True
+        engine = self._resolve_persistence_engine()
+        campaign_id = self._reject_campaign_id()
+        if engine is None or campaign_id is None:
+            return False
+        try:
+            with engine.connect() as conn:
+                exists = conn.execute(text(f"""SELECT 1
+                    FROM burnin_observations o
+                    WHERE o.burnin_run_id IN (
+                        SELECT burnin_run_id FROM burnin_campaign_runs
+                        WHERE campaign_id=:campaign_id
+                    )
+                      AND UPPER(COALESCE(o.decision,''))='REJECTED'
+                      AND UPPER(COALESCE(
+                          json_extract(o.metrics_json,'$.primary_reject_reason'),''
+                      ))='DUPLICATE_POSITION'
+                      AND json_extract(o.metrics_json,'$.setup_identity')=:setup_identity
+                      AND json_extract(
+                          o.metrics_json,'$.active_position_episode_id'
+                      )=:episode_id
+                      AND {canonical_decision_sql('o')}
+                    LIMIT 1"""), {
+                        "campaign_id": campaign_id,
+                        "setup_identity": setup_identity,
+                        "episode_id": active_position_episode_id,
+                    }).first()
+        except Exception:
+            # Persistence lookup failure never weakens the position guard.
+            # At worst it permits another reject artifact for later audit.
+            return False
+        if exists:
+            self._canonical_duplicate_position_keys.add(key)
+            return True
+        return False
+
     def _setup_decision_key(self, setup_identity: str) -> str:
         scope = self._reject_campaign_id() or self.runtime_instance_id
         return "setup:" + canonical_hash({"scope": scope, "setup_identity": setup_identity})[:24]
@@ -4188,12 +6738,13 @@ class RuntimeOrchestrator:
                     "source_exchange": payload.get("source_exchange"),
                     "timeframe": payload.get("timeframe"), "geometry_reason": reason}
         observation_id = "geometry_provider_diagnostic_" + canonical_hash(identity)[:20]
-        with engine.begin() as conn:
+
+        def _persist(conn):
             exists = conn.execute(text(
                 "SELECT 1 FROM burnin_observations WHERE observation_id=:oid"
             ), {"oid": observation_id}).first()
             if exists:
-                return
+                return False
             persist_burnin_observation(
                 conn, observation_id=observation_id, burnin_run_id=self._burnin_run_id,
                 release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id),
@@ -4207,7 +6758,25 @@ class RuntimeOrchestrator:
                 missing_fields=("execution_candle_open_ts",),
                 observation_kind=DIAGNOSTIC_OBSERVATION_KIND,
             )
-        self.metrics.burnin_observations += 1
+            return True
+
+        try:
+            inserted = run_sqlite_write_with_retry(
+                engine,
+                _persist,
+                operation_name="geometry_diagnostic",
+            )
+        except SQLiteBusyExhausted as exc:
+            self.metrics.geometry_diagnostic_persistence_failures += 1
+            self._burnin_evidence_incomplete = True
+            logger.warning(
+                "geometry_diagnostic_persistence_degraded reason=%s observation_id=%s",
+                exc,
+                observation_id,
+            )
+            return
+        if inserted:
+            self.metrics.burnin_observations += 1
 
     def _evaluate_market_timestamp(
         self, market_ts_raw: Any, *, now: float
@@ -4535,7 +7104,9 @@ class RuntimeOrchestrator:
                     snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE", "blocking_reason": "EXCHANGE_RECONCILIATION_UNAVAILABLE"}
             else:
                 try:
-                    snapshot_source = dict(provider.snapshot())
+                    snapshot_source = await self._reconciliation_reader.read(provider)
+                    if provider is not (self.live_reconciliation_provider or self.exchange_snapshot_provider):
+                        raise RuntimeError("reconciliation_provider_changed_during_read")
                 except Exception as exc:
                     if self.config.execution_mode == ExecutionMode.LIVE:
                         raise
@@ -4567,6 +7138,18 @@ class RuntimeOrchestrator:
                     snapshot_source["recovery_transition"] = "CLEAN_RECONCILIATION_COMMITTED"
         else:
             snapshot_source = {"orders": [], "positions": [], "fills": []}
+        derivatives_contract = (
+            dict(snapshot_source.get("derivatives_contract") or {})
+            if isinstance(snapshot_source.get("derivatives_contract"), Mapping)
+            else {}
+        )
+        self._derivatives_contract_evidence = derivatives_contract
+        self._derivatives_contract_status = str(
+            derivatives_contract.get("account_model_status") or "UNAVAILABLE"
+        ).upper()
+        self._derivatives_contract_live_eligible = bool(
+            derivatives_contract.get("live_eligible", False)
+        )
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
         findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
             intended_orders=list(self._pending_orders.values()) if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} else [],
@@ -4668,9 +7251,24 @@ class RuntimeOrchestrator:
         for task in tasks:
             task.cancel()
         for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                # Drain all owners before the canonical FAILED snapshot is saved.
+                if self._fatal_task_exception is None:
+                    self._fatal_task_exception = exc
+                    self._fatal_task_name = task.get_name()
         self.metrics.agent_shadow_worker_count = 0
+        unaccepted_read = self._reconciliation_reader.has_unaccepted_read
+        quiescent = await self._reconciliation_reader.close(self.config.reconciliation_timeout_sec)
+        if unaccepted_read or not quiescent:
+            self._recovery_required = True
+            self._unknown_exchange_state = True
+            self._exchange_read_only_status = "UNAVAILABLE"
+            self._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
+            self._fail_closed_reason = "RECONCILIATION_READ_UNACCEPTED_AT_SHUTDOWN"
 
     def _register_signals(self) -> None:
         loop = asyncio.get_running_loop()
@@ -4679,12 +7277,15 @@ class RuntimeOrchestrator:
                 loop.add_signal_handler(sig, self.shutdown)
 
     @staticmethod
-    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *, signal_id: str | None = None) -> dict[str, Any]:
+    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *,
+                      signal_id: str | None = None,
+                      decision_filters: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return build_signal_payload(
             selection.symbol, market_ctx,
             signal_id=signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
             default_mode="PAPER",
             regime_fallback=getattr(selection, "regime_hint", None),
+            decision_filters=decision_filters,
         )
 
 
@@ -4699,6 +7300,22 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
 def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeConfig:
     """Freeze typed application config into the runtime startup snapshot."""
     return RuntimeConfig(
+        storage_enabled=cfg.runtime.storage_enabled,
+        storage_high_bytes=cfg.runtime.storage_high_bytes,
+        storage_low_bytes=cfg.runtime.storage_low_bytes,
+        storage_min_age_sec=cfg.runtime.storage_min_age_sec,
+        storage_check_interval_sec=cfg.runtime.storage_check_interval_sec,
+        storage_batch_rows=cfg.runtime.storage_batch_rows,
+        storage_batch_seconds=cfg.runtime.storage_batch_seconds,
+        storage_free_reserve_bytes=cfg.runtime.storage_free_reserve_bytes,
+        storage_growth_budget_bytes_per_sec=cfg.runtime.storage_growth_budget_bytes_per_sec,
+        storage_archive_dir=cfg.runtime.storage_archive_dir,
+        storage_stats_only_enabled=cfg.runtime.storage_stats_only_enabled,
+        storage_stats_only_start_bytes=cfg.runtime.storage_stats_only_start_bytes,
+        storage_stats_only_target_bytes=cfg.runtime.storage_stats_only_target_bytes,
+        storage_stats_only_min_age_sec=cfg.runtime.storage_stats_only_min_age_sec,
+        storage_stats_only_recent_cycles=cfg.runtime.storage_stats_only_recent_cycles,
+
         execution_mode=mode,
         min_signal_score=cfg.runtime.min_signal_score,
         scan_interval_sec=cfg.runtime.scan_interval_sec,
@@ -4706,11 +7323,19 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars,
         reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec,
         max_symbols_per_scan=cfg.runtime.max_symbols_per_scan,
+        universe_min_market_cap_usd=cfg.runtime.universe_min_market_cap_usd,
+        universe_max_market_cap_usd=cfg.runtime.universe_max_market_cap_usd,
+        universe_min_volume_24h_usd=cfg.runtime.universe_min_volume_24h_usd,
+        universe_candidate_pool_top_n_volume=cfg.runtime.universe_candidate_pool_top_n_volume,
+        universe_excluded_symbols=cfg.runtime.universe_excluded_symbols,
+        universe_max_evidence_age_sec=cfg.runtime.universe_max_evidence_age_sec,
         max_reject_log_entries=cfg.runtime.max_reject_log_entries,
         max_concurrent_positions=cfg.runtime.max_concurrent_positions,
         symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec,
         max_notional_exposure=cfg.runtime.max_notional_exposure,
         max_symbol_notional=cfg.runtime.max_symbol_notional,
+        max_correlation_group_exposure=cfg.runtime.max_correlation_group_exposure,
+        max_correlated_positions=cfg.runtime.max_correlated_positions,
         max_daily_loss_pct=cfg.runtime.max_daily_loss_pct,
         stale_market_data_sec=cfg.runtime.stale_market_data_sec,
         max_clock_skew_ms=cfg.runtime.max_clock_skew_ms,
@@ -4725,12 +7350,19 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         max_latency_ms=cfg.runtime.max_latency_ms,
         paper_fee_bps=cfg.runtime.paper_fee_bps,
         paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms,
+        paper_candidate_notional=cfg.runtime.paper_candidate_notional,
+        paper_position_sizing_mode=cfg.runtime.paper_position_sizing_mode,
+        risk_pct_per_trade=cfg.runtime.risk_pct_per_trade,
+        paper_max_leverage=cfg.runtime.paper_max_leverage,
+        paper_max_liquidity_participation_pct=cfg.runtime.paper_max_liquidity_participation_pct,
+        paper_min_notional=cfg.runtime.paper_min_notional,
         market_data_base_url=cfg.exchange.binance.market_data_base_url,
         regime_timeframe=cfg.runtime.regime_timeframe,
         setup_timeframe=cfg.runtime.setup_timeframe,
         execution_timeframe=cfg.runtime.execution_timeframe,
         mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled,
         mtf_execution_confirmation_mode=cfg.runtime.mtf_execution_confirmation_mode,
+        paper_position_management_shadow_enabled=cfg.runtime.paper_position_management_shadow_enabled,
         regime_direction_threshold=cfg.runtime.regime_direction_threshold,
         setup_direction_threshold=cfg.runtime.setup_direction_threshold,
         execution_direction_threshold=cfg.runtime.execution_direction_threshold,
@@ -4762,6 +7394,10 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         enable_canary_mode=cfg.runtime.enable_canary_mode,
         operator_live_acknowledged=cfg.runtime.operator_live_acknowledged,
         allow_live_orders=cfg.runtime.allow_live_orders,
+        execution_account_scope=cfg.runtime.execution_account_scope,
+        paper_account_model=cfg.runtime.paper_account_model,
+        execution_lease_ttl_sec=cfg.runtime.execution_lease_ttl_sec,
+        execution_lease_min_validity_sec=cfg.runtime.execution_lease_min_validity_sec,
         live_trading_enabled=cfg.runtime.live_enabled,
         reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec,
         reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
@@ -4773,7 +7409,7 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
     )
 
 
-def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session_factory: Any | None = None) -> RuntimeOrchestrator:
+def _build_runtime_from_env(*, persistence_engine: Engine | None = None, execution_ownership_engine: Engine | None = None, session_factory: Any | None = None) -> RuntimeOrchestrator:
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
     persistence_enabled = cfg.persistence.enabled
@@ -4782,6 +7418,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         else cfg.persistence.database_url
     )
     engine = persistence_engine or init_db(resolved_database_url)
+    ownership_engine = execution_ownership_engine or engine
     SessionLocal = session_factory or sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
@@ -4820,7 +7457,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
             return candidates
         return await enrich_selected_market_geometry(candidates, cfg)
 
-    def _persist_lifecycle(payload: dict[str, Any]) -> None:
+    async def _persist_lifecycle(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
@@ -4830,37 +7467,89 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
             and str(details.get("decision") or "").upper() == "REJECTED"
         ):
             return
-        with SessionLocal() as session:
-            if not save_trade_lifecycle_event(
-                session,
-                signal_id=payload.get("signal_id"),
-                symbol=payload.get("symbol"),
-                mode=payload.get("mode"),
-                lifecycle_state=payload.get("lifecycle_state"),
-                previous_lifecycle_state=payload.get("previous_lifecycle_state"),
-                event_ts=payload.get("timestamp"),
-                event_type=payload.get("lifecycle_event_type"),
-                payload=details,
-                failure_reason=details.get("failure_reason"),
-                incident_payload=details.get("incident_payload"),
-                reject_reason=details.get("reject_reason") or details.get("reason"),
-                score=details.get("score"),
-                rr=details.get("rr"),
-                effective_rr=details.get("effective_rr"),
-                expectancy_bucket=details.get("expectancy_bucket"),
-                execution_ctx=details.get("execution_ctx", {}),
-                execution_ctx_missing=details.get("execution_ctx_missing"),
-            ):
-                raise RuntimeError("trade_lifecycle_event_persistence_failed")
-            session.commit()
 
-    def _persist_reject(payload: dict[str, Any]) -> None:
+        lifecycle_kwargs = {
+            "signal_id": payload.get("signal_id"),
+            "symbol": payload.get("symbol"),
+            "mode": payload.get("mode"),
+            "lifecycle_state": payload.get("lifecycle_state"),
+            "previous_lifecycle_state": payload.get("previous_lifecycle_state"),
+            "event_ts": payload.get("timestamp"),
+            "event_type": payload.get("lifecycle_event_type"),
+            "payload": details,
+            "failure_reason": details.get("failure_reason"),
+            "incident_payload": details.get("incident_payload"),
+            "reject_reason": details.get("reject_reason") or details.get("reason"),
+            "score": details.get("score"),
+            "rr": details.get("rr"),
+            "effective_rr": details.get("effective_rr"),
+            "expectancy_bucket": details.get("expectancy_bucket"),
+            "execution_ctx": details.get("execution_ctx", {}),
+            "execution_ctx_missing": details.get("execution_ctx_missing"),
+        }
+
+        def persist_lifecycle_once() -> None:
+            with sqlite_writer_guard(engine):
+                conn = engine.connect()
+                old_timeout = None
+                try:
+                    if engine.dialect.name == "sqlite":
+                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                        conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                        conn.commit()
+                    if not save_trade_lifecycle_event(conn, _commit=True, **lifecycle_kwargs):
+                        raise RuntimeError("trade_lifecycle_event_persistence_failed")
+                except BaseException as exc:
+                    with contextlib.suppress(Exception):
+                        conn.rollback()
+                    if engine.dialect.name == "sqlite" and is_sqlite_busy_error(exc):
+                        conn.invalidate()
+                    raise
+                finally:
+                    if old_timeout is not None and not conn.invalidated:
+                        with contextlib.suppress(Exception):
+                            conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                            conn.commit()
+                    conn.close()
+
+        for attempt in range(SQLITE_BUSY_RETRY_ATTEMPTS):
+            try:
+                persist_lifecycle_once()
+                if orchestrator.metrics.lifecycle_persistence_degraded:
+                    orchestrator.metrics.lifecycle_persistence_degraded = False
+                    orchestrator.metrics.lifecycle_persistence_recoveries += 1
+                return
+            except BaseException as exc:
+                if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+                    raise
+                if attempt + 1 >= SQLITE_BUSY_RETRY_ATTEMPTS:
+                    orchestrator.metrics.lifecycle_persistence_failures += 1
+                    orchestrator.metrics.lifecycle_persistence_degraded = True
+                    orchestrator._burnin_evidence_incomplete = True
+                    orchestrator._recovery_required = True
+                    orchestrator._runtime_status = "RECOVERY_REQUIRED"
+                    orchestrator._fail_closed_reason = (
+                        orchestrator._fail_closed_reason or "LIFECYCLE_PERSISTENCE_FAILED"
+                    )
+                    orchestrator._last_error = (
+                        "SQLITE_BUSY lifecycle persistence after "
+                        f"{attempt + 1} attempts; "
+                        f"signal_id={payload.get('signal_id')}; "
+                        f"lifecycle_state={payload.get('lifecycle_state')}"
+                    )
+                    logger.error(
+                        "lifecycle_persistence_degraded reason=%s",
+                        orchestrator._last_error,
+                    )
+                    return
+                await asyncio.sleep(SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt))
+
+    def _persist_reject(conn: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
         if not persistence_enabled:
-            return
-        from alphaforge.persistence import save_rejected_decision_artifact
-        with SessionLocal() as session:
-            persisted = save_rejected_decision_artifact(
-                session,
+            return None
+        return save_rejected_decision_artifact(
+                conn,
+                _commit=False,
                 decision_id=payload.get("reject_decision_id"),
                 mode=mode.value,
                 phase=payload.get("phase", "final"),
@@ -4884,10 +7573,16 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
                 portfolio_risk_state=payload.get("portfolio_risk_state"),
                 portfolio_diagnostics=payload.get("portfolio_diagnostics"),
                 risk_flags=payload.get("risk_flags"),
+                side=payload.get("side"),
+                timeframe=payload.get("timeframe"),
+                event_ts=payload.get("decision_timestamp"),
             )
-            if persisted is None:
+
+    def _persist_reject_legacy(payload: dict[str, Any]) -> None:
+        """Compatibility entrypoint; the orchestrator uses the atomic callback."""
+        with engine.begin() as conn:
+            if _persist_reject(conn, payload) is None:
                 raise RuntimeError("rejected_decision_artifact_persistence_failed")
-            session.commit()
 
     live_reconciliation_provider = None
     if mode in {ExecutionMode.PAPER, ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} and cfg.runtime.enable_binance_readonly_reconciliation:
@@ -4933,10 +7628,12 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         scanner_source=scanner_source,
         live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,
-        on_reject_persist=_persist_reject,
+        on_reject_persist=_persist_reject_legacy if persistence_enabled else None,
+        on_reject_persist_atomic=_persist_reject if persistence_enabled else None,
         state_direction_shadow_enabled=state_direction_shadow_enabled,
         state_direction_shadow_store=state_direction_shadow_store,
         persistence_engine=engine,
+        execution_ownership_engine=ownership_engine,
         control_store=RuntimeControlStore(engine),
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled

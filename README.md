@@ -127,6 +127,13 @@ Current runtime safety mechanisms include:
 - fail-closed runtime recovery after unclean/unknown state;
 - provider-failure classification: only known transient transport failures receive recovery grace, while execution remains blocked until safe recovery evidence exists.
 
+Runtime reconciliation reads run outside the event loop with one owned call at
+a time. Timeout/cancellation discards late results and never starts an overlapping
+read. Shutdown drains within the configured reconciliation timeout; an unaccepted
+read retains durable recovery and execution ownership, even if it finishes during
+drain. An unresponsive read may outlive that bound in its daemon transport thread;
+process/watchdog containment remains necessary and is not proved by software tests.
+
 Do not hardcode operating thresholds in documentation or scripts. The typed source of truth is [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py).
 
 Managed float settings must be finite: NaN and infinities fail configuration
@@ -155,6 +162,12 @@ Readiness is an **evidence gate**, not a profitability guarantee and not LIVE au
 
 [`src/alphaforge/live_readiness.py`](src/alphaforge/live_readiness.py) evaluates scoped lifecycle, reject, execution, portfolio-risk, reconciliation, no-submit, rollback and operational evidence. Current runtime code still blocks real LIVE mutation even when non-mutating readiness evidence is strong.
 
+Historical strategy evidence must satisfy the [walk-forward/OOS validation
+contract](docs/HISTORICAL_VALIDATION.md): immutable train/calibration, OOS and
+optional untouched-test segments; explicit universe provenance; canonical
+execution economics; and role-separated reporting. Historical OOS success never
+replaces fresh PAPER evidence or authorizes LIVE.
+
 The isolated [autonomous qualification harness](docs/AUTONOMOUS_QUALIFICATION_HARNESS.md) provides:
 
 - **FAST** — deterministic accelerated PAPER qualification suitable for CI;
@@ -171,11 +184,11 @@ and public six-hour SOAK qualification remain required.
 
 ## Testing
 
-The `Tests` workflow (`.github/workflows/test.yml`) runs on pushes to `CHATGPT`,
-`dev`, and `main`, and on pull requests targeting `dev` or `main`. Qualify each
+The `Tests` workflow (`.github/workflows/test.yml`) runs on pushes to `dev`
+and `main`, and on pull requests targeting `dev` or `main`. Qualify each
 pushed commit using its exact SHA; an older or cancelled run is not evidence
 for the current commit. The separate `Python application` workflow targets
-`main` only and is not the CHATGPT qualification workflow.
+`main` only; it does not qualify development branches.
 
 The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, invalid/stale/future market-time fail-closed behavior, protected BACKTEST/PAPER/LIVE_PRECHECK pre-submit semantic parity, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
 
@@ -192,9 +205,19 @@ load each have dedicated tests. The bounded-load qualification covers rapid deci
 persistence, resolver backlog, reconciliation volume, audit ingestion, repeated
 reject outcomes, and concurrent readiness/audit reads against an active PAPER
 database. The remaining #421 release gate is fresh FAST plus public six-hour SOAK
-evidence bound to the exact final `dev` SHA.
+evidence bound to the exact final `dev` SHA. This is the scope of #421, not
+whole-product completion: the fresh economic baseline (#344), bounded learning
+(#578), promotion/rollback (#579), experiment orchestration (#580), and forward
+qualification (#349) remain separate acceptance work. See the
+[current completion roadmap](docs/LIVE_READINESS_ROADMAP.md#completion-roadmap-without-mac-mini).
 
 ## Repository Navigation
+
+Enter through [AGENTS.md](AGENTS.md#persistent-context-and-session-handoff) for
+session identity, handoff and safety rules. The [Decision Pipeline](#decision-pipeline)
+above describes subsystem dependencies; the map below locates their authorities.
+Use [development verification routing](docs/TEST_PROTOCOL.md#development-verification-routing)
+for the existing risk/invariant test map rather than maintaining a competing test list.
 
 | Area | Canonical entry points |
 |---|---|
@@ -207,6 +230,11 @@ evidence bound to the exact final `dev` SHA.
 | Qualification/readiness | [`src/alphaforge/burnin_qualification.py`](src/alphaforge/burnin_qualification.py), [`src/alphaforge/live_readiness.py`](src/alphaforge/live_readiness.py) |
 | Recovery/reconciliation | [`src/alphaforge/runtime_state.py`](src/alphaforge/runtime_state.py), [`src/alphaforge/reconciliation.py`](src/alphaforge/reconciliation.py) |
 | Typed config source of truth | [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py) |
+| Market data / MTF / scoring | [`src/alphaforge/exchange_market_scanner.py`](src/alphaforge/exchange_market_scanner.py), [`src/alphaforge/multi_timeframe.py`](src/alphaforge/multi_timeframe.py), [`src/alphaforge/ai_brain.py`](src/alphaforge/ai_brain.py) |
+| Decision/evidence persistence | [`src/alphaforge/persistence.py`](src/alphaforge/persistence.py), [lifecycle contract](docs/decision_lifecycle_contract.md) |
+| Universe identity / storage retention | [universe selection](docs/universe_selection.md), [universe storage contract](docs/universe_storage_contract.md), [`src/alphaforge/storage_policy.py`](src/alphaforge/storage_policy.py) |
+| Verification risk / invariants / test locations | [`src/alphaforge/system_verification.py`](src/alphaforge/system_verification.py) (`assess_path`, `_TESTS_BY_INVARIANT`); [`tests/test_issue437_system_verification_router.py`](tests/test_issue437_system_verification_router.py) |
+| CI routing / exact-SHA dedupe protection | [Tests workflow](.github/workflows/test.yml), [`tests/test_ci_branch_contract.py`](tests/test_ci_branch_contract.py) |
 | BACKTEST CLI | [`backtest_order.py`](backtest_order.py) |
 | Canonical SQL/operator queries | [`docs/SQLcheat.md`](docs/SQLcheat.md) |
 | Lifecycle contract | [`docs/decision_lifecycle_contract.md`](docs/decision_lifecycle_contract.md) |

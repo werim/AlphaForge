@@ -1,6 +1,6 @@
 from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
 
-LIVE_AUTH = {"live_trading_enabled": True, "operator_acknowledged": True, "qualification_passed": True, "reconciliation_passed": True, "kill_switch_active": False}
+LIVE_AUTH = {"live_trading_enabled": True, "operator_acknowledged": True, "qualification_passed": True, "reconciliation_passed": True, "derivatives_contract_passed": True, "execution_owner_valid": True, "kill_switch_active": False}
 
 
 def _market_ctx():
@@ -17,6 +17,7 @@ def _market_ctx():
         "expectancy": 0.2,
         "side": "LONG",
         "spread_pct": 0.0001,
+        "expected_slippage_pct": 0.0002,
     }
 
 
