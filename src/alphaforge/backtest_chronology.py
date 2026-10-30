@@ -336,7 +336,7 @@ def replay_boundary_evidence(identity, initialization, events):
         if at == data['end_ms']:
             break
         for record in _strategy_records(data,at):
-            if take('strategy:'+record['decision_id'],'STRATEGY_DECISION',at)!=record:
+            if digest(take('strategy:'+record['decision_id'],'STRATEGY_DECISION',at))!=digest(record):
                 raise ValueError('strategy source decision mismatch')
         if at == data['start_ms']:
             for order in sorted(data['intents'], key=lambda o:o['intent_id']):

@@ -251,7 +251,9 @@ def validate_strategy_evidence(data, *, recompute=False):
                 raise ValueError('native order was silently admitted')
         if recompute:
             actual = evaluate_prefix(simulation,bars,quotes,t,state,e['profile'],data['run_id'],end_ms=data['end_ms'])
-            if {k:v for k,v in actual.items() if k!='observed_ms'}!={k:v for k,v in record.items() if k!='observed_ms'}:
+            # Replay binds canonical JSON types as well as values; Python
+            # equality aliases booleans/numbers and integer/float encodings.
+            if digest({k:v for k,v in actual.items() if k!='observed_ms'})!=digest({k:v for k,v in record.items() if k!='observed_ms'}):
                 raise ValueError('canonical strategy replay mismatch')
     digest(e)
 

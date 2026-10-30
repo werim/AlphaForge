@@ -26,6 +26,28 @@ def data():
     return build_strategy_input(rows,quotes,provenance,start_ms=START,end_ms=START+4*STEP,run_id='causal-test')
 
 
+@pytest.mark.parametrize('field', ['cash', 'prefix_count'])
+def test_native_replay_rejects_equal_python_values_with_different_json_identity(field):
+    d=data()
+    validate_strategy_evidence(d,recompute=True)
+    record=d['strategy_evidence']['records'][0]
+    if field=='cash':
+        assert type(record['portfolio']['cash']) is float
+        record['portfolio']['cash']=int(record['portfolio']['cash'])
+    else:
+        record['prefix_count']=float(record['prefix_count'])
+    with pytest.raises(ValueError,match='canonical strategy replay mismatch'):
+        validate_strategy_evidence(d,recompute=True)
+
+
+def test_native_replay_allows_key_reordering_and_later_wall_observation():
+    d=data()
+    d['strategy_evidence']['records']=[dict(reversed(list(r.items()))) for r in d['strategy_evidence']['records']]
+    for r in d['strategy_evidence']['records']:
+        r['observed_ms']+=1
+    validate_strategy_evidence(d,recompute=True)
+
+
 def test_native_decisions_replay_and_source_remains_incomplete_without_fabricated_trades(tmp_path):
     d=data()
     validate_strategy_evidence(d,recompute=True)
@@ -196,5 +218,16 @@ def test_source_decision_event_cannot_be_omitted_or_substituted(tmp_path):
         replay_boundary_evidence(SourceIdentity(**p['identity']),p['initialization'],missing)
     record=next(e for e in events if e['kind']=='STRATEGY_DECISION')
     record['payload']['native_status']='ACCEPT'
+    with pytest.raises(ValueError,match='strategy source decision'):
+        replay_boundary_evidence(SourceIdentity(**p['identity']),p['initialization'],events)
+
+
+def test_source_decision_replay_rejects_reencoded_cash(tmp_path):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+    p=run_boundary_backtest(data(),tmp_path/'source')
+    events=deepcopy(p['events'])
+    record=next(e for e in events if e['kind']=='STRATEGY_DECISION')
+    record['payload']['portfolio']['cash']=int(record['payload']['portfolio']['cash'])
     with pytest.raises(ValueError,match='strategy source decision'):
         replay_boundary_evidence(SourceIdentity(**p['identity']),p['initialization'],events)
