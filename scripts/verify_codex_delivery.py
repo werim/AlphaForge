@@ -335,8 +335,8 @@ def dev_push_report(api: GitHub, run: dict) -> str:
         changed = list(api.pages(f"/repos/{api.repo}/commits/{head}", key="files"))
     verdict = evaluate(run, jobs, identity, changed, "dev")
     # A later branch update or run/attempt must never inherit this event's PASS.
-    latest_head = api.get(f"/repos/{api.repo}/branches/dev")["commit"]["sha"]
     latest_run = run_for_sha(api, source)
+    latest_head = api.get(f"/repos/{api.repo}/branches/dev")["commit"]["sha"]
     if (latest_head != head or head != run.get("head_sha") or not latest_run
             or any(latest_run.get(k) != run.get(k)
                    for k in ("id", "run_attempt", "status", "conclusion"))):
