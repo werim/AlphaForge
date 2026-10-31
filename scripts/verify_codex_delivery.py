@@ -316,6 +316,47 @@ def publish(api: GitHub, pr: dict, message: str, sha: str, run: dict | None = No
         }, sort_keys=True)
 
 
+def dev_push_report(api: GitHub, run: dict) -> str:
+    """Verify a dev push without an open PR or any comment-writing dependency."""
+    if any(type(run.get(key)) is not int or run[key] < 1 for key in ("id", "run_attempt")):
+        return "Dev push: INCOMPLETE_CI_IDENTITY\n**RESULT: INCOMPLETE_CI_IDENTITY** — missing/invalid run or attempt."
+    head = api.get(f"/repos/{api.repo}/branches/dev")["commit"]["sha"]
+    source = {"head": {"ref": "dev", "sha": head}}
+    jobs = list(api.pages(f"/repos/{api.repo}/actions/runs/{run['id']}/jobs", key="jobs"))
+    checkout = tested_checkout(api, jobs)
+    identity = code_identity(api, source, run, checkout)
+    tree = "UNAVAILABLE"
+    changed = []
+    if SHA.fullmatch(str(head)) and head == run.get("head_sha"):
+        commit = api.get(f"/repos/{api.repo}/git/commits/{head}")
+        tree = (commit.get("tree") or {}).get("sha", "UNAVAILABLE")
+        if commit.get("sha") != head or not isinstance(tree, str) or not SHA.fullmatch(tree):
+            identity = "UNVERIFIABLE_TREE"
+        changed = list(api.pages(f"/repos/{api.repo}/commits/{head}", key="files"))
+    verdict = evaluate(run, jobs, identity, changed, "dev")
+    # A later branch update or run/attempt must never inherit this event's PASS.
+    latest_run = run_for_sha(api, source)
+    latest_head = api.get(f"/repos/{api.repo}/branches/dev")["commit"]["sha"]
+    if (latest_head != head or head != run.get("head_sha") or not latest_run
+            or any(latest_run.get(k) != run.get(k)
+                   for k in ("id", "run_attempt", "status", "conclusion"))):
+        verdict["status"] = "STALE_EVIDENCE_NOT_VERIFIED"
+    steps = ", ".join(f"{name}={value}" for name, value in verdict["steps"].items())
+    return "\n".join([
+        f"Dev push: {verdict['status']}",
+        f"**RESULT: {verdict['status']}** — automated CI/source-metadata verification only.",
+        f"- Branch: dev; current head: {head}; current dev tree: {tree}.",
+        f"- CI: https://github.com/{api.repo}/actions/runs/{run['id']}"
+        f" ({run.get('event')}, {run.get('conclusion')}, attempt {run.get('run_attempt', 1)})",
+        f"- Source binding: {verdict['identity']}; actual tested checkout: {checkout or 'UNAVAILABLE'}.",
+        f"- Required steps: {steps}",
+        "- Missing/non-success required steps: " + (", ".join(verdict["missing"]) or "none"),
+        "NOT independently verified: implementation semantics, mutation kill counts,"
+        " historical/physical acceptance, consumer admission or merge authority.",
+        "Comment delivery: NOT_APPLICABLE_BRANCH_RECEIPT",
+    ])
+
+
 def handle(api: GitHub, event: str, payload: dict) -> list[str]:
     candidates: list[tuple[dict, dict]] = []
     if event == "workflow_run":
@@ -326,6 +367,8 @@ def handle(api: GitHub, event: str, payload: dict) -> list[str]:
             or (run.get("head_repository") or {}).get("full_name") != api.repo
         ):
             return []
+        if run.get("event") == "push" and run.get("head_branch") == "dev":
+            return [dev_push_report(api, run)]
         prs = list(api.pages(f"/repos/{api.repo}/pulls?state=open"))
         associated = {p.get("number") for p in run.get("pull_requests", [])}
         for pr in prs:
