@@ -148,6 +148,7 @@ class DevAPI:
         self.branch_reads = 0
         self.move_head = False
         self.new_attempt = False
+        self.move_during_run_lookup = False
         self.mutation = 'success'
         self.full = 'success'
 
@@ -157,6 +158,8 @@ class DevAPI:
             head = 'c' * 40 if self.move_head and self.branch_reads > 1 else self.head
             return {'commit': {'sha': head}}
         if '/actions/workflows/test.yml/runs?' in path:
+            if self.move_during_run_lookup:
+                self.head = 'c' * 40
             return {'workflow_runs': [deepcopy(self.run)]}
         if path.endswith('/git/commits/' + self.head):
             return {'sha': self.head, 'tree': {'sha': self.tree}}
@@ -251,6 +254,14 @@ def test_dev_receipt_requires_explicit_run_and_attempt(field, value):
     reports = verifier.handle(api, 'workflow_run', {'workflow_run': api.run})
     assert len(reports) == 1 and 'RESULT: INCOMPLETE_CI_IDENTITY' in reports[0]
     assert api.branch_reads == 0
+
+
+def test_dev_head_move_during_final_run_lookup_is_not_a_verified_receipt():
+    api = DevAPI()
+    api.move_during_run_lookup = True
+    reports = verifier.handle(api, 'workflow_run', {'workflow_run': deepcopy(api.run)})
+    assert 'RESULT: STALE_EVIDENCE_NOT_VERIFIED' in reports[0]
+    assert 'RESULT: CI_EVIDENCE_VERIFIED' not in reports[0]
 
 
 def test_dev_receipt_writes_existing_artifact_and_summary_without_a_pr(monkeypatch, tmp_path):
