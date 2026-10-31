@@ -40,6 +40,52 @@ to measure efficiency. Record local evidence and pending CI separately in the
 single handoff; observe operator CI, merge and protected SOAK restrictions.
 T0–T4 development routing does not waive any applicable G0–G10 release gate below.
 
+### Receipt-bound CI continuation
+
+The existing [Codex Delivery Verification workflow](../.github/workflows/codex-delivery-verification.yml)
+runs on Tests completion and executes the [trusted-main verifier](../scripts/verify_codex_delivery.py).
+It produces `alpha-delivery-receipts-v1`: `reports` contains per-PR report strings
+with the actual `RESULT`, current head, Tests run/attempt, tested checkout,
+source-binding verdict and required-step results. The same reports are written
+to the job summary and preserved in artifact
+`codex-delivery-receipts-<verifier-run-id>-<verifier-attempt>` independently of
+comment publication. Reuse this contract; do not add another CI authority.
+
+On a supported completion event or the next task invocation, read the result
+directly; never ask the user to carry green/fail. Take one bounded snapshot of
+the current PR and its source-bound Tests run/attempt, then read the matching
+trusted verifier receipt from its artifact or job summary. Verify artifact
+run/attempt identity and digest when using the artifact. The verifier's own
+workflow head is trusted main, not the candidate SHA: bind the report to the
+candidate through its PR head and Tests run/attempt instead. Require the report's
+actual `RESULT` to agree with that identity and current Tests metadata; workflow
+success, a matching word elsewhere in a report, or an empty `reports` list is
+not a passing receipt.
+
+Use the existing `tested_checkout`, `code_identity`, `required_steps` and
+`evaluate` rules. Record `EXACT_HEAD_SHA` separately from `TREE_EQUIVALENT_MERGE`;
+the latter requires the PR head as a synthetic-merge parent and identical Git
+trees. Bind mutation source to the actual tested checkout when mutation evidence
+is claimed. Required gates must actually succeed. Keep optional/skipped steps
+and the actual CI test scope explicit; local tests are separate evidence.
+Recheck source/run freshness before recording acceptance or acting on it.
+
+| Observed evidence | Next action |
+| --- | --- |
+| Source-bound Tests FAILURE | Inspect the failed job's relevant log and fix the root cause with the smallest justified regression; a receipt is not needed to begin failure diagnosis. Qualify any new source without asking for user green/fail. |
+| Tests SUCCESS plus matching `CI_EVIDENCE_VERIFIED` receipt and required gates | Continue the next already-authorized task. This verifies CI/source metadata, not implementation semantics or merge permission. |
+| Pending, missing, stale, malformed, skipped or unverifiable receipt / required gate | Record PENDING or INCOMPLETE and the exact missing evidence. Do not infer success, weaken a gate, or dispatch/rerun merely to obtain a receipt. |
+| `COMMENT_WRITE_FORBIDDEN` / HTTP403 | Treat this as comment delivery failure, separately from the report's CI verdict. Use the existing artifact/summary; do not change permissions or credentials. |
+
+GitHub `workflow_run` starts the verifier; it does not itself resume this Codex
+chat. Use a completion-event bridge only if a supported, authorized connection
+to this existing chat is actually available and verified. If none is available,
+state that automatic continuation is unavailable and read Tests/receipt on the
+next task invocation. Do not replace it with polling, watch/wait loops,
+scheduled checks, or an unapproved paid agent/security integration. Preserve all
+current DO NOT MERGE, Mini, physical, PAPER/SOAK/Testnet/LIVE, exchange, consumer
+and risk/threshold restrictions.
+
 ## Release evidence gates
 
 | Gate | Required evidence | Status vocabulary |
