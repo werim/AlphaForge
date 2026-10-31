@@ -11,8 +11,12 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Open Codex PR number for read-only verification"
-        required: true
+        description: "Open Codex PR number; choose this OR tests_run_id"
+        required: false
+        type: string
+      tests_run_id:
+        description: "Existing completed Tests push/dev run; read-only audit, no Tests rerun"
+        required: false
         type: string
 
 permissions:
@@ -35,7 +39,9 @@ jobs:
        contains(github.event.comment.body, 'TASK: #') &&
        contains(github.event.comment.body, 'RESULT:')) ||
       (github.event_name == 'workflow_run' &&
-       (startsWith(github.event.workflow_run.head_branch, 'codex/') ||
+       ((github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == 'dev') ||
+        startsWith(github.event.workflow_run.head_branch, 'codex/') ||
         github.event.workflow_run.pull_requests[0] != null))
     runs-on: ubuntu-latest
     timeout-minutes: 5
