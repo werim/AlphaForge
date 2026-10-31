@@ -377,24 +377,57 @@ def test_neutral_execution_is_available_but_never_confirmed():
     assert "MTF_EXECUTION_UNAVAILABLE" not in result["reasons"]
 
 
-@pytest.mark.parametrize("missing_field", ["spread_pct", "expected_slippage_pct", "latency_ms", "liquidity_score"])
-def test_missing_required_execution_market_evidence_is_unavailable(missing_field):
+@pytest.mark.parametrize("missing_field", ["spread_pct", "expected_slippage_pct", "market_data_latency_ms", "liquidity_score"])
+@pytest.mark.parametrize("invalid_value", [None, True, "20", -1.0, float("nan"), float("inf")])
+def test_missing_required_execution_market_evidence_is_unavailable(missing_field, invalid_value):
     market = {"spread_pct": .0002, "expected_slippage_pct": .001,
-              "latency_ms": 20.0, "liquidity_score": 1.0}
-    market[missing_field] = None
-    execution = build_execution_context(_execution_candles([100, 100.1, 100.2, 100.3, 100.4]), "1m", market)
+              "market_data_latency_ms": 20.0, "liquidity_score": 1.0}
+    candles = _execution_candles([100, 100.1, 100.2, 100.3, 100.4])
+    # A complete control proves each prerequisite independently; omitting the
+    # market-data RTT from every fixture would make all these cases vacuous.
+    assert build_execution_context(candles, "1m", market)["evidence_status"] == "COMPLETE"
+    market[missing_field] = invalid_value
+    execution = build_execution_context(candles, "1m", market)
     regime, setup, _ = aligned("LONG")
     result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
     assert execution["evidence_status"] == "INCOMPLETE"
+    assert execution["unavailable_market_fields"] == [missing_field]
     assert "MTF_EXECUTION_UNAVAILABLE" in result["reasons"]
+
+
+def test_order_latency_and_imbalance_cannot_substitute_for_market_data_rtt():
+    candles = _execution_candles([100, 100.1, 100.2, 100.3, 100.4])
+    market = {"spread_pct": .0002, "expected_slippage_pct": .001,
+              "market_data_latency_ms": 20.0, "liquidity_score": 1.0,
+              "latency_ms": None, "orderbook_imbalance": None}
+    observed = build_execution_context(candles, "1m", market)
+    assert observed["evidence_status"] == "COMPLETE"
+    assert observed["unavailable_market_fields"] == []
+    assert observed["latency_ms"] is None and observed["orderbook_imbalance"] is None
+    market.update(market_data_latency_ms=None, latency_ms=20.0, orderbook_imbalance=.7)
+    unavailable = build_execution_context(candles, "1m", market)
+    assert unavailable["evidence_status"] == "INCOMPLETE"
+    assert unavailable["unavailable_market_fields"] == ["market_data_latency_ms"]
+    assert unavailable["market_data_latency_ms"] is None
+
+
+@pytest.mark.parametrize("close_ms", [NOW + 1, NOW - 120_001])
+def test_complete_execution_market_fields_do_not_bypass_future_or_stale_candles(close_ms):
+    regime, setup, execution = aligned("LONG")
+    assert evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)["aligned"]
+    execution["last_closed_candle_ms"] = close_ms
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+    assert not result["aligned"]
+    assert "MTF_CONTEXT_STALE" in result["reasons"]
 
 
 def test_missing_execution_candles_remain_unavailable():
     execution = build_execution_context([], "1m", {"spread_pct": .0002,
-        "expected_slippage_pct": .001, "latency_ms": 20.0, "liquidity_score": 1.0})
+        "expected_slippage_pct": .001, "market_data_latency_ms": 20.0, "liquidity_score": 1.0})
     regime, setup, _ = aligned("LONG")
     result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
     assert execution["evidence_status"] == "INCOMPLETE"
+    assert execution["unavailable_market_fields"] == []
     assert "MTF_EXECUTION_UNAVAILABLE" in result["reasons"]
 
 

@@ -14,6 +14,16 @@ SPEC.loader.exec_module(MODULE)
 mutations = MODULE.mutations
 
 
+def test_safety_mutations_target_unique_compilable_production_conditions() -> None:
+    for case in mutations():
+        source_path = SCRIPT.parents[1] / case.file
+        source = source_path.read_text()
+        assert source.count(case.before) == 1, case.name
+        mutated = source.replace(case.before, case.after, 1)
+        assert mutated != source, case.name
+        compile(mutated, str(source_path), "exec")
+
+
 def test_cross_component_safety_mutations_are_ci_protected() -> None:
     cases = {case.name: case for case in mutations()}
     required = {
