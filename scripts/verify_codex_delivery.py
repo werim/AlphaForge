@@ -393,7 +393,20 @@ def handle(api: GitHub, event: str, payload: dict) -> list[str]:
             if run:
                 candidates.append((pr, run))
     elif event == "workflow_dispatch":
-        raw = (payload.get("inputs") or {}).get("pr_number", "")
+        inputs = payload.get("inputs") or {}
+        raw = inputs.get("pr_number", "")
+        run_id = inputs.get("tests_run_id", "")
+        if run_id != "":
+            if (raw or not isinstance(run_id, str) or not run_id.isascii()
+                    or not run_id.isdigit() or int(run_id) < 1):
+                return []
+            run = api.get(f"/repos/{api.repo}/actions/runs/{int(run_id)}")
+            if (type(run.get("id")) is not int or run["id"] != int(run_id)
+                    or run.get("event") != "push" or run.get("head_branch") != "dev"):
+                return []
+            # Same completed Tests/repository/source guards and receipt path;
+            # this reads an existing run, never dispatches or reruns Tests.
+            return handle(api, "workflow_run", {"workflow_run": run})
         if not str(raw).isdigit():
             return []
         pr = api.get(f"/repos/{api.repo}/pulls/{int(raw)}")

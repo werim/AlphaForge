@@ -153,6 +153,8 @@ class DevAPI:
         self.full = 'success'
 
     def get(self, path):
+        if '/actions/runs/' in path and path.rsplit('/', 1)[-1].isdigit():
+            return deepcopy(self.run)
         if path.endswith('/branches/dev'):
             self.branch_reads += 1
             head = 'c' * 40 if self.move_head and self.branch_reads > 1 else self.head
@@ -281,6 +283,55 @@ def test_dev_receipt_writes_existing_artifact_and_summary_without_a_pr(monkeypat
     assert len(saved['reports']) == 1
     assert saved['reports'][0] in summary.read_text()
     assert 'RESULT: CI_EVIDENCE_VERIFIED' in saved['reports'][0]
+
+
+def test_manual_dev_audit_reads_existing_run_without_reexecuting_tests():
+    api = DevAPI()
+    original = deepcopy(api.run)
+    reports = verifier.handle(api, 'workflow_dispatch', {'inputs': {'tests_run_id': '123'}})
+    assert len(reports) == 1 and 'RESULT: CI_EVIDENCE_VERIFIED' in reports[0]
+    assert '/actions/runs/123' in reports[0] and 'attempt 1' in reports[0]
+    assert 'NOT_APPLICABLE_BRANCH_RECEIPT' in reports[0]
+    assert api.run == original
+
+
+@pytest.mark.parametrize('inputs', [
+    {}, {'pr_number': '12', 'tests_run_id': '123'}, {'pr_number': '12', 'tests_run_id': 0},
+    {'tests_run_id': '0'},
+    {'tests_run_id': '-1'}, {'tests_run_id': True}, {'tests_run_id': ' 123'},
+    {'tests_run_id': '١٢٣'}, {'tests_run_id': '123/attempts/2'},
+])
+def test_manual_audit_requires_one_unambiguous_target(inputs):
+    class Never:
+        def get(self, path): raise AssertionError(path)
+    assert verifier.handle(Never(), 'workflow_dispatch', {'inputs': inputs}) == []
+
+
+@pytest.mark.parametrize('field,value', [
+    ('event', 'pull_request'), ('head_branch', 'main'),
+    ('head_repository', {'full_name': 'untrusted/fork'}), ('name', 'Unrelated'),
+    ('status', 'in_progress'), ('id', 124),
+])
+def test_manual_audit_cannot_select_an_unrelated_or_unfinished_run(field, value):
+    api = DevAPI()
+    api.run[field] = value
+    assert verifier.handle(api, 'workflow_dispatch', {'inputs': {'tests_run_id': '123'}}) == []
+
+
+def test_manual_audit_retains_dev_head_and_attempt_freshness_guards():
+    for defect in ('move_head', 'new_attempt', 'move_during_run_lookup'):
+        api = DevAPI()
+        setattr(api, defect, True)
+        reports = verifier.handle(api, 'workflow_dispatch', {'inputs': {'tests_run_id': '123'}})
+        assert 'RESULT: STALE_EVIDENCE_NOT_VERIFIED' in reports[0]
+        assert 'RESULT: CI_EVIDENCE_VERIFIED' not in reports[0]
+
+
+def test_workflow_exposes_optional_existing_run_audit_input():
+    workflow = (HERE / '.github/workflows/codex-delivery-verification.yml').read_text()
+    inputs = workflow.split('    inputs:', 1)[1].split('\npermissions:', 1)[0]
+    assert 'tests_run_id:' in inputs
+    assert 'required: true' not in inputs
 
 
 class API:

@@ -11,8 +11,12 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Open Codex PR number for read-only verification"
-        required: true
+        description: "Open Codex PR number; choose this OR tests_run_id"
+        required: false
+        type: string
+      tests_run_id:
+        description: "Existing completed Tests push/dev run; read-only audit, no Tests rerun"
+        required: false
         type: string
 
 permissions:
