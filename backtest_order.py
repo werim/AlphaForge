@@ -14,7 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-from alphaforge.realized_accounting import finite_cash, position_cash_geometry, realized_cash_ledger, sum_cash, mean_cash
+from alphaforge.realized_accounting import filled_position_quantity, finite_cash, position_cash_geometry, realized_cash_ledger, sum_cash, mean_cash
 from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.adaptive_learning import classify_expectancy_bucket
@@ -1081,6 +1081,13 @@ def scan_symbol_backtest(
         return None
     now = candles[idx]
     prev = candles[idx - 1]
+    native_decision_ms = now.timestamp
+    if "causal_decision_ms" in context:
+        step = SUPPORTED_INTERVAL_MS.get(str(context.get("simulation_timeframe", "1m")))
+        supplied = context["causal_decision_ms"]
+        if type(supplied) is not int or step is None or supplied != now.timestamp + step:
+            raise ValueError("causal decision must occur at the candle release boundary")
+        native_decision_ms = supplied
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
     if "mtf_source_candles" in context:
         regime_timeframe = str(context.get("regime_timeframe") or "1h")
@@ -1167,7 +1174,7 @@ def scan_symbol_backtest(
     })
     ctx = OrderExecutionContext(
         mode=TradingMode.BACKTEST,
-        timestamp=now.timestamp,
+        timestamp=native_decision_ms,
         symbol=symbol,
         balance=float(context.get("balance", 1000)),
         risk_pct=float(context.get("risk_pct", 1.0)),
@@ -1198,7 +1205,7 @@ def scan_symbol_backtest(
         if isinstance(portfolio_state, BacktestPortfolioState) and shared_decision.candidate is not None:
             decision_candidate = shared_decision.candidate
             candidate_notional = portfolio_state.notional_for(entry=decision_candidate.entry, balance=context.get("balance"), risk_pct=context.get("risk_pct"), notional=mctx.get("notional"))
-            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision_candidate.side, config=context.get("portfolio_config", {}), timestamp=now.timestamp, candidate_notional=candidate_notional)
+            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision_candidate.side, config=context.get("portfolio_config", {}), timestamp=native_decision_ms, candidate_notional=candidate_notional)
             mctx.update({"equity": portfolio_snapshot.equity, "available_balance": portfolio_snapshot.available_balance, "notional": candidate_notional})
             ctx.storage["open_positions"] = {pid: {"notional": pos.notional, "side": pos.side} for pid, pos in portfolio_state.open_positions.items()}
             ctx.storage["daily_realized_pnl"] = portfolio_snapshot.daily_realized_pnl
@@ -1277,6 +1284,7 @@ def simulate_candidate(
     balance: float,
     risk_pct: float,
     market_ctx: Optional[Mapping[str, Any]] = None,
+    evidence_producer=None,
 ) -> List[LifecycleRow]:
     market_ctx = market_ctx or {}
     signal_id = f"{candidate.symbol}:{candidate.timestamp}"
@@ -1313,6 +1321,8 @@ def simulate_candidate(
                 row.effective_rr = _sql_nullable_number(rr_stage.get("effective_rr"))
                 row.rr_basis = str(rr_stage.get("rr_basis") or "UNAVAILABLE")
                 row.execution_cost_semantics = rr_stage.get("execution_cost_semantics")
+        if evidence_producer is not None:
+            evidence_producer.observe_simulation(out_rows, balance, risk_pct, market_ctx)
         return out_rows
     rows: List[LifecycleRow] = [
         LifecycleRow(
@@ -1383,13 +1393,16 @@ def simulate_candidate(
     )
     triggered_ts = None
     trigger_price = 0.0
+    # Entry transitions use the triggering candle label, even for a delayed
+    # trigger. The signal timestamp remains the identity/decision boundary;
+    # neither label establishes an exact intrabar execution time.
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
         triggered_ts = candles[idx].timestamp
         trigger_price = candidate.entry
         start_idx = idx
         rows.append(
             LifecycleRow(
-                candidate.timestamp,
+                triggered_ts,
                 candidate.symbol,
                 candidate.side,
                 candidate.setup_type,
@@ -1416,7 +1429,7 @@ def simulate_candidate(
         )
         rows.append(
             LifecycleRow(
-                candidate.timestamp,
+                triggered_ts,
                 candidate.symbol,
                 candidate.side,
                 candidate.setup_type,
@@ -1443,7 +1456,7 @@ def simulate_candidate(
         )
         rows.append(
             LifecycleRow(
-                candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
+                triggered_ts, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
                 candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ORDER_PLACED", "POSITION_OPENED",
                 trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket,
                 volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
@@ -1465,7 +1478,7 @@ def simulate_candidate(
                 start_idx = j
                 rows.append(
                     LifecycleRow(
-                        candidate.timestamp,
+                        triggered_ts,
                         candidate.symbol,
                         candidate.side,
                         candidate.setup_type,
@@ -1492,7 +1505,7 @@ def simulate_candidate(
                 )
                 rows.append(
                     LifecycleRow(
-                        candidate.timestamp,
+                        triggered_ts,
                         candidate.symbol,
                         candidate.side,
                         candidate.setup_type,
@@ -1519,7 +1532,7 @@ def simulate_candidate(
                 )
                 rows.append(
                     LifecycleRow(
-                        candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
+                        triggered_ts, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime,
                         candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ORDER_PLACED", "POSITION_OPENED",
                         trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket,
                         volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
@@ -1664,10 +1677,9 @@ def finalize(
     market_ctx = market_ctx or {}
     # risk_pct historically allocates NOTIONAL, not stop-defined dollar risk.
     scale = finite_cash(market_ctx.get("risk_scale", 1.0))
-    base_notional = finite_cash(balance * risk_pct / 100 if market_ctx.get("notional") is None else market_ctx["notional"])
     fill = finite_cash(trigger_price)
-    valid_size = scale is not None and 0 <= scale <= 1 and base_notional is not None and base_notional >= 0
-    quantity = base_notional * scale / fill if valid_size and fill and fill > 0 else None
+    quantity = filled_position_quantity(balance=balance, risk_pct=risk_pct, fill=fill,
+        risk_scale=market_ctx.get("risk_scale", 1.0), notional=market_ctx.get("notional"))
     stop = finite_cash(candidate.sl)
     exit_fill = finite_cash(close_price)
     valid_geometry = (quantity is not None and stop is not None
@@ -1978,7 +1990,7 @@ def process_backtest_result(
             rescue_decision_context=json.dumps(context, sort_keys=True),
         )
         sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True), "canonical_rr_stage": diagnostics.get("canonical_rr_stage") if isinstance(diagnostics, Mapping) else None}
-        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct, market_ctx=sim_ctx)
+        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct, market_ctx=sim_ctx, evidence_producer=getattr(portfolio_state, "evidence_producer", None))
         if portfolio_state is not None:
             candidate_notional = portfolio_state.notional_for(entry=rescued.entry, balance=balance, risk_pct=risk_pct, risk_scale=rescue_size_multiplier, notional=mctx.get("notional"))
             position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
@@ -2278,7 +2290,7 @@ def process_backtest_result(
         for key in ("stop_too_wide_softened", "original_reject_reason", "reject_reason_softened"):
             if key in diagnostics:
                 sim_ctx[key] = diagnostics[key]
-    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=sim_ctx)
+    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=sim_ctx, evidence_producer=getattr(portfolio_state, "evidence_producer", None))
     if portfolio_state is not None:
         candidate_notional = portfolio_state.notional_for(entry=cand.entry, balance=balance, risk_pct=risk_pct, risk_scale=risk_scale, notional=mctx.get("notional"))
         position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
@@ -5259,6 +5271,7 @@ def main():
     p.add_argument("--risk-pct", type=float, default=cfg.backtest.risk_pct)
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
+    p.add_argument("--source-evidence", action="store_true", help="Capture new source-bound BACKTEST facts; never capital performance")
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
     p.add_argument("--symbols", nargs="*", default=[], help="Comma- or whitespace-separated fixed symbol list for deterministic historical universe")
     p.add_argument("--force-refresh", action="store_true", help="Fetch the full requested Binance historical range before running")
@@ -5395,11 +5408,34 @@ def main():
         "high_vol_accepted_trades_by_day": {},
     }
     portfolio_config = resolve_backtest_portfolio_config(args.balance, root=ROOT_DIR)
-    portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance))
     backtest_database_url = resolve_backtest_database_url(args.output_dir, root=ROOT_DIR)
     backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
     backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
     backtest_engine = init_db(backtest_database_url)
+    source_producer = None
+    if args.source_evidence:
+        if args.mode.upper() != "BACKTEST" or args.quote != "USDT":
+            raise ValueError("source evidence supports USDT BACKTEST only")
+        import subprocess
+        from alphaforge.backtest_source_evidence import BacktestSourceProducer, SourceIdentity, digest, evidence_settings
+        from alphaforge.config_registry import config_snapshot
+        from alphaforge.historical_market_data import SUPPORTED_INTERVAL_MS
+        source_candles = {row["symbol"]: candles_by_symbol.get(row["symbol"], []) for row in universe}
+        source_payload = {symbol: [asdict(c) for c in rows] for symbol, rows in sorted(source_candles.items())}
+        settings = evidence_settings(config_snapshot(mode="BACKTEST", root=ROOT_DIR))
+        source_files = {name: __import__("hashlib").sha256((ROOT_DIR / name).read_bytes()).hexdigest() for name in
+            ("backtest_order.py", "src/alphaforge/portfolio_risk.py", "src/alphaforge/realized_accounting.py", "src/alphaforge/backtest_source_evidence.py")}
+        configuration = dict(arguments=vars(args), settings=settings, portfolio=portfolio_config)
+        cost_settings = [row for row in settings if "cost" in row["category"].lower() or "fee" in row["env_name"].lower()]
+        source_identity = SourceIdentity(run_id=backtest_run_id, window_id=f"{start_ms}:{end_ms}",
+            start_ms=start_ms, end_ms=end_ms, interval_ms=SUPPORTED_INTERVAL_MS[args.interval],
+            git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT_DIR, text=True).strip(),
+            code_hash=digest(source_files), config_hash=digest(configuration),
+            strategy_hash=digest(settings), cost_hash=digest(cost_settings),
+            universe_hash=digest(sorted(source_payload)), data_hash=digest(source_payload))
+        source_producer = BacktestSourceProducer(backtest_engine, source_identity, source_candles,
+            provenance=dict(configuration=configuration, strategy=settings, costs=cost_settings, source_files=source_files))
+    portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance), evidence_producer=source_producer)
     if universe_selection is not None:
         with backtest_engine.begin() as conn:
             persist_universe_selection(conn, universe_selection)
@@ -5591,6 +5627,12 @@ def main():
         profile_name=backtest_profile_name,
         min_effective_rr=getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", None),
     )
+    if source_producer is not None:
+        source_producer.finish()
+        from alphaforge.backtest_source_evidence import export_source_evidence
+        with backtest_engine.connect() as conn:
+            source_packet = export_source_evidence(conn, backtest_run_id, expected_identity=source_identity)
+        Path(args.output_dir, "backtest_source_evidence.json").write_text(json.dumps(source_packet, indent=2, sort_keys=True) + "\n")
     persisted_decision_evidence_rows = _decision_evidence_rows(backtest_database_url, run_id=backtest_run_id)
     forward_eval_rows = build_forward_evaluation_rows(
         [{**row, "timestamp": _safe_float(row.get("event_ts"), 0.0)} for row in persisted_lifecycle_rows],

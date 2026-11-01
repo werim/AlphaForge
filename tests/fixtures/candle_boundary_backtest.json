@@ -1,0 +1,111 @@
+{
+  "candles": {
+    "BTCUSDT": [
+      {
+        "close": 102.0,
+        "high": 103.0,
+        "low": 99.0,
+        "open": 100.0,
+        "timestamp": 1771113600000,
+        "volume": 1000.0
+      },
+      {
+        "close": 104.0,
+        "high": 105.0,
+        "low": 102.0,
+        "open": 103.0,
+        "timestamp": 1771113660000,
+        "volume": 1000.0
+      },
+      {
+        "close": 106.0,
+        "high": 107.0,
+        "low": 104.0,
+        "open": 105.0,
+        "timestamp": 1771113720000,
+        "volume": 1000.0
+      },
+      {
+        "close": 108.0,
+        "high": 109.0,
+        "low": 106.0,
+        "open": 107.0,
+        "timestamp": 1771113780000,
+        "volume": 1000.0
+      }
+    ],
+    "ETHUSDT": [
+      {
+        "close": 198.0,
+        "high": 201.0,
+        "low": 197.0,
+        "open": 200.0,
+        "timestamp": 1771113600000,
+        "volume": 1000.0
+      },
+      {
+        "close": 196.0,
+        "high": 198.0,
+        "low": 195.0,
+        "open": 197.0,
+        "timestamp": 1771113660000,
+        "volume": 1000.0
+      },
+      {
+        "close": 194.0,
+        "high": 196.0,
+        "low": 193.0,
+        "open": 195.0,
+        "timestamp": 1771113720000,
+        "volume": 1000.0
+      },
+      {
+        "close": 192.0,
+        "high": 194.0,
+        "low": 191.0,
+        "open": 193.0,
+        "timestamp": 1771113780000,
+        "volume": 1000.0
+      }
+    ]
+  },
+  "data_origin": "SYNTHETIC_DETERMINISTIC_EXECUTION_INPUT",
+  "end_ms": 1771113840000,
+  "initial_capital_usdt": 1000.0,
+  "intents": [
+    {
+      "close_fraction": 1.0,
+      "entry_ms": 1771113600000,
+      "exit_ms": 1771113660000,
+      "intent_id": "long",
+      "notional_usdt": 100.0,
+      "order_type": "MARKET",
+      "risk_stop": 99.0,
+      "side": "LONG",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "close_fraction": 1.0,
+      "entry_ms": 1771113600000,
+      "exit_ms": 1771113720000,
+      "intent_id": "short",
+      "notional_usdt": 200.0,
+      "order_type": "MARKET",
+      "risk_stop": 201.0,
+      "side": "SHORT",
+      "symbol": "ETHUSDT"
+    }
+  ],
+  "interval_ms": 60000,
+  "policy": {
+    "decision_basis": "PRECOMMITTED_INTENTS",
+    "fee_rate": 0.001,
+    "fill_model": "NEXT_BOUNDARY_OPEN_FULL_FILL",
+    "product": "USDT_LINEAR_NO_FUNDING",
+    "slippage_bps": 0.0,
+    "valuation": "COMPLETED_CANDLE_CLOSE"
+  },
+  "run_id": "offline-boundary-capital-demonstration-v1",
+  "schema": "candle-boundary-backtest-v1",
+  "start_ms": 1771113600000
+}

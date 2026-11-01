@@ -10,6 +10,7 @@ from typing import Any, Iterable
 from urllib import error, parse, request
 
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
+from alphaforge.breakout_provenance import capture_breakout_receipt
 
 SUPPORTED_BINANCE_DECISION_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"})
 
@@ -195,7 +196,9 @@ def _binance_kline_geometry(
         }
     query = parse.urlencode({"symbol": symbol, "interval": timeframe, "limit": 21})
     try:
-        rows = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/klines?{query}", timeout_sec=timeout_sec)
+        source_url = f"{base_url.rstrip('/')}/fapi/v1/klines?{query}"
+        rows = _fetch_json(source_url, timeout_sec=timeout_sec)
+        local_read_observed_ms = time.time_ns() // 1_000_000
     except (TimeoutError, asyncio.TimeoutError):
         return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_TIMEOUT", "geometry_source": geometry_source}
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
@@ -232,6 +235,9 @@ def _binance_kline_geometry(
                             "recent_klines_source": geometry_source}
                            if len(recent_klines) >= 2 else {})
     result = {**geometry, **identity, **volatility_evidence, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": geometry_source}
+    result["breakout_input_receipt"] = capture_breakout_receipt(
+        rows, symbol=symbol, timeframe=timeframe, source_url=source_url,
+        interval_ms=_timeframe_seconds(timeframe) * 1000, observed_ms=local_read_observed_ms)
     return result
 
 
