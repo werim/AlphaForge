@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 
 import pytest
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
+from alphaforge.reconciliation import ReconciliationFinding
 from alphaforge.readonly_snapshot_reader import ReadonlySnapshotReader
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -51,12 +54,71 @@ def test_slow_provider_does_not_block_heartbeat_or_defeat_timeout(mode):
             assert orchestrator._unknown_exchange_state
             assert orchestrator._exchange_read_only_status == "UNAVAILABLE"
             assert provider.calls == 1
+            engine = orchestrator._resolve_persistence_engine()
+            with engine.connect() as conn:
+                diagnostics = conn.execute(text(
+                    "SELECT diagnostics_json FROM exchange_reconciliation_events "
+                    "WHERE status='EXCHANGE_STATE_UNKNOWN' ORDER BY id DESC LIMIT 1"
+                )).scalar_one()
+            assert json.loads(diagnostics)["timeout_phase"] == "PROVIDER_READ"
         finally:
             provider.release.set()
             await task
             await orchestrator._shutdown_tasks()
 
     asyncio.run(check())
+
+
+def test_reconciliation_phase_advances_after_provider_read_and_persistence():
+    class CompleteProvider:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
+
+    orchestrator = runtime(CompleteProvider())
+    phases = []
+
+    async def check():
+        try:
+            await orchestrator._reconcile_runtime_state(on_phase=phases.append)
+        finally:
+            await orchestrator._shutdown_tasks()
+
+    asyncio.run(check())
+    assert phases == ["PROVIDER_READ", "RECONCILIATION", "PERSISTENCE"]
+
+
+def test_timeout_after_provider_read_is_not_recorded_as_provider_read(monkeypatch):
+    class CompleteProvider:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
+
+    orchestrator = runtime(CompleteProvider())
+    finding = ReconciliationFinding(
+        finding_type="ORPHAN_ORDER", severity="HIGH", symbol="BTCUSDT",
+        lifecycle_ref="test", timestamp="2026-11-02T00:00:00Z", evidence={},
+        suggested_remediation="operator_review", fail_closed=True,
+    )
+    monkeypatch.setattr(orchestrator._reconciliation_engine, "reconcile", lambda **kwargs: ([finding], [], {}))
+
+    async def delayed_event(*args, **kwargs):
+        await asyncio.sleep(0.1)
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_emit_lifecycle_event", delayed_event)
+
+    async def check():
+        try:
+            await orchestrator._run_reconciliation_once()
+        finally:
+            await orchestrator._shutdown_tasks()
+
+    asyncio.run(check())
+    with orchestrator._resolve_persistence_engine().connect() as conn:
+        diagnostics = conn.execute(text(
+            "SELECT diagnostics_json FROM exchange_reconciliation_events "
+            "WHERE status='EXCHANGE_STATE_UNKNOWN' ORDER BY id DESC LIMIT 1"
+        )).scalar_one()
+    assert json.loads(diagnostics)["timeout_phase"] == "LIFECYCLE_EVENT"
+    assert orchestrator._execution_reconciliation_blocked()
 
 
 async def wait_entered(provider):

@@ -7056,8 +7056,14 @@ class RuntimeOrchestrator:
 
     async def _run_reconciliation_once(self) -> None:
         self.metrics.reconciliation_runs += 1
+        timeout_phase = "STARTING"
+
+        def record_phase(phase: str) -> None:
+            nonlocal timeout_phase
+            timeout_phase = phase
+
         try:
-            await asyncio.wait_for(self._reconcile_runtime_state(), timeout=self.config.reconciliation_timeout_sec)
+            await asyncio.wait_for(self._reconcile_runtime_state(on_phase=record_phase), timeout=self.config.reconciliation_timeout_sec)
         except asyncio.TimeoutError:
             self._unknown_exchange_state = True
             self._exchange_read_only_status = "UNAVAILABLE"
@@ -7076,7 +7082,8 @@ class RuntimeOrchestrator:
                 try:
                     persist_reconciliation_cycle(engine, cycle_id=f"recon:timeout:{uuid.uuid4().hex}",
                         findings=[], snapshot=state, diagnostics={"evidence_status": "INCOMPLETE",
-                            "failure_class": TRANSIENT_TRANSPORT, "errors": ["reconciliation_timeout"]},
+                            "failure_class": TRANSIENT_TRANSPORT, "errors": ["reconciliation_timeout"],
+                            "timeout_phase": timeout_phase},
                         pending_failures=self._pending_reconciliation_persistence_failures)
                 except ReconciliationPersistenceFailure as exc:
                     self._pending_reconciliation_persistence_failures.append({"cycle_id": f"recon-failure:{uuid.uuid4().hex}",
@@ -7087,7 +7094,7 @@ class RuntimeOrchestrator:
             if time.monotonic() - self._transient_provider_outage_started_monotonic >= self.config.provider_transient_outage_grace_seconds:
                 self._pause_for_provider_failure("PROVIDER_TRANSIENT_OUTAGE_GRACE_EXPIRED")
 
-    async def _reconcile_runtime_state(self) -> None:
+    async def _reconcile_runtime_state(self, *, on_phase: Callable[[str], None] | None = None) -> None:
         # A CLEAN observation is not tradable until its evidence commits.
         self._reconciliation_persistence_unhealthy = True
         if self.config.execution_mode == ExecutionMode.BACKTEST:
@@ -7113,6 +7120,8 @@ class RuntimeOrchestrator:
                     snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE", "blocking_reason": "EXCHANGE_RECONCILIATION_UNAVAILABLE"}
             else:
                 try:
+                    if on_phase is not None:
+                        on_phase("PROVIDER_READ")
                     snapshot_source = await self._reconciliation_reader.read(provider)
                     if provider is not (self.live_reconciliation_provider or self.exchange_snapshot_provider):
                         raise RuntimeError("reconciliation_provider_changed_during_read")
@@ -7147,6 +7156,8 @@ class RuntimeOrchestrator:
                     snapshot_source["recovery_transition"] = "CLEAN_RECONCILIATION_COMMITTED"
         else:
             snapshot_source = {"orders": [], "positions": [], "fills": []}
+        if on_phase is not None:
+            on_phase("RECONCILIATION")
         derivatives_contract = (
             dict(snapshot_source.get("derivatives_contract") or {})
             if isinstance(snapshot_source.get("derivatives_contract"), Mapping)
@@ -7195,6 +7206,8 @@ class RuntimeOrchestrator:
             if self._pending_reconciliation_persistence_failures and not self._fail_closed_reason:
                 state.last_error = None
             try:
+                if on_phase is not None:
+                    on_phase("PERSISTENCE")
                 persist_reconciliation_cycle(engine, cycle_id=cycle_id, findings=findings, snapshot=state,
                                              diagnostics=snapshot_source,
                                              pending_failures=self._pending_reconciliation_persistence_failures,
@@ -7241,6 +7254,8 @@ class RuntimeOrchestrator:
             if signature in self._last_repair_signature:
                 continue
             self._last_repair_signature.add(signature)
+            if on_phase is not None:
+                on_phase("LIFECYCLE_EVENT")
             await self._emit_lifecycle_event(
                 LifecycleEventType.RECONCILIATION_REPAIR.value,
                 finding.symbol,
