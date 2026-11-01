@@ -136,6 +136,204 @@ def _pr():
                 base=dict(ref='main',repo=dict(full_name='werim/AlphaForge')))
 
 
+class DevAPI:
+    repo = 'werim/AlphaForge'
+
+    def __init__(self):
+        self.run = {**_run(event='push'), 'name': 'Tests', 'head_branch': 'dev',
+                    'head_repository': {'full_name': self.repo}}
+        self.head = 'a' * 40
+        self.tree = 'b' * 40
+        self.checkout = self.head
+        self.branch_reads = 0
+        self.move_head = False
+        self.new_attempt = False
+        self.move_during_run_lookup = False
+        self.mutation = 'success'
+        self.full = 'success'
+
+    def get(self, path):
+        if '/actions/runs/' in path and path.rsplit('/', 1)[-1].isdigit():
+            return deepcopy(self.run)
+        if path.endswith('/branches/dev'):
+            self.branch_reads += 1
+            head = 'c' * 40 if self.move_head and self.branch_reads > 1 else self.head
+            return {'commit': {'sha': head}}
+        if '/actions/workflows/test.yml/runs?' in path:
+            if self.move_during_run_lookup:
+                self.head = 'c' * 40
+            return {'workflow_runs': [deepcopy(self.run)]}
+        if path.endswith('/git/commits/' + self.head):
+            return {'sha': self.head, 'tree': {'sha': self.tree}}
+        raise AssertionError(path)
+
+    def pages(self, path, key=None):
+        if '/pulls?state=open' in path:
+            return iter([])
+        if path.endswith('/jobs'):
+            return iter(self.jobs())
+        if path.endswith('/commits/' + self.head):
+            assert key == 'files'
+            return iter([{'filename': 'scripts/verify_codex_delivery.py'},
+                         {'filename': 'tests/test_verify_codex_delivery.py'}])
+        raise AssertionError(path)
+
+    def jobs(self):
+        job = _job(mutation=self.mutation, full=self.full)[0]
+        job['id'] = 99
+        job['steps'].append({'name': 'Run actions/checkout@v4', 'conclusion': 'success',
+                            'started_at': '2026-10-28T00:00:00Z',
+                            'completed_at': '2026-10-28T00:00:01Z'})
+        return [job]
+
+    def log(self, job_id):
+        assert job_id == 99
+        if self.new_attempt:
+            self.run = {**self.run, 'run_attempt': 2, 'status': 'in_progress', 'conclusion': None}
+        return ('2026-10-28T00:00:00.100Z [command]/usr/bin/git log -1 --format=%H\n'
+                '2026-10-28T00:00:00.200Z ' + self.checkout + '\n')
+
+
+def test_dev_push_produces_receipt_without_an_open_pr_or_comment_write():
+    api = DevAPI()
+    reports = verifier.handle(api, 'workflow_run', {'workflow_run': deepcopy(api.run)})
+    assert len(reports) == 1
+    report = reports[0]
+    assert 'RESULT: CI_EVIDENCE_VERIFIED' in report
+    assert 'EXACT_HEAD_SHA' in report and api.head in report and api.tree in report
+    assert 'attempt 1' in report and '/actions/runs/123' in report
+    assert 'Comment delivery: NOT_APPLICABLE_BRANCH_RECEIPT' in report
+
+
+@pytest.mark.parametrize('defect,expected', [
+    ('failed', 'CI_FAILED_OR_NOT_SUCCESSFUL'),
+    ('skipped_mutation', 'INCOMPLETE_CI_GATES'),
+    ('skipped_full', 'INCOMPLETE_CI_GATES'),
+    ('wrong_checkout', 'INCOMPLETE_SOURCE_IDENTITY'),
+    ('wrong_tree', 'INCOMPLETE_SOURCE_IDENTITY'),
+    ('moved_head', 'STALE_EVIDENCE_NOT_VERIFIED'),
+    ('new_attempt', 'STALE_EVIDENCE_NOT_VERIFIED'),
+])
+def test_dev_push_never_promotes_failed_missing_or_stale_evidence(defect, expected):
+    api = DevAPI()
+    if defect == 'failed': api.run['conclusion'] = 'failure'
+    elif defect == 'skipped_mutation': api.mutation = 'skipped'
+    elif defect == 'skipped_full': api.full = 'skipped'
+    elif defect == 'wrong_checkout': api.checkout = 'd' * 40
+    elif defect == 'wrong_tree': api.tree = 'unavailable'
+    elif defect == 'moved_head': api.move_head = True
+    elif defect == 'new_attempt': api.new_attempt = True
+    reports = verifier.handle(api, 'workflow_run', {'workflow_run': deepcopy(api.run)})
+    assert len(reports) == 1
+    assert 'RESULT: ' + expected in reports[0]
+    assert 'RESULT: CI_EVIDENCE_VERIFIED' not in reports[0]
+
+
+@pytest.mark.parametrize('field,value', [
+    ('head_branch', 'main'), ('event', 'workflow_dispatch'),
+    ('head_repository', {'full_name': 'untrusted/fork'}), ('status', 'in_progress'),
+])
+def test_dev_branch_receipts_ignore_other_or_unfinished_sources(field, value):
+    api = DevAPI()
+    api.run[field] = value
+    assert verifier.handle(api, 'workflow_run', {'workflow_run': api.run}) == []
+
+
+def test_workflow_routes_dev_push_without_changing_trusted_checkout_or_permissions():
+    workflow = (HERE / '.github/workflows/codex-delivery-verification.yml').read_text()
+    assert "github.event.workflow_run.event == 'push'" in workflow
+    assert "github.event.workflow_run.head_branch == 'dev'" in workflow
+    assert 'ref: main' in workflow and 'persist-credentials: false' in workflow
+    assert 'pull_request_target' not in workflow and 'secrets.' not in workflow
+
+
+@pytest.mark.parametrize('field,value', [('id', None), ('id', True),
+                                        ('run_attempt', None), ('run_attempt', 0),
+                                        ('run_attempt', True)])
+def test_dev_receipt_requires_explicit_run_and_attempt(field, value):
+    api = DevAPI()
+    api.run[field] = value
+    reports = verifier.handle(api, 'workflow_run', {'workflow_run': api.run})
+    assert len(reports) == 1 and 'RESULT: INCOMPLETE_CI_IDENTITY' in reports[0]
+    assert api.branch_reads == 0
+
+
+def test_dev_head_move_during_final_run_lookup_is_not_a_verified_receipt():
+    api = DevAPI()
+    api.move_during_run_lookup = True
+    reports = verifier.handle(api, 'workflow_run', {'workflow_run': deepcopy(api.run)})
+    assert 'RESULT: STALE_EVIDENCE_NOT_VERIFIED' in reports[0]
+    assert 'RESULT: CI_EVIDENCE_VERIFIED' not in reports[0]
+
+
+def test_dev_receipt_writes_existing_artifact_and_summary_without_a_pr(monkeypatch, tmp_path):
+    api = DevAPI()
+    event = tmp_path / 'event.json'
+    event.write_text(json.dumps({'workflow_run': api.run}))
+    receipt, summary = tmp_path / 'receipt.json', tmp_path / 'summary.md'
+    for key, value in {'GITHUB_EVENT_NAME': 'workflow_run', 'GITHUB_EVENT_PATH': str(event),
+                       'GITHUB_REPOSITORY': api.repo, 'GH_TOKEN': 'not-a-real-token',
+                       'DELIVERY_RECEIPTS_PATH': str(receipt),
+                       'GITHUB_STEP_SUMMARY': str(summary)}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(verifier, 'GitHub', lambda *args: api)
+    assert verifier.main() == 0
+    saved = json.loads(receipt.read_text())
+    assert saved['schema'] == 'alpha-delivery-receipts-v1'
+    assert len(saved['reports']) == 1
+    assert saved['reports'][0] in summary.read_text()
+    assert 'RESULT: CI_EVIDENCE_VERIFIED' in saved['reports'][0]
+
+
+def test_manual_dev_audit_reads_existing_run_without_reexecuting_tests():
+    api = DevAPI()
+    original = deepcopy(api.run)
+    reports = verifier.handle(api, 'workflow_dispatch', {'inputs': {'tests_run_id': '123'}})
+    assert len(reports) == 1 and 'RESULT: CI_EVIDENCE_VERIFIED' in reports[0]
+    assert '/actions/runs/123' in reports[0] and 'attempt 1' in reports[0]
+    assert 'NOT_APPLICABLE_BRANCH_RECEIPT' in reports[0]
+    assert api.run == original
+
+
+@pytest.mark.parametrize('inputs', [
+    {}, {'pr_number': '12', 'tests_run_id': '123'}, {'pr_number': '12', 'tests_run_id': 0},
+    {'tests_run_id': '0'},
+    {'tests_run_id': '-1'}, {'tests_run_id': True}, {'tests_run_id': ' 123'},
+    {'tests_run_id': '١٢٣'}, {'tests_run_id': '123/attempts/2'},
+])
+def test_manual_audit_requires_one_unambiguous_target(inputs):
+    class Never:
+        def get(self, path): raise AssertionError(path)
+    assert verifier.handle(Never(), 'workflow_dispatch', {'inputs': inputs}) == []
+
+
+@pytest.mark.parametrize('field,value', [
+    ('event', 'pull_request'), ('head_branch', 'main'),
+    ('head_repository', {'full_name': 'untrusted/fork'}), ('name', 'Unrelated'),
+    ('status', 'in_progress'), ('id', 124),
+])
+def test_manual_audit_cannot_select_an_unrelated_or_unfinished_run(field, value):
+    api = DevAPI()
+    api.run[field] = value
+    assert verifier.handle(api, 'workflow_dispatch', {'inputs': {'tests_run_id': '123'}}) == []
+
+
+def test_manual_audit_retains_dev_head_and_attempt_freshness_guards():
+    for defect in ('move_head', 'new_attempt', 'move_during_run_lookup'):
+        api = DevAPI()
+        setattr(api, defect, True)
+        reports = verifier.handle(api, 'workflow_dispatch', {'inputs': {'tests_run_id': '123'}})
+        assert 'RESULT: STALE_EVIDENCE_NOT_VERIFIED' in reports[0]
+        assert 'RESULT: CI_EVIDENCE_VERIFIED' not in reports[0]
+
+
+def test_workflow_exposes_optional_existing_run_audit_input():
+    workflow = (HERE / '.github/workflows/codex-delivery-verification.yml').read_text()
+    inputs = workflow.split('    inputs:', 1)[1].split('\npermissions:', 1)[0]
+    assert 'tests_run_id:' in inputs
+    assert 'required: true' not in inputs
+
+
 class API:
     repo='werim/AlphaForge'
     def __init__(self):
