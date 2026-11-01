@@ -44,8 +44,8 @@ T0–T4 development routing does not waive any applicable G0–G10 release gate 
 
 The existing [Codex Delivery Verification workflow](../.github/workflows/codex-delivery-verification.yml)
 runs on Tests completion and executes the [trusted-main verifier](../scripts/verify_codex_delivery.py).
-It produces `alpha-delivery-receipts-v1`: `reports` contains per-PR report strings
-with the actual `RESULT`, current head, Tests run/attempt, tested checkout,
+It produces `alpha-delivery-receipts-v1`: `reports` contains PR or dev-branch
+report strings with the actual `RESULT`, current head, Tests run/attempt, tested checkout,
 source-binding verdict and required-step results. The same reports are written
 to the job summary and preserved in artifact
 `codex-delivery-receipts-<verifier-run-id>-<verifier-attempt>` independently of
@@ -53,14 +53,30 @@ comment publication. Reuse this contract; do not add another CI authority.
 
 On a supported completion event or the next task invocation, read the result
 directly; never ask the user to carry green/fail. Take one bounded snapshot of
-the current PR and its source-bound Tests run/attempt, then read the matching
+the current PR or dev branch and its source-bound Tests run/attempt, then read the matching
 trusted verifier receipt from its artifact or job summary. Verify artifact
 run/attempt identity and digest when using the artifact. The verifier's own
 workflow head is trusted main, not the candidate SHA: bind the report to the
-candidate through its PR head and Tests run/attempt instead. Require the report's
+candidate through its PR head or current dev head and Tests run/attempt instead. Require the report's
 actual `RESULT` to agree with that identity and current Tests metadata; workflow
 success, a matching word elsewhere in a report, or an empty `reports` list is
 not a passing receipt.
+
+For a dev-branch receipt, the producer accepts only completed same-repository
+Tests `push` events for `dev`. It verifies the current dev head/tree, actual
+tested checkout and mandatory push gates, then rechecks branch/run/attempt
+freshness. No open PR or comment writer is required; comment delivery is
+`NOT_APPLICABLE_BRANCH_RECEIPT`. A PR receipt does not substitute for this
+branch-specific evidence.
+
+When an already-completed dev Tests event predates producer activation, it will
+not fire again automatically. The existing verifier's manual dispatch accepts
+exactly one selector: `pr_number` or `tests_run_id`. Under explicit authorization,
+use `tests_run_id` to read the existing completed same-repository Tests `push/dev`
+run through the same verifier. It does not rerun Tests or waive current-head,
+run/attempt freshness or required-gate checks. Record the actual producer
+checkout and matching receipt artifact/run/attempt/digest; missing evidence
+remains incomplete. Do not repeatedly dispatch while waiting for a receipt.
 
 Use the existing `tested_checkout`, `code_identity`, `required_steps` and
 `evaluate` rules. Record `EXACT_HEAD_SHA` separately from `TREE_EQUIVALENT_MERGE`;

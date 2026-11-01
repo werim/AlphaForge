@@ -128,8 +128,8 @@ predeclared outcomes and incomplete evidence. Apply the cost/N/A rules below.
 
 Autonomous exact-SHA CI inspection, failure remediation, review and permitted
 merge are the default; do not hand routine CI monitoring back to the user.
-Use source-bound Tests results and the existing Codex Delivery Verification
-receipt, following [CI continuation](docs/TEST_PROTOCOL.md#receipt-bound-ci-continuation).
+Use source-bound Tests results and the matching PR or dev-branch Codex Delivery
+Verification receipt, following [CI continuation](docs/TEST_PROTOCOL.md#receipt-bound-ci-continuation).
 Do not ask the user to relay green/fail. A green verifier workflow alone is not
 `CI_EVIDENCE_VERIFIED`. Do not create polling, watch or waiting loops.
 An explicit current task/operator restriction on CI inspection or reruns,
