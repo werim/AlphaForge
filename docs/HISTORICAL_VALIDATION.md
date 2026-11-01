@@ -692,7 +692,7 @@ and horizon (or explicit `None`, yielding HORIZON_UNSET). RETURN_TO_LEVEL labels
 the first forward low <= level for LONG or high >= level for SHORT;
 CLOSE_BACK_INSIDE instead uses the corresponding completed close. These are
 separate versioned/pinned research targets, not defaults or calibrated choices.
-Equality is a return; no buffer/threshold is invented. Entry timeout is not
+In these v1 hypotheses equality is a return; no buffer/threshold is invented. Entry timeout is not
 borrowed as a fakeout horizon. Synthetic test intervals/horizons are not policy.
 
 Prediction starts at the frozen candidate decision. The prediction candle is
@@ -719,3 +719,37 @@ NOT_EVALUABLE and runtime admission DISABLED. Calibration, representative market
 data, immutable train/calibration splits, horizon/policy selection and untouched
 OOS remain separate pending gates. No fitted probability or runtime integration
 is implemented, and no future outcome is supplied to decision-time features.
+
+### Initial strict three-close research policy (v2)
+
+The explicit owner-selected `CloseBackInside3Policy(timeframe_ms)` is a separate
+initial research assumption, not a validated optimum or runtime default. Its
+`close-back-inside-3-v1` descriptor pins `CLOSE_BACK_INSIDE`, three bars, the
+timeframe interval in milliseconds, boundary-only equality and an
+`AFTER_BREAKOUT_CANDLE` anchor into the policy hash and independent replay.
+The label packet uses `breakout-failure-label-v2`. The existing v1 policies keep
+their inclusive rules and policy identities; no historical packets are rewritten.
+Algorithm byte hashes still identify the recorded source needed to replay each
+historical packet, rather than silently replacing its source identity.
+
+The window starts at the frozen confirming candle's exclusive end, excludes
+that candle, and ends after exactly three completed forward candles. The level
+remains the previous high for LONG or low for SHORT, frozen by `freeze_breakout`.
+LONG fails only on a close strictly below that level; SHORT only strictly above.
+Equal closes are retained separately in `boundary_equal_closes`. Inclusive wick
+touch is recorded only in `return_to_level`, never as a failed-close label.
+
+The first strict close may resolve a positive label after a contiguous observed
+prefix. Its availability is no earlier than that close and every required
+prefix candle's recorded availability. Unused later evidence cannot reopen the
+resolved prefix. A missing/unavailable completed candle before resolution gives
+`UNAVAILABLE`, even if a later close is inside. A required candle that has not
+completed gives `PENDING`; neither state supplies a binary label or resolution
+time. A negative label needs all three completed, available candles. Diagnostic
+touch/equality events describe only the consumed completed prefix.
+
+Policy/timeframe changes, JSON type edits and rehashed promotion are rejected by
+independent replay. Probability remains null/UNAVAILABLE, dependent evaluation
+NOT_EVALUABLE and runtime/native-decision/order authority DISABLED. No scoring,
+PAPER/LIVE, calibration or consumer hook is added. Attributable datasets,
+train/calibration selection and untouched OOS remain separate evidence gates.

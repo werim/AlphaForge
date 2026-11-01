@@ -268,6 +268,19 @@ def mutations() -> list[Mutation]:
                  'latest["head"]["sha"] != sha', 'False',
                  "tests/test_verify_codex_delivery.py::test_head_moves_during_log_inspection_never_publishes"),
     ])
+    cases.extend([
+        Mutation("strict_label_equal_close_is_boundary", "src/alphaforge/breakout_failure_labels.py",
+                 "price < seed.level if seed.side == 'LONG' else price > seed.level",
+                 "price <= seed.level if seed.side == 'LONG' else price >= seed.level",
+                 "tests/test_breakout_failure_labels.py::test_strict_three_bar_equal_close_is_boundary_not_failure"),
+        Mutation("strict_label_missing_completed_candle_unavailable", "src/alphaforge/breakout_failure_labels.py",
+                 "return result('UNAVAILABLE', missing_start=start)",
+                 "return result('NO_FAILURE_WITHIN_HORIZON', False)",
+                 "tests/test_breakout_failure_labels.py::test_strict_three_bar_missing_required_candle_is_unavailable"),
+        Mutation("strict_label_requires_visible_completed_close", "src/alphaforge/breakout_failure_labels.py",
+                 "if row.available_ms > asof_ms or row.end_ms > asof_ms:", "if False:",
+                 "tests/test_breakout_failure_labels.py::test_strict_three_bar_future_close_is_not_used_early_and_resolved_prefix_is_immutable"),
+    ])
     return cases
 
 
