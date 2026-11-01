@@ -8,7 +8,7 @@ import pytest
 
 from alphaforge.backtest_source_evidence import digest
 from alphaforge.breakout_failure_labels import (
-    Bar, LabelPolicy, freeze_breakout, label_breakout, replay_label,
+    Bar, LabelPolicy, CloseBackInside3Policy, freeze_breakout, label_breakout, replay_label,
 )
 
 I = 1000  # synthetic clock interval; not a suggested research horizon/timeframe
@@ -179,3 +179,179 @@ def test_forward_scope_and_time_grid_are_enforced(change):
 
 def test_candidate_scope_mismatch_is_refused():
     with pytest.raises(ValueError): seed(current=replace(seed().current, symbol='ETHUSDT'))
+
+
+def strict_label(s, rows, asof=5*I):
+    return label_breakout(s, CloseBackInside3Policy(s.interval_ms), rows, asof_ms=asof)
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_equal_close_is_boundary_not_failure(side):
+    s = seed(side)
+    equal = forward(side, close=s.level, **({'low': 101.} if side == 'LONG' else {'high': 99.}))
+    r = strict_label(s, [equal, forward(side, start=3*I), forward(side, start=4*I)])['result']
+    assert r['status'] == 'NO_FAILURE_WITHIN_HORIZON' and r['failed_breakout'] is False
+    assert r['boundary_equal_closes'] == [dict(event_interval=[2*I, 3*I], close=s.level,
+                                              available_ms=3*I, status='LEVEL_EQUAL_CLOSE')]
+    assert r['return_to_level']['observed'] is True
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_missing_required_candle_is_unavailable(side):
+    s = seed(side)
+    inside = forward(side, start=4*I, **({'close': 101., 'low': 100.} if side == 'LONG'
+                                        else {'close': 99., 'high': 100.}))
+    r = strict_label(s, [forward(side), inside])['result']
+    assert r['status'] == 'UNAVAILABLE' and r['failed_breakout'] is None
+    assert r['missing_interval'] == [3*I, 4*I]
+    assert r['resolved_available_ms'] is None
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_wick_touch_is_diagnostic_and_negative_needs_three_closes(side):
+    s = seed(side)
+    touch = forward(side, **({'low': 101.} if side == 'LONG' else {'high': 99.}))
+    rows = [touch, forward(side, start=3*I), forward(side, start=4*I)]
+    for asof in (2*I, 3*I, 4*I, 5*I-1):
+        r = strict_label(s, rows, asof)['result']
+        assert r['status'] == 'PENDING' and r['failed_breakout'] is None
+        assert r['resolved_available_ms'] is None
+    packet = strict_label(s, [s.previous, s.current, *rows])
+    r = packet['result']
+    assert r['schema'] == 'breakout-failure-label-v2'
+    assert r['window_start_ms'] == 2*I and r['due_ms'] == 5*I
+    assert r['status'] == 'NO_FAILURE_WITHIN_HORIZON' and r['failed_breakout'] is False
+    assert r['consumed_bars'] == 3 and r['resolved_available_ms'] == 5*I
+    assert r['return_to_level'] == dict(diagnostic_only=True, observed=True,
+                                      event_interval=[2*I, 3*I], available_ms=3*I)
+    assert r['boundary_equal_closes'] == []
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_first_close_and_late_prefix_control_positive_availability(side):
+    s = seed(side)
+    inside = forward(side, start=3*I, **({'close': 101., 'low': 100.} if side == 'LONG'
+                                        else {'close': 99., 'high': 100.}))
+    rows = [forward(side, available_ms=4*I+100), inside]
+    assert strict_label(s, rows, asof=4*I+99)['result']['status'] == 'UNAVAILABLE'
+    r = strict_label(s, rows, asof=4*I+100)['result']
+    assert r['status'] == 'FAILED_BREAKOUT' and r['failed_breakout'] is True
+    assert r['event_interval'] == [3*I, 4*I] and r['consumed_bars'] == 2
+    assert r['resolved_available_ms'] == 4*I+100 >= inside.end_ms
+    assert r['return_to_level']['available_ms'] == 4*I+100
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_future_close_is_not_used_early_and_resolved_prefix_is_immutable(side):
+    s = seed(side)
+    inside = forward(side, **({'close': 101., 'low': 100.} if side == 'LONG'
+                              else {'close': 99., 'high': 100.}))
+    assert strict_label(s, [inside], asof=3*I-1) == strict_label(s, [], asof=3*I-1)
+    assert strict_label(s, [inside], asof=3*I-1)['result']['status'] == 'PENDING'
+    delayed = replace(inside, available_ms=3*I+50)
+    assert strict_label(s, [delayed], asof=3*I+49)['result']['status'] == 'UNAVAILABLE'
+    resolved = strict_label(s, [delayed], asof=3*I+50)
+    assert resolved['result']['resolved_available_ms'] == 3*I+50
+    later = forward(side, start=3*I, symbol='OTHER', close=math.nan)
+    outside = forward(side, start=5*I, close=math.nan)
+    assert strict_label(s, [delayed, later, outside]) == resolved
+
+
+@pytest.mark.parametrize('missing', ['gap', 'unavailable', 'late'])
+def test_strict_three_bar_complete_time_window_with_missing_evidence_is_not_negative(missing):
+    last = forward(start=4*I)
+    if missing == 'unavailable': last = replace(last, available_ms=None)
+    if missing == 'late': last = replace(last, available_ms=6*I)
+    rows = [forward(), forward(start=3*I)]
+    if missing != 'gap': rows.append(last)
+    r = strict_label(seed(), rows)['result']
+    assert r['status'] == 'UNAVAILABLE' and r['failed_breakout'] is None
+    assert r['missing_interval'] == [4*I, 5*I] and r['resolved_available_ms'] is None
+    assert r['return_to_level']['observed'] is None
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_freezes_level_and_anchors_after_confirming_candle(side):
+    s = seed(side, decision_ms=2*I+100)
+    first = forward(side, **({'high': 10000.} if side == 'LONG' else {'low': 1.}))
+    r = strict_label(s, [s.current, first, forward(side, start=3*I), forward(side, start=4*I)])['result']
+    assert r['failed_breakout'] is False and r['frozen_breakout_level'] == s.level
+    assert r['decision_ms'] == 2*I+100 and r['window_start_ms'] == 2*I and r['due_ms'] == 5*I
+    assert r['return_to_level']['observed'] is False
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+def test_strict_three_bar_equal_boundary_is_distinct_before_window_matures(side):
+    s = seed(side)
+    equal = forward(side, close=s.level, **({'low': 101.} if side == 'LONG' else {'high': 99.}))
+    r = strict_label(s, [equal], asof=3*I)['result']
+    assert r['status'] == 'PENDING' and r['failed_breakout'] is None
+    assert r['boundary_equal_closes'][0]['status'] == 'LEVEL_EQUAL_CLOSE'
+    # The legacy version remains a different, inclusive hypothesis.
+    old = label(s, [equal], rule='CLOSE_BACK_INSIDE', horizon=3, asof=3*I)['result']
+    assert old['schema'] == 'breakout-failure-label-v1' and old['failed_breakout'] is True
+    assert old['policy'] == dict(invalidation='CLOSE_BACK_INSIDE', horizon_bars=3)
+    assert old['policy_id'] != r['policy_id'] and 'boundary_equal_closes' not in old
+
+
+@pytest.mark.parametrize('side', ['LONG', 'SHORT'])
+@pytest.mark.parametrize('inside', [False, True])
+def test_strict_three_bar_has_no_implicit_equality_buffer(side, inside):
+    s = seed(side)
+    toward = -math.inf if (side == 'LONG') == inside else math.inf
+    close = math.nextafter(s.level, toward)
+    first = forward(side, close=close, **({'low': min(101., close)} if side == 'LONG'
+                                         else {'high': max(99., close)}))
+    r = strict_label(s, [first, forward(side, start=3*I), forward(side, start=4*I)])['result']
+    assert r['failed_breakout'] is inside and r['boundary_equal_closes'] == []
+
+
+def test_strict_three_bar_duplicates_and_required_source_scope_fail_closed():
+    s = seed(); rows = [forward(), forward(start=3*I), forward(start=4*I)]
+    assert strict_label(s, [rows[0], *rows]) == strict_label(s, rows)
+    r = strict_label(s, [replace(rows[0], low=102.), *rows])['result']
+    assert r['status'] == 'AMBIGUOUS_DUPLICATE_SOURCE' and r['failed_breakout'] is None
+    assert r['resolved_available_ms'] is None
+    with pytest.raises(ValueError, match='source scope'):
+        strict_label(s, [replace(rows[0], source_id='OTHER'), *rows[1:]])
+    with pytest.raises(ValueError):
+        strict_label(s, [replace(rows[0], start_ms=2*I+1), *rows[1:]])
+
+
+@pytest.mark.parametrize('value', [0, -1, True, I*1.0, None])
+def test_strict_three_bar_timeframe_requires_explicit_integer_identity(value):
+    with pytest.raises(ValueError): CloseBackInside3Policy(value)
+
+
+def test_strict_three_bar_policy_timeframe_schema_and_horizon_are_pinned():
+    p = CloseBackInside3Policy(I)
+    assert CloseBackInside3Policy.from_dict(json.loads(json.dumps(asdict(p)))) == p
+    with pytest.raises(ValueError, match='timeframe'):
+        label_breakout(seed(), CloseBackInside3Policy(2*I), [], asof_ms=5*I)
+    for field, value in [('horizon_bars', 3.0), ('horizon_bars', 2),
+                         ('equality', 'INCLUSIVE'), ('schema', 'OTHER'), ('window_anchor', 'DECISION')]:
+        bad = {**asdict(p), field: value}
+        with pytest.raises(ValueError): CloseBackInside3Policy.from_dict(bad)
+    with pytest.raises(ValueError): CloseBackInside3Policy.from_dict({'timeframe_ms': I})
+
+
+@pytest.mark.parametrize('field,value', [('failed_breakout', 0), ('probability', 0.25),
+                                        ('runtime_admission', 'ENABLED'),
+                                        ('native_decision_authority', 'ENABLED'),
+                                        ('order_admission', 'ENABLED')])
+def test_strict_three_bar_rehashed_promotions_and_json_type_edits_fail_replay(tmp_path, field, value):
+    s = seed(); p = CloseBackInside3Policy(I)
+    rows = [forward(), forward(start=3*I), forward(start=4*I)]
+    packet = label_breakout(s, p, rows, asof_ms=5*I)
+    path = tmp_path/'new-synthetic-label.json'
+    path.write_text(json.dumps(packet))
+    loaded = json.loads(path.read_text())
+    assert replay_label(loaded, s, p, rows, asof_ms=5*I, expected_seed_id=s.seed_id) == packet
+    assert packet['result']['probability'] is None
+    assert packet['result']['policy_selection_status'] == 'INITIAL_RESEARCH_ASSUMPTION_NOT_OPTIMIZED'
+    loaded['result'][field] = value
+    loaded['result_hash'] = digest(loaded['result'])
+    with pytest.raises(ValueError, match='replay mismatch'):
+        replay_label(loaded, s, p, rows, asof_ms=5*I, expected_seed_id=s.seed_id)
+    with pytest.raises(ValueError, match='seed pin'):
+        replay_label(packet, s, p, rows, asof_ms=5*I, expected_seed_id='0'*64)
