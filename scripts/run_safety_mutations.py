@@ -143,9 +143,63 @@ def mutations() -> list[Mutation]:
         Mutation("missing_cash_is_not_zero", "src/alphaforge/realized_accounting.py",
                  "total = None if absent else sum(parsed.values())", "total = sum(parsed.values())",
                  accounting_test + "::test_missing_realized_cost_evidence_is_not_net_profit"),
-        Mutation("legacy_cash_applies_risk_scale", "backtest_order.py",
-                 "base_notional * scale / fill", "base_notional / fill",
+        Mutation("legacy_cash_applies_risk_scale", "src/alphaforge/realized_accounting.py",
+                 "base * scale / price", "base / price",
                  accounting_test + "::test_full_closure_matrix_matches_sql"),
+        Mutation("strategy_closed_prefix_only", "src/alphaforge/backtest_strategy_adapter.py",
+                 "b['timestamp']+STEP<=decision_ms", "b['timestamp']<=decision_ms",
+                 "tests/test_backtest_strategy_adapter.py::test_future_rows_never_reach_native_selector_or_scan"),
+        Mutation("strategy_native_protective_exits_not_coerced", "src/alphaforge/backtest_strategy_adapter.py",
+                 "reasons.append('MISSING_NATIVE_SCHEDULED_EXIT_CONTRACT')", "reasons.clear()",
+                 "tests/test_backtest_strategy_adapter.py::test_native_protective_exits_are_not_coerced_to_fixed_horizon"),
+        Mutation("strategy_native_risk_uses_release_clock", "backtest_order.py",
+                 "        timestamp=native_decision_ms,", "        timestamp=now.timestamp,",
+                 "tests/test_backtest_strategy_adapter.py::test_native_risk_clock_is_candle_release_while_signal_label_stays_unchanged"),
+        Mutation("scoring_future_assumption_rejected", "src/alphaforge/historical_scoring_evidence.py",
+                 "self.effective_from_ms > scenario.start_ms", "False",
+                 "tests/test_historical_scoring_evidence.py::test_causal_scope_and_replay"),
+        Mutation("scoring_modeled_never_observed", "src/alphaforge/historical_scoring_evidence.py",
+                 "kind='UNAVAILABLE' if value is None else 'MODELED'",
+                 "kind='UNAVAILABLE' if value is None else 'OBSERVED'",
+                 "tests/test_historical_scoring_evidence.py::test_signed_fraction_once_through_canonical_cost_and_score"),
+        Mutation("downstream_unknown_never_aligns", "src/alphaforge/historical_downstream_scenario.py",
+                 "if status=='NOT_EVALUABLE':\n            return 'NOT_EVALUABLE'",
+                 "if status=='NOT_EVALUABLE':\n            return 'SCENARIO_DOWNSTREAM_ALIGNED'",
+                 "tests/test_historical_downstream_scenario.py::test_outcomes_require_every_gate_and_follow_canonical_order"),
+        Mutation("downstream_missing_cost_rr_remains_unknown", "src/alphaforge/historical_downstream_scenario.py",
+                 "effective_rr=rr['effective_rr'] if cost_complete else None",
+                 "effective_rr=rr['effective_rr']",
+                 "tests/test_historical_downstream_scenario.py::test_missing_fields_do_not_become_optimistic_scores_costs_or_flat_sizing"),
+        Mutation("downstream_no_fake_portfolio_completeness", "src/alphaforge/historical_downstream_scenario.py",
+                 "risk_state_complete=False", "risk_state_complete=True",
+                 "tests/test_historical_downstream_scenario.py::test_real_authorities_in_order_only_for_aligned_source_and_no_order_cycle"),
+        Mutation("downstream_no_initial_capital_sizing_fallback", "src/alphaforge/historical_downstream_scenario.py",
+                 "original_notional=None,risk_scale=None,require_scale=True",
+                 "original_notional=data['initial_capital_usdt'],risk_scale=None,require_scale=True",
+                 "tests/test_historical_downstream_scenario.py::test_missing_fields_do_not_become_optimistic_scores_costs_or_flat_sizing"),
+        Mutation("scenario_requires_explicit_opt_in", "src/alphaforge/historical_execution_scenario.py",
+                 "if (mode == OBSERVED_NATIVE and scenario is not None) or (mode == MODELED_HISTORICAL_V1 and type(scenario) is not ExecutionScenario):",
+                 "if False:",
+                 "tests/test_historical_execution_scenario.py::test_disabled_by_default_and_native_audit_unchanged"),
+        Mutation("scenario_never_admits_orders", "src/alphaforge/historical_execution_scenario.py",
+                 "order_admission='DISABLED', capital_source_status='NOT_PRODUCED'",
+                 "order_admission='ENABLED', capital_source_status='NOT_PRODUCED'",
+                 "tests/test_historical_execution_scenario.py::test_modeled_tags_and_causality_never_promote_orders"),
+        Mutation("scenario_replay_rejects_promotion", "src/alphaforge/historical_execution_scenario.py",
+                 "if digest(packet) != digest(dict(result=expected, result_hash=digest(expected))):", "if False:",
+                 "tests/test_historical_execution_scenario.py::test_rehashed_packet_tamper_and_promotion_fail_independent_replay"),
+        Mutation("mtf_market_data_rtt_required", "src/alphaforge/multi_timeframe.py",
+                 '        "market_data_latency_ms",\n', '',
+                 "tests/test_multi_timeframe.py::test_missing_required_execution_market_evidence_is_unavailable"),
+        Mutation("boundary_equity_subtracts_accrued_costs", "src/alphaforge/realized_accounting.py",
+                 "components.extend((gross, -accrued))", "components.extend((gross, accrued))",
+                 "tests/test_backtest_chronology.py::test_traded_portfolio_complete_with_concurrent_long_short_and_cash_conservation"),
+        Mutation("boundary_mark_uses_completed_bar", "src/alphaforge/backtest_chronology.py",
+                 "bars[opened['symbol']].get(at-data['interval_ms'])", "bars[opened['symbol']].get(at)",
+                 "tests/test_backtest_chronology.py::test_traded_portfolio_complete_with_concurrent_long_short_and_cash_conservation"),
+        Mutation("boundary_close_before_open", "src/alphaforge/backtest_chronology.py",
+                 "(('close','exit_ms'), ('open','entry_ms'))", "(('open','entry_ms'), ('close','exit_ms'))",
+                 "tests/test_backtest_chronology.py::test_boundary_tie_order_is_model_owned_close_then_sorted_opens"),
         Mutation("cash_replay_is_idempotent", "src/alphaforge/portfolio_risk.py",
                  "if position_id in self.closed_position_ids:", "if False:",
                  accounting_test + "::test_portfolio_unknown_cash_and_replay_are_fail_closed"),
@@ -203,6 +257,17 @@ def mutations() -> list[Mutation]:
                  'or not sandbox_verified(result.get("sandbox_verification"), mount, source_sha)', 'or False',
                  sandbox_test + "::test_missing_or_altered_isolation_evidence_cannot_be_promoted[sandbox_verification]"),
     ])
+    cases.extend([
+        Mutation("delivery_forbidden_never_claims_published", "scripts/verify_codex_delivery.py",
+                 'return "COMMENT_WRITE_FORBIDDEN "', 'return "CREATED "',
+                 "tests/test_verify_codex_delivery.py::test_forbidden_comment_preserves_summary_receipt_and_no_permission_escalation"),
+        Mutation("delivery_requires_actual_checkout", "scripts/verify_codex_delivery.py",
+                 'return "UNAVAILABLE_TESTED_CHECKOUT"', 'return "EXACT_HEAD_SHA"',
+                 "tests/test_verify_codex_delivery.py::test_actual_tested_tree_is_required_even_when_metadata_matches_head"),
+        Mutation("delivery_stale_head_not_published", "scripts/verify_codex_delivery.py",
+                 'latest["head"]["sha"] != sha', 'False',
+                 "tests/test_verify_codex_delivery.py::test_head_moves_during_log_inspection_never_publishes"),
+    ])
     return cases
 
 
@@ -233,6 +298,10 @@ def main() -> int:
         shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy2(ROOT / "pyproject.toml", work / "pyproject.toml")
         shutil.copy2(ROOT / "backtest_order.py", work / "backtest_order.py")
+        (work / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/verify_codex_delivery.py", work / "scripts/verify_codex_delivery.py")
+        (work / ".github/workflows").mkdir(parents=True)
+        shutil.copy2(ROOT / ".github/workflows/codex-delivery-verification.yml", work / ".github/workflows/codex-delivery-verification.yml")
         baseline = sorted({case.test for case in cases})
         code, failures, errors, output = run_test(work, baseline)
         if code or failures or errors:

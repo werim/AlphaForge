@@ -527,3 +527,47 @@ def test_universe_storage_source_routes_complete_codec_and_retention_contracts()
             "tests/test_issue577_universe_selection.py", "tests/test_issue588_universe_writer_contention.py",
             "tests/test_issue620_storage_policy.py", "tests/test_issue622_stats_only_retention.py"} <= set(plan.selected_tests)
     assert "UNKNOWN_PRODUCTION_CHANGE" not in plan.affected_invariants
+
+
+def test_strategy_source_routes_actual_regressions_without_removing_existing_guards():
+    plan = plan_changed_files(['src/alphaforge/backtest_strategy_adapter.py'],
+                              base_sha='a'*40, head_sha='b'*40)
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ('T0', 'T1', 'T2', 'T3')
+    assert {
+        'tests/test_backtest_strategy_adapter.py',
+        'tests/test_strategy_observation_time.py',
+        'tests/test_issue421_decision_invariant.py',
+        'tests/test_issue421_full_chain_replay.py',
+        'tests/test_issue498_cross_component_mutations.py',
+    } <= set(plan.selected_tests)
+    root = Path(__file__).resolve().parents[1]
+    assert all((root / path).is_file() for path in plan.selected_tests)
+
+
+def test_strategy_source_and_explicit_test_are_deduplicated():
+    files = ['src/alphaforge/backtest_strategy_adapter.py',
+             'tests/test_strategy_observation_time.py',
+             'src/alphaforge/backtest_strategy_adapter.py']
+    plan = plan_changed_files(files, base_sha='a'*40, head_sha='b'*40)
+    reverse = plan_changed_files(reversed(files), base_sha='a'*40, head_sha='b'*40)
+    assert plan == reverse
+    assert plan.selected_tests.count('tests/test_strategy_observation_time.py') == 1
+
+
+@pytest.mark.parametrize('module', ['historical_execution_scenario', 'historical_downstream_scenario'])
+def test_historical_replay_source_routes_its_integrity_regressions(module):
+    plan = _plan(f'src/alphaforge/{module}.py')
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ('T0', 'T1', 'T2', 'T3')
+    assert {
+        'tests/test_historical_execution_scenario.py',
+        'tests/test_historical_downstream_scenario.py',
+        'tests/test_historical_scoring_evidence.py',
+        'tests/test_historical_replay_integrity.py',
+        'tests/test_issue421_decision_invariant.py',
+        'tests/test_issue421_full_chain_replay.py',
+        'tests/test_issue498_cross_component_mutations.py',
+    } <= set(plan.selected_tests)
+    root = Path(__file__).resolve().parents[1]
+    assert all((root / path).is_file() for path in plan.selected_tests)

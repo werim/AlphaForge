@@ -92,6 +92,16 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue438_market_data_supervision.py",
     ),
     "NO_LOOKAHEAD": ("tests/test_multi_timeframe.py",),
+    "HISTORICAL_STRATEGY_EVIDENCE": (
+        "tests/test_backtest_strategy_adapter.py",
+        "tests/test_strategy_observation_time.py",
+    ),
+    "HISTORICAL_REPLAY_INTEGRITY": (
+        "tests/test_historical_execution_scenario.py",
+        "tests/test_historical_downstream_scenario.py",
+        "tests/test_historical_scoring_evidence.py",
+        "tests/test_historical_replay_integrity.py",
+    ),
     # Diagnostic provenance, sampled resource evidence and supervisor loss are
     # distinct from retention and must not broaden unrelated authority routes.
     "STORAGE_CALIBRATION_INTEGRITY": ("tests/test_storage_calibration.py",),
@@ -290,6 +300,10 @@ def assess_path(raw_path: str) -> PathAssessment:
             )
 
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+            (("historical_execution_scenario.py", "historical_downstream_scenario.py"), ("HISTORICAL_REPLAY_INTEGRITY", "UNKNOWN_PRODUCTION_CHANGE"), "historical research replay identity changed"),
+            # Retain the conservative replay/safety suites already required for
+            # this source while adding its actual producer regressions.
+            (("backtest_strategy_adapter.py",), ("HISTORICAL_STRATEGY_EVIDENCE", "UNKNOWN_PRODUCTION_CHANGE"), "causal historical strategy evidence changed"),
             (("realized_accounting.py", "historical_validation.py", "walk_forward.py", "backtest_control.py"), ("RESOLVER_INTEGRITY",), "realized cash ledger or economic reports changed"),
             (("execution.py",), ("EXECUTION_SAFETY", "DECISION_PARITY"), "execution economics/safety changed"),
             (("runtime.py",), ("RUNTIME_AUTHORITY", "RESTART_RECOVERY"), "authoritative runtime changed"),

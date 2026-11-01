@@ -241,15 +241,18 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
     # an order exists. Public market-data latency belongs here; order execution
     # latency is a separate pre-submit/cost-model concern.
     required = (
-        market.get("spread_pct"),
-        market.get("expected_slippage_pct"),
-        market.get("market_data_latency_ms"),
-        market.get("liquidity_score"),
+        "spread_pct",
+        "expected_slippage_pct",
+        "market_data_latency_ms",
+        "liquidity_score",
     )
     # Evidence availability and trigger confirmation are deliberately independent:
     # a valid neutral observation is evidence, but can never authorize an entry.
-    market_complete = all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                          and math.isfinite(float(v)) and float(v) >= 0 for v in required)
+    unavailable_market_fields = [field for field in required
+                                 if not (isinstance(v := market.get(field), (int, float))
+                                         and not isinstance(v, bool)
+                                         and math.isfinite(float(v)) and float(v) >= 0)]
+    market_complete = not unavailable_market_fields
     complete = valid_ohlc and direction != "UNKNOWN" and market_complete
     normalized_side = str(trade_side or "").upper()
     confirmed_for_side = trigger and (not normalized_side or direction == normalized_side)
@@ -264,6 +267,7 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
             "realized_volatility": realized_volatility,
             "volatility_fit": _volatility_fit(realized_volatility),
             "direction_threshold": threshold,
+            "unavailable_market_fields": unavailable_market_fields,
             "spread_pct": market.get("spread_pct"),
             "expected_slippage_pct": market.get("expected_slippage_pct"),
             "market_data_latency_ms": market.get("market_data_latency_ms"),
