@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 
 from alphaforge.reject_lifecycle import UNRESOLVED_REJECT_SQL, AMBIGUITY_MAINTENANCE_EVENT, preserved_ambiguity_evidence, authorized_ambiguity_ids
 
@@ -489,8 +490,19 @@ def _readonly_reconciliation_provider(cfg: Any, symbols: Sequence[str] = ()) -> 
     )
 
 
-def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None, expected_duration_seconds: float = 0) -> dict[str, Any]:
+def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None, expected_duration_seconds: float = 0, storage_evidence: str | Path | None = None) -> dict[str, Any]:
+    return _preflight(db, release_id, symbols, intervals, dynamic_universe=dynamic_universe,
+                      output_dir=output_dir, require_market_data=require_market_data,
+                      reconciliation_provider=reconciliation_provider,
+                      expected_duration_seconds=expected_duration_seconds, storage_evidence=storage_evidence)
+
+
+def _preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None, expected_duration_seconds: float = 0, storage_evidence: str | Path | None = None, calibration_permit=None) -> dict[str, Any]:
+    if not math.isfinite(expected_duration_seconds) or expected_duration_seconds < 0:
+        raise ValueError("INVALID_EXPECTED_DURATION")
     cfg = load_config_from_env()
+    if calibration_permit is not None and (not dynamic_universe or expected_duration_seconds != 21600 or sorted(intervals) != ["15m", "1h", "1m"] or cfg.runtime.storage_stats_only_enabled or not cfg.runtime.storage_enabled or cfg.runtime.execution_mode != "PAPER" or cfg.runtime.live_enabled):
+        raise ValueError("CALIBRATION_SCOPE_REQUIRES_SIX_HOUR_DYNAMIC_FULL_REPLAY")
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
     release_validation = release_id_validation(release_id)
@@ -515,10 +527,23 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
                 "evidence_locations": {"unavailable_reason": "STORAGE_DISK_RESERVE_INSUFFICIENT"}}
 
     if dynamic_universe and not storage_policy.stats_only_enabled and expected_duration_seconds > 0:
-        capacity = full_replay_duration_budget(
-            Path(db), storage_policy, duration_seconds=expected_duration_seconds,
-        )
-        add("full_replay_storage_capacity", "PASS" if capacity["status"] == "PASS" else "FAIL", capacity)
+        if calibration_permit is None:
+            capacity = full_replay_duration_budget(Path(db), storage_policy, duration_seconds=expected_duration_seconds)
+            check_name = "full_replay_storage_capacity"
+            if capacity["status"] == "PASS":
+                from alphaforge.storage_measurement import admission_evidence
+                try:
+                    capacity["measurement"] = admission_evidence(storage_evidence, cfg, Path(db), expected_duration_seconds, intervals=intervals)
+                except Exception as exc:
+                    capacity["status"] = "STORAGE_ADMISSION_EVIDENCE_REJECTED"
+                    capacity["reason"] = exc.__class__.__name__ + ":" + str(exc)[:256]
+        else:
+            from alphaforge.storage_measurement import CalibrationPermit
+            if type(calibration_permit) is not CalibrationPermit:
+                raise ValueError("INVALID_CALIBRATION_PERMIT")
+            capacity = calibration_permit.assess(Path(db), cfg, expected_duration_seconds)
+            check_name = "bounded_storage_calibration_capacity"
+        add(check_name, "PASS" if capacity["status"] == "PASS" else "FAIL", capacity)
         if capacity["status"] != "PASS":
             return {"status": "FAIL_CLOSED", "release_id": release_id, "campaign_id": None,
                     "checks": checks, "blockers": blockers,
@@ -719,7 +744,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     skew = clock_skew_check()
     add("clock_skew_acceptable", skew["status"], skew)
 
-    status = "PASS" if not blockers else "FAIL_CLOSED"
+    status = ("CALIBRATION_READY" if calibration_permit is not None else "PASS") if not blockers else "FAIL_CLOSED"
     payload = {"preflight_id": "pre_" + canonical_hash({"release_id": release_id, "at": utc_now(), "checks": checks})[:20], "release_id": release_id, "campaign_id": cid, "generated_at": utc_now(), "status": status, "blockers": blockers, "checks": checks, "evidence_locations": {"json": str(out / "burnin_preflight.json"), "csv": str(out / "burnin_preflight.csv")}}
     _write_json_csv(out, "burnin_preflight", payload)
     if conn is not None:
@@ -912,7 +937,9 @@ def _startup_diagnostics(campaign_id: str, process: subprocess.Popen[Any] | None
         **extra,
     }
 
-def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, detach: bool = False, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
+def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], *, dynamic_universe: bool = False, detach: bool = False, attach_timeout_seconds: float = 60.0, storage_evidence: str | Path | None = None) -> dict[str, Any]:
+    if not math.isfinite(duration_days) or duration_days <= 0:
+        return {"status":"FAILED_CLOSED","reason":"INVALID_DURATION"}
     pf = preflight(
         db,
         release_id,
@@ -920,6 +947,7 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
         intervals,
         dynamic_universe=dynamic_universe,
         expected_duration_seconds=max(0, duration_days * 86400),
+        storage_evidence=storage_evidence,
     )
     if pf["status"] != "PASS":
         return {"status": "FAILED_CLOSED", "preflight": pf}
@@ -2384,6 +2412,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
     l.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h).")
     l.add_argument("--detach", action="store_true")
     l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
+    l.add_argument("--storage-evidence", help="Reviewed exact-scope real storage measurement certificate")
     for name in ("health", "watch", "recovery-drill", "audit", "pause", "resume", "status"):
         s = sub.add_parser(name); s.add_argument("--campaign-id", required=True)
     rr = sub.add_parser("recover-runtime")
@@ -2444,6 +2473,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 dynamic_universe=bool(args.dynamic_universe),
                 detach=args.detach,
                 attach_timeout_seconds=args.attach_timeout_seconds,
+                storage_evidence=args.storage_evidence,
             )
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") in {"LAUNCHED", "FOREGROUND_STOPPED"} else 1
         if args.cmd in {"health", "status"}:

@@ -372,6 +372,7 @@ class RuntimeMetrics:
 
 @dataclass(slots=True)
 class RuntimeOrchestrator:
+    _storage_calibration_permit: Any = field(default=None, init=False, repr=False)
     config: RuntimeConfig
     ai_brain: AIBrain
     market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]]
@@ -1337,6 +1338,8 @@ class RuntimeOrchestrator:
         from alphaforge.burnin_campaign import require_operational_campaign_evidence
         with engine.connect() as archive_check:
             require_operational_campaign_evidence(archive_check, campaign_id)
+        from alphaforge.burnin_campaign import require_storage_calibration_worker
+        require_storage_calibration_worker(engine, campaign_id, getattr(self, "_storage_calibration_permit", None))
         observed = None
         mismatches: dict[str, dict[str, Any]] = {}
         reason_map = {
