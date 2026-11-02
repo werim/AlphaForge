@@ -7252,7 +7252,6 @@ class RuntimeOrchestrator:
             signature = f"{finding.finding_type}:{finding.symbol}:{finding.lifecycle_ref}"
             if signature in self._last_repair_signature:
                 continue
-            self._last_repair_signature.add(signature)
             if on_phase is not None:
                 on_phase("LIFECYCLE_EVENT")
             await self._emit_lifecycle_event(
@@ -7260,6 +7259,7 @@ class RuntimeOrchestrator:
                 finding.symbol,
                 {"reason": finding.finding_type, "incident_payload": finding.evidence},
             )
+            self._last_repair_signature.add(signature)
             if finding.fail_closed:
                 self.metrics.reconciliation_fail_closed += 1
                 self.shutdown()
