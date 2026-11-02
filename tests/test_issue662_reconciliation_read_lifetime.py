@@ -516,13 +516,19 @@ def test_timeout_persistence_failure_retains_containment_before_pause(monkeypatc
     assert not orchestrator._stop_event.is_set()
 
 
-@pytest.mark.parametrize("exception", [TimeoutError("explicit transport timeout"), ConnectionResetError("reset")])
-def test_completed_transport_exception_preserves_grace_policy(exception):
+@pytest.mark.parametrize("mode, exception", [
+    (ExecutionMode.PAPER, TimeoutError("explicit transport timeout")),
+    (ExecutionMode.LIVE_PRECHECK, TimeoutError("explicit transport timeout")),
+    (ExecutionMode.LIVE, TimeoutError("explicit transport timeout")),
+    (ExecutionMode.PAPER, ConnectionResetError("reset")),
+    (ExecutionMode.LIVE_PRECHECK, ConnectionResetError("reset")),
+])
+def test_completed_transport_exception_preserves_grace_policy(mode, exception):
     class FailedProvider:
         def snapshot(self):
             raise exception
 
-    orchestrator = runtime(FailedProvider())
+    orchestrator = runtime(FailedProvider(), mode)
 
     async def check():
         try:
@@ -540,3 +546,29 @@ def test_completed_transport_exception_preserves_grace_policy(exception):
             await orchestrator._reconciliation_reader.close(1)
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("phase, expired", [("PROVIDER_READ", True), ("LIFECYCLE_EVENT", False)])
+def test_timeout_error_without_completed_provider_transport_stays_unknown(monkeypatch, phase, expired):
+    orchestrator = runtime(None)
+
+    async def raise_timeout(self, *, on_phase):
+        on_phase(phase)
+        if expired:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise TimeoutError("local cleanup after deadline") from None
+        raise TimeoutError("local lifecycle timeout")
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_reconcile_runtime_state", raise_timeout)
+    asyncio.run(orchestrator._run_reconciliation_once())
+    assert orchestrator._provider_failure_class == "UNKNOWN"
+    assert orchestrator._transient_provider_outage_started_monotonic is None
+    assert orchestrator._execution_reconciliation_blocked()
+    with orchestrator._resolve_persistence_engine().connect() as conn:
+        details = json.loads(conn.execute(text(
+            "SELECT diagnostics_json FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1"
+        )).scalar_one())
+    assert details["timeout_phase"] == phase
+    assert details["failure_class"] == "UNKNOWN"
