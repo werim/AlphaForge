@@ -7244,7 +7244,6 @@ class RuntimeOrchestrator:
         self._reconciliation_persistence_unhealthy = False
         if self._exchange_read_only_status == "AVAILABLE":
             self._provider_failure_class = None
-            self._provider_failure_count = 0
             self._transient_provider_outage_started_monotonic = None
         if self._reconciliation_status == "CLEAN" and not self._fail_closed_reason:
             self._resolver_provider_recovery_pending = False
@@ -7277,6 +7276,9 @@ class RuntimeOrchestrator:
                 self.shutdown()
         if recommendations:
             logger.warning("reconciliation_repair_recommendations=%s", [r.category for r in recommendations])
+        # A completed read does not clear deadlines in later awaited stages.
+        if self._exchange_read_only_status == "AVAILABLE":
+            self._provider_failure_count = 0
 
     async def _shutdown_tasks(self) -> None:
         if self._shadow_queue is not None:
