@@ -177,6 +177,44 @@ def test_repeated_lifecycle_deadlines_preserve_unknown_failure_streak(monkeypatc
     asyncio.run(check())
 
 
+def test_interrupted_repair_delivery_retries_same_finding_before_deduplication(monkeypatch):
+    class CompleteProvider:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
+
+    orchestrator = runtime(CompleteProvider())
+    finding = ReconciliationFinding(
+        finding_type="ORPHAN_ORDER", severity="HIGH", symbol="BTCUSDT",
+        lifecycle_ref="same-order", timestamp="2026-11-02T00:00:00Z",
+        evidence={}, suggested_remediation="operator_review", fail_closed=True,
+    )
+    monkeypatch.setattr(orchestrator._reconciliation_engine, "reconcile", lambda **kwargs: ([finding], [], {}))
+    attempts = []
+
+    async def interrupted_first(payload):
+        if payload["symbol"] == "BTCUSDT":
+            attempts.append(payload["symbol"])
+            if len(attempts) == 1:
+                await asyncio.Event().wait()
+
+    orchestrator.on_lifecycle_event = interrupted_first
+
+    async def check():
+        try:
+            await orchestrator._run_reconciliation_once()
+            assert not orchestrator._stop_event.is_set()
+            await orchestrator._run_reconciliation_once()
+            assert attempts == ["BTCUSDT", "BTCUSDT"]
+            assert orchestrator._stop_event.is_set()
+            assert "ORPHAN_ORDER:BTCUSDT:same-order" in orchestrator._last_repair_signature
+            await orchestrator._run_reconciliation_once()
+            assert attempts == ["BTCUSDT", "BTCUSDT"]
+        finally:
+            await orchestrator._shutdown_tasks()
+
+    asyncio.run(check())
+
+
 def test_completed_reconciliation_clears_prior_unknown_failure_streak():
     class CompleteProvider:
         def snapshot(self):
