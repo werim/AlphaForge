@@ -60,7 +60,10 @@ def test_slow_provider_does_not_block_heartbeat_or_defeat_timeout(mode):
                     "SELECT diagnostics_json FROM exchange_reconciliation_events "
                     "WHERE status='EXCHANGE_STATE_UNKNOWN' ORDER BY id DESC LIMIT 1"
                 )).scalar_one()
-            assert json.loads(diagnostics)["timeout_phase"] == "PROVIDER_READ"
+            details = json.loads(diagnostics)
+            assert details["timeout_phase"] == "PROVIDER_READ"
+            assert details["failure_class"] == "TRANSIENT_TRANSPORT"
+            assert orchestrator._provider_failure_class == "TRANSIENT_TRANSPORT"
         finally:
             provider.release.set()
             await task
@@ -117,7 +120,10 @@ def test_timeout_after_provider_read_is_not_recorded_as_provider_read(monkeypatc
             "SELECT diagnostics_json FROM exchange_reconciliation_events "
             "WHERE status='EXCHANGE_STATE_UNKNOWN' ORDER BY id DESC LIMIT 1"
         )).scalar_one()
-    assert json.loads(diagnostics)["timeout_phase"] == "LIFECYCLE_EVENT"
+    details = json.loads(diagnostics)
+    assert details["timeout_phase"] == "LIFECYCLE_EVENT"
+    assert details["failure_class"] == "UNKNOWN"
+    assert orchestrator._provider_failure_class == "UNKNOWN"
     assert orchestrator._execution_reconciliation_blocked()
 
 

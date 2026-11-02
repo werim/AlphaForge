@@ -7065,13 +7065,14 @@ class RuntimeOrchestrator:
         try:
             await asyncio.wait_for(self._reconcile_runtime_state(on_phase=record_phase), timeout=self.config.reconciliation_timeout_sec)
         except asyncio.TimeoutError:
+            timeout_failure_class = TRANSIENT_TRANSPORT if timeout_phase == "PROVIDER_READ" else UNKNOWN
             self._unknown_exchange_state = True
             self._exchange_read_only_status = "UNAVAILABLE"
             self._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
             self._fail_closed_reason = "EXCHANGE_STATE_UNKNOWN"
-            self._provider_failure_class = TRANSIENT_TRANSPORT
+            self._provider_failure_class = timeout_failure_class
             self._provider_failure_count += 1
-            if self._transient_provider_outage_started_monotonic is None:
+            if timeout_failure_class == TRANSIENT_TRANSPORT and self._transient_provider_outage_started_monotonic is None:
                 self._transient_provider_outage_started_monotonic = time.monotonic()
             self._runtime_status = "RECOVERY_REQUIRED"
             await self._record_incident("GLOBAL", LifecycleEventType.RECONCILIATION_REPAIR.value, "reconciliation_timeout")
@@ -7082,7 +7083,7 @@ class RuntimeOrchestrator:
                 try:
                     persist_reconciliation_cycle(engine, cycle_id=f"recon:timeout:{uuid.uuid4().hex}",
                         findings=[], snapshot=state, diagnostics={"evidence_status": "INCOMPLETE",
-                            "failure_class": TRANSIENT_TRANSPORT, "errors": ["reconciliation_timeout"],
+                            "failure_class": timeout_failure_class, "errors": ["reconciliation_timeout"],
                             "timeout_phase": timeout_phase},
                         pending_failures=self._pending_reconciliation_persistence_failures)
                 except ReconciliationPersistenceFailure as exc:
@@ -7091,7 +7092,8 @@ class RuntimeOrchestrator:
                     return
                 self._pending_reconciliation_persistence_failures.clear()
                 self._reconciliation_persistence_unhealthy = False
-            if time.monotonic() - self._transient_provider_outage_started_monotonic >= self.config.provider_transient_outage_grace_seconds:
+            if (timeout_failure_class == TRANSIENT_TRANSPORT
+                    and time.monotonic() - self._transient_provider_outage_started_monotonic >= self.config.provider_transient_outage_grace_seconds):
                 self._pause_for_provider_failure("PROVIDER_TRANSIENT_OUTAGE_GRACE_EXPIRED")
 
     async def _reconcile_runtime_state(self, *, on_phase: Callable[[str], None] | None = None) -> None:
