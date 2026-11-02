@@ -92,6 +92,11 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue438_market_data_supervision.py",
     ),
     "NO_LOOKAHEAD": ("tests/test_multi_timeframe.py",),
+    "BACKTEST_CAPITAL_SOURCE": (
+        "tests/test_backtest_chronology.py",
+        "tests/test_backtest_source_evidence.py",
+        "tests/test_historical_capital_boundary.py",
+    ),
     "HISTORICAL_STRATEGY_EVIDENCE": (
         "tests/test_backtest_strategy_adapter.py",
         "tests/test_strategy_observation_time.py",
@@ -292,6 +297,7 @@ def assess_path(raw_path: str) -> PathAssessment:
             )
 
         high_rules: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+            (("backtest_chronology.py", "backtest_source_evidence.py"), ("BACKTEST_CAPITAL_SOURCE", "UNKNOWN_PRODUCTION_CHANGE"), "BACKTEST capital source and replay changed"),
             (("historical_execution_scenario.py", "historical_downstream_scenario.py"), ("HISTORICAL_REPLAY_INTEGRITY", "UNKNOWN_PRODUCTION_CHANGE"), "historical research replay identity changed"),
             # Retain the conservative replay/safety suites already required for
             # this source while adding its actual producer regressions.
