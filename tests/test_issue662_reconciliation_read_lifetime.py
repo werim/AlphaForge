@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+from collections.abc import Mapping
 
 import pytest
 
@@ -62,8 +63,8 @@ def test_slow_provider_does_not_block_heartbeat_or_defeat_timeout(mode):
                 )).scalar_one()
             details = json.loads(diagnostics)
             assert details["timeout_phase"] == "PROVIDER_READ"
-            assert details["failure_class"] == "TRANSIENT_TRANSPORT"
-            assert orchestrator._provider_failure_class == "TRANSIENT_TRANSPORT"
+            assert details["failure_class"] == "UNKNOWN"
+            assert orchestrator._provider_failure_class == "UNKNOWN"
         finally:
             provider.release.set()
             await task
@@ -335,3 +336,134 @@ def test_failed_background_task_still_persists_failed_shutdown(monkeypatch):
     snapshot = latest_runtime_state_snapshot(orchestrator._resolve_persistence_engine())
     assert snapshot["runtime_status"] == "FAILED"
     assert all(task.done() for task in orchestrator._tasks)
+
+
+@pytest.mark.parametrize("mode", [ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK])
+def test_local_mapping_conversion_timeout_has_no_transport_evidence(mode):
+    class BlockingMapping(Mapping):
+        def __init__(self):
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def __iter__(self):
+            self.entered.set()
+            self.release.wait(1)
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+    mapping = BlockingMapping()
+
+    class LocalProvider:
+        def snapshot(self):
+            return mapping
+
+    orchestrator = runtime(LocalProvider(), mode)
+
+    async def check():
+        try:
+            await orchestrator._run_reconciliation_once()
+            assert mapping.entered.is_set()
+            assert orchestrator._provider_failure_class == "UNKNOWN"
+            assert orchestrator._transient_provider_outage_started_monotonic is None
+            assert orchestrator._execution_reconciliation_blocked()
+            with orchestrator._resolve_persistence_engine().connect() as conn:
+                details = json.loads(conn.execute(text(
+                    "SELECT diagnostics_json FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1"
+                )).scalar_one())
+            assert details["timeout_phase"] == "PROVIDER_READ"
+            assert details["failure_class"] == "UNKNOWN"
+        finally:
+            mapping.release.set()
+            await orchestrator._reconciliation_reader.close(1)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("mode", [ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK])
+def test_repeated_provider_deadlines_pause_after_committed_third_unknown(monkeypatch, mode):
+    provider = BlockingProvider()
+    orchestrator = runtime(provider, mode)
+    pauses = []
+
+    def pause(self, reason):
+        with self._resolve_persistence_engine().connect() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM exchange_reconciliation_events")).scalar_one()
+        pauses.append((reason, count))
+        self.shutdown()
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_pause_for_provider_failure", pause)
+
+    async def check():
+        try:
+            for count in range(1, 4):
+                provider.release.clear()
+                await orchestrator._run_reconciliation_once()
+                assert orchestrator._provider_failure_count == count
+                assert orchestrator._provider_failure_class == "UNKNOWN"
+                assert orchestrator._execution_reconciliation_blocked()
+                assert orchestrator._stop_event.is_set() == (count == 3)
+                assert pauses == ([] if count < 3 else [("PROVIDER_UNKNOWN_FAILURE_THRESHOLD", 3)])
+                provider.release.set()
+                while not orchestrator._reconciliation_reader._pending.done():
+                    await asyncio.sleep(0.001)
+            assert provider.calls == 3
+        finally:
+            provider.release.set()
+            await orchestrator._reconciliation_reader.close(1)
+
+    asyncio.run(check())
+
+
+def test_timeout_persistence_failure_retains_containment_before_pause(monkeypatch):
+    from alphaforge.runtime_state import ReconciliationPersistenceFailure
+
+    orchestrator = runtime(None)
+    orchestrator._provider_failure_count = 2
+
+    async def stalled(self, *, on_phase):
+        on_phase("PERSISTENCE")
+        await asyncio.Event().wait()
+
+    def fail_persistence(*args, **kwargs):
+        raise ReconciliationPersistenceFailure("synthetic persistence failure")
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_reconcile_runtime_state", stalled)
+    monkeypatch.setattr("alphaforge.runtime.persist_reconciliation_cycle", fail_persistence)
+    asyncio.run(orchestrator._run_reconciliation_once())
+    assert orchestrator._provider_failure_class == "UNKNOWN"
+    assert orchestrator._provider_failure_count == 3
+    assert orchestrator._reconciliation_persistence_unhealthy
+    assert orchestrator._pending_reconciliation_persistence_failures
+    assert orchestrator._execution_reconciliation_blocked()
+    assert not orchestrator._stop_event.is_set()
+
+
+@pytest.mark.parametrize("exception", [TimeoutError("explicit transport timeout"), ConnectionResetError("reset")])
+def test_completed_transport_exception_preserves_grace_policy(exception):
+    class FailedProvider:
+        def snapshot(self):
+            raise exception
+
+    orchestrator = runtime(FailedProvider())
+
+    async def check():
+        try:
+            for _ in range(3):
+                await orchestrator._run_reconciliation_once()
+                assert orchestrator._provider_failure_class == "TRANSIENT_TRANSPORT"
+                assert not orchestrator._stop_event.is_set()
+                assert orchestrator._execution_reconciliation_blocked()
+            orchestrator._transient_provider_outage_started_monotonic -= (
+                orchestrator.config.provider_transient_outage_grace_seconds + 1
+            )
+            await orchestrator._run_reconciliation_once()
+            assert orchestrator._stop_event.is_set()
+        finally:
+            await orchestrator._reconciliation_reader.close(1)
+
+    asyncio.run(check())
