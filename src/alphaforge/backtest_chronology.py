@@ -317,7 +317,7 @@ def replay_boundary_evidence(identity, initialization, events):
             raise ValueError('boundary event population incomplete')
         event = events[cursor]
         cursor += 1
-        if (event['event_key'], event['kind'], event['effective_ms']) != (key,kind,at):
+        if digest([event['event_key'], event['kind'], event['effective_ms']]) != digest([key, kind, at]):
             raise ValueError('boundary causal sequence mismatch')
         return event['payload']
 
@@ -329,7 +329,7 @@ def replay_boundary_evidence(identity, initialization, events):
     for at in range(data['start_ms'],data['end_ms']+1,data['interval_ms']):
         expected, missing = _snapshot(data, bars, at, inventory, cash)
         actual = take(f'snapshot:{at}', 'SNAPSHOT', at)
-        if actual != expected:
+        if digest(actual) != digest(expected):
             raise ValueError('boundary marked-equity conservation mismatch')
         snapshots.append(expected)
         gaps.extend(missing)
@@ -356,17 +356,19 @@ def replay_boundary_evidence(identity, initialization, events):
                 continue
             fill = _fill(data, bars, order, at, phase)
             p = take(_key(data['run_id'], order, phase), 'LIFECYCLE', at)
-            if any(p[k] != v for k,v in dict(position_id=pid, lifecycle_id=lifecycle, symbol=order['symbol'],
-                    side=order['side'], timestamp=at, sl=order['risk_stop']).items()):
+            scope = dict(position_id=pid, lifecycle_id=lifecycle, symbol=order['symbol'],
+                         side=order['side'], timestamp=at, sl=order['risk_stop'])
+            if digest({k: p[k] for k in scope}) != digest(scope):
                 raise ValueError('boundary lifecycle scope mismatch')
             if phase == 'open':
                 qty = filled_position_quantity(balance=cash, risk_pct=0, fill=fill, notional=order['notional_usdt'])
-                if p['trigger_price'] != fill or p['filled_quantity'] != qty or p['status_after'] != 'POSITION_OPENED' or p['lifecycle_seq'] != 1:
+                opening = dict(trigger_price=fill, filled_quantity=qty, status_after='POSITION_OPENED', lifecycle_seq=1)
+                if digest({k: p[k] for k in opening}) != digest(opening):
                     raise ValueError('boundary opening geometry mismatch')
                 costs = candle_boundary_costs(entry_fill=fill, quantity=qty, fee_rate=data['policy']['fee_rate'])
                 accrued = take('cost:'+pid, 'COST_ACCRUED', at)
-                if accrued != dict(position_id=pid, amount_usdt=costs['entry_fee'],
-                        cause_event_key=_key(data['run_id'],order,'open'), cost_source=COST_SOURCE):
+                if digest(accrued) != digest(dict(position_id=pid, amount_usdt=costs['entry_fee'],
+                        cause_event_key=_key(data['run_id'],order,'open'), cost_source=COST_SOURCE)):
                     raise ValueError('boundary open cost accrual mismatch')
                 inventory[pid] = {**p, 'accrued_cost_usdt':accrued['amount_usdt'],
                                   'open_event_key':_key(data['run_id'],order,'open')}
@@ -384,11 +386,12 @@ def replay_boundary_evidence(identity, initialization, events):
                     total_cost_usd=ledger['total_cost_usd'], net_r=ledger['net_r'], net_pnl_usdt=ledger['net_pnl_usd'],
                     realized_cost_source=COST_SOURCE, realized_evidence_status='COMPLETE',
                     status_after='POSITION_CLOSED', lifecycle_seq=2)
-                if any(p[k] != v for k,v in expected.items()) or json.loads(p['realized_costs_json']) != costs:
+                if (digest({k: p[k] for k in expected}) != digest(expected)
+                        or digest(json.loads(p['realized_costs_json'])) != digest(costs)):
                     raise ValueError('boundary canonical closure mismatch')
                 movement = take('cash:'+pid, 'CASH_CLOSED', at)
                 after = sum_cash([cash, ledger['net_pnl_usd']])
-                if movement != dict(position_id=pid, net_pnl_usdt=ledger['net_pnl_usd'], before=cash, after=after):
+                if digest(movement) != digest(dict(position_id=pid, net_pnl_usdt=ledger['net_pnl_usd'], before=cash, after=after)):
                     raise ValueError('boundary cash conservation mismatch')
                 cash = after
                 del inventory[pid]

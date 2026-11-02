@@ -218,3 +218,61 @@ def test_production_cli_reads_frozen_input_and_retains_source_receipt(tmp_path):
     assert proof['identity']['version']=='backtest-boundary-v1'
     assert proof['initialization']['provenance']['configuration']['data_origin']=='SYNTHETIC_DETERMINISTIC_EXECUTION_INPUT'
     assert len(proof['completion']['closure_population'])==2
+
+
+@pytest.mark.parametrize('defect', ['snapshot_cash', 'event_time', 'opening_quantity',
+                                  'opening_sequence', 'cash_before', 'closing_sequence',
+                                  'lifecycle_time', 'accrued_cost', 'closing_cost'])
+def test_boundary_replay_rejects_type_changed_producer_facts(tmp_path, defect):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity, digest
+
+    data = dataset()
+    if defect == 'accrued_cost':
+        data['policy']['fee_rate'] = 0.
+    proof = run_boundary_backtest(data, tmp_path/'source')
+    events = deepcopy(proof['events'])
+    if defect == 'snapshot_cash':
+        events[0]['payload']['settled_cash_usdt'] = 1000  # producer emits 1000.0
+    elif defect == 'event_time':
+        events[0]['effective_ms'] = float(events[0]['effective_ms'])
+    elif defect in {'opening_quantity', 'opening_sequence'}:
+        opened = next(e['payload'] for e in events if e['kind'] == 'LIFECYCLE')
+        field = 'filled_quantity' if defect == 'opening_quantity' else 'lifecycle_seq'
+        assert opened[field] == 1
+        opened[field] = True
+    elif defect == 'cash_before':
+        next(e['payload'] for e in events if e['kind'] == 'CASH_CLOSED')['before'] = 1000
+    elif defect == 'lifecycle_time':
+        opened = next(e['payload'] for e in events if e['kind'] == 'LIFECYCLE')
+        opened['timestamp'] = float(opened['timestamp'])
+    elif defect == 'accrued_cost':
+        next(e['payload'] for e in events if e['kind'] == 'COST_ACCRUED')['amount_usdt'] = False
+    else:
+        closed = next(e['payload'] for e in events if e['kind'] == 'LIFECYCLE'
+                      and e['payload']['status_after'] == 'POSITION_CLOSED')
+        if defect == 'closing_sequence':
+            closed['lifecycle_seq'] = 2.0
+        else:
+            costs = json.loads(closed['realized_costs_json'])
+            costs['funding'] = False
+            closed['realized_costs_json'] = json.dumps(costs)
+    assert digest(events) != digest(proof['events'])
+    with pytest.raises(ValueError):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
+
+
+def test_boundary_replay_allows_json_key_reordering_and_observation_changes(tmp_path):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    proof = run_boundary_backtest(dataset(), tmp_path/'source')
+    events = deepcopy(proof['events'])
+    for event in events:
+        event['payload'] = dict(reversed(list(event['payload'].items())))
+        event['observed_ms'] += 1
+    valuations, gaps = replay_boundary_evidence(
+        SourceIdentity(**proof['identity']), proof['initialization'], events)
+    assert gaps == []
+    assert [v['marked_equity_usdt'] for v in valuations] == [
+        v['marked_equity_usdt'] for v in proof['completion']['valuations']]
