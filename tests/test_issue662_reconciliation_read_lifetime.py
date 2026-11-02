@@ -128,6 +128,79 @@ def test_timeout_after_provider_read_is_not_recorded_as_provider_read(monkeypatc
     assert orchestrator._execution_reconciliation_blocked()
 
 
+@pytest.mark.parametrize("mode", [ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK])
+def test_repeated_lifecycle_deadlines_preserve_unknown_failure_streak(monkeypatch, mode):
+    class CompleteProvider:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
+
+    orchestrator = runtime(CompleteProvider(), mode)
+    cycles = iter(range(3))
+
+    def findings(**kwargs):
+        finding = ReconciliationFinding(
+            finding_type="ORPHAN_ORDER", severity="HIGH", symbol="BTCUSDT",
+            lifecycle_ref=f"cycle-{next(cycles)}", timestamp="2026-11-02T00:00:00Z",
+            evidence={}, suggested_remediation="operator_review", fail_closed=True,
+        )
+        return [finding], [], {}
+
+    original_emit = RuntimeOrchestrator._emit_lifecycle_event
+
+    async def stalled_event(self, event, symbol, details=None):
+        if symbol == "BTCUSDT":
+            await asyncio.Event().wait()
+        await original_emit(self, event, symbol, details)
+
+    monkeypatch.setattr(orchestrator._reconciliation_engine, "reconcile", findings)
+    monkeypatch.setattr(RuntimeOrchestrator, "_emit_lifecycle_event", stalled_event)
+
+    async def check():
+        try:
+            for count in range(1, 4):
+                await orchestrator._run_reconciliation_once()
+                assert orchestrator._provider_failure_count == count
+                assert orchestrator._provider_failure_class == "UNKNOWN"
+                assert orchestrator._execution_reconciliation_blocked()
+                assert orchestrator._stop_event.is_set() == (count == 3)
+            with orchestrator._resolve_persistence_engine().connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT diagnostics_json FROM exchange_reconciliation_events "
+                    "WHERE status='EXCHANGE_STATE_UNKNOWN' ORDER BY id"
+                )).scalars().all()
+            timeouts = [json.loads(row) for row in rows if "timeout_phase" in json.loads(row)]
+            assert len(timeouts) == 3
+            assert all(row["timeout_phase"] == "LIFECYCLE_EVENT" for row in timeouts)
+        finally:
+            await orchestrator._shutdown_tasks()
+
+    asyncio.run(check())
+
+
+def test_completed_reconciliation_clears_prior_unknown_failure_streak():
+    class CompleteProvider:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
+
+    orchestrator = runtime(CompleteProvider())
+    orchestrator._provider_failure_count = 2
+    orchestrator._provider_failure_class = "UNKNOWN"
+    orchestrator._unknown_exchange_state = True
+    orchestrator._fail_closed_reason = "EXCHANGE_STATE_UNKNOWN"
+
+    async def check():
+        try:
+            await orchestrator._run_reconciliation_once()
+            assert orchestrator._provider_failure_count == 0
+            assert orchestrator._provider_failure_class is None
+            assert not orchestrator._execution_reconciliation_blocked()
+            assert not orchestrator._stop_event.is_set()
+        finally:
+            await orchestrator._shutdown_tasks()
+
+    asyncio.run(check())
+
+
 async def wait_entered(provider):
     for _ in range(100):
         if provider.entered.is_set():
