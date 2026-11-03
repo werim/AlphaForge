@@ -723,14 +723,19 @@ def test_resolver_loop_runs_automatically_without_manual_cli(tmp_path):
     conn=sqlite3.connect(db); assert conn.execute("select count(*) from burnin_reject_outcomes where burnin_run_id not like '%__aggregate'").fetchone()[0] == 1; assert conn.execute('select count(*) from burnin_qualification_snapshots').fetchone()[0] >= 1; conn.close()
 
 
-def test_maintenance_loop_updates_duration_and_completion(tmp_path):
+def test_maintenance_tick_updates_duration_and_completion(tmp_path):
     db=tmp_path/'maint.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relm',duration_days=0,symbols=[],intervals=[],target_decisions=0,target_closed_trades=0,target_reject_forward_outcomes=0)
     start_or_resume_campaign(conn,camp.campaign_id); conn.execute("UPDATE burnin_campaigns SET evidence_completeness_status='PASS', latest_qualification_id='q-final' WHERE campaign_id=?",(camp.campaign_id,)); conn.commit(); conn.close(); e=_engine(db)
-    async def go():
-        runner=BurnInCampaignRunner(e,camp.campaign_id,lambda s,a,b:[],maintenance_interval_seconds=0.01,qualification_interval_seconds=999999)
-        runner._stop_event=asyncio.Event(); await asyncio.wait_for(runner._maintenance_loop(), timeout=0.2)
-    asyncio.run(go()); e.dispose()
+    runner=BurnInCampaignRunner(e,camp.campaign_id,lambda s,a,b:[],qualification_interval_seconds=999999)
+    # Persistence correctness has no 200ms executor scheduling contract. The
+    # terminal-completion test separately exercises the real threaded loop.
+    try:
+        completion, status = runner._maintenance_tick()
+        assert completion["complete"] is True
+        assert status == "COMPLETED"
+    finally:
+        e.dispose()
     conn=sqlite3.connect(db); row=conn.execute('select campaign_status, observed_duration_seconds from burnin_campaigns where campaign_id=?',(camp.campaign_id,)).fetchone(); conn.close()
     assert row[0]=='COMPLETED' and row[1] is not None
 
