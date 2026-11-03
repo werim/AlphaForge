@@ -7082,16 +7082,33 @@ class RuntimeOrchestrator:
             if timeout_failure_class == TRANSIENT_TRANSPORT and self._transient_provider_outage_started_monotonic is None:
                 self._transient_provider_outage_started_monotonic = time.monotonic()
             self._runtime_status = "RECOVERY_REQUIRED"
-            await self._record_incident("GLOBAL", LifecycleEventType.RECONCILIATION_REPAIR.value, "reconciliation_timeout")
+            notification_failure = None
+            notification_deadline = asyncio.timeout(self.config.reconciliation_timeout_sec)
+            try:
+                # The reconciliation deadline has already exited. Its recovery
+                # notification must not indefinitely delay evidence or pause.
+                async with notification_deadline:
+                    await self._record_incident("GLOBAL", LifecycleEventType.RECONCILIATION_REPAIR.value, "reconciliation_timeout")
+            except Exception as exc:
+                notification_failure = {
+                    "status": "TIMED_OUT" if notification_deadline.expired() else "FAILED",
+                    "error_type": type(exc).__name__,
+                }
+                logger.warning("reconciliation_timeout_incident_delivery_failed status=%s error_type=%s",
+                    notification_failure["status"], notification_failure["error_type"])
             engine = self._resolve_persistence_engine()
             if engine is not None:
                 self._reconciliation_persistence_unhealthy = True
                 state = self._build_runtime_state_snapshot(status="RECOVERY_REQUIRED")
                 try:
-                    persist_reconciliation_cycle(engine, cycle_id=f"recon:timeout:{uuid.uuid4().hex}",
-                        findings=[], snapshot=state, diagnostics={"evidence_status": "INCOMPLETE",
+                    diagnostics = {"evidence_status": "INCOMPLETE",
                             "failure_class": timeout_failure_class, "errors": ["reconciliation_timeout"],
-                            "timeout_phase": timeout_phase},
+                            "timeout_phase": timeout_phase}
+                    if notification_failure is not None:
+                        diagnostics["timeout_incident_delivery"] = notification_failure
+                        diagnostics["errors"].append("timeout_incident_delivery_failed")
+                    persist_reconciliation_cycle(engine, cycle_id=f"recon:timeout:{uuid.uuid4().hex}",
+                        findings=[], snapshot=state, diagnostics=diagnostics,
                         pending_failures=self._pending_reconciliation_persistence_failures)
                 except ReconciliationPersistenceFailure as exc:
                     self._pending_reconciliation_persistence_failures.append({"cycle_id": f"recon-failure:{uuid.uuid4().hex}",

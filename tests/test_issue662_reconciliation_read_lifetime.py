@@ -530,7 +530,92 @@ def test_repeated_provider_deadlines_pause_after_committed_third_unknown(monkeyp
     asyncio.run(check())
 
 
-def test_timeout_persistence_failure_retains_containment_before_pause(monkeypatch):
+@pytest.mark.parametrize("notification_failure", ["stall", "error", "timeout_error"])
+def test_timeout_incident_failure_cannot_block_committed_pause(monkeypatch, notification_failure):
+    orchestrator = runtime(None)
+    orchestrator._provider_failure_count = 2
+    committed_at_pause = []
+
+    async def stalled(self, *, on_phase):
+        on_phase("LIFECYCLE_EVENT")
+        await asyncio.Event().wait()
+
+    async def notify(payload):
+        assert payload["symbol"] == "GLOBAL"
+        if notification_failure == "error":
+            raise RuntimeError("synthetic notification failure")
+        if notification_failure == "timeout_error":
+            raise TimeoutError("synthetic callback timeout")
+        await asyncio.Event().wait()
+
+    def pause(self, reason):
+        with self._resolve_persistence_engine().connect() as conn:
+            row = conn.execute(text(
+                "SELECT status, diagnostics_json FROM exchange_reconciliation_events"
+            )).one()
+        committed_at_pause.append((reason, row[0], json.loads(row[1])))
+        self.shutdown()
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_reconcile_runtime_state", stalled)
+    monkeypatch.setattr(RuntimeOrchestrator, "_pause_for_provider_failure", pause)
+    orchestrator.on_lifecycle_event = notify
+
+    async def check():
+        await asyncio.wait_for(orchestrator._run_reconciliation_once(), timeout=2)
+
+    asyncio.run(check())
+    assert orchestrator._execution_reconciliation_blocked()
+    assert orchestrator._provider_failure_class == "UNKNOWN"
+    assert orchestrator._provider_failure_count == 3
+    assert orchestrator._stop_event.is_set()
+    assert len(committed_at_pause) == 1
+    reason, status, details = committed_at_pause[0]
+    assert reason == "PROVIDER_UNKNOWN_FAILURE_THRESHOLD"
+    assert status == "EXCHANGE_STATE_UNKNOWN"
+    assert details["timeout_phase"] == "LIFECYCLE_EVENT"
+    assert details["failure_class"] == "UNKNOWN"
+    assert details["timeout_incident_delivery"] == {
+        "status": "TIMED_OUT" if notification_failure == "stall" else "FAILED",
+        "error_type": "RuntimeError" if notification_failure == "error" else "TimeoutError",
+    }
+    assert details["errors"] == ["reconciliation_timeout", "timeout_incident_delivery_failed"]
+
+
+def test_external_cancellation_during_timeout_incident_propagates(monkeypatch):
+    orchestrator = runtime(None)
+
+    async def stalled(self, *, on_phase):
+        on_phase("LIFECYCLE_EVENT")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_reconcile_runtime_state", stalled)
+
+    async def check():
+        entered = asyncio.Event()
+
+        async def notify(payload):
+            entered.set()
+            await asyncio.Event().wait()
+
+        orchestrator.on_lifecycle_event = notify
+        task = asyncio.create_task(orchestrator._run_reconciliation_once())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert orchestrator._execution_reconciliation_blocked()
+            assert not orchestrator._stop_event.is_set()
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("notification_fails", [False, True])
+def test_timeout_persistence_failure_retains_containment_before_pause(monkeypatch, notification_fails):
     from alphaforge.runtime_state import ReconciliationPersistenceFailure
 
     orchestrator = runtime(None)
@@ -542,6 +627,11 @@ def test_timeout_persistence_failure_retains_containment_before_pause(monkeypatc
 
     def fail_persistence(*args, **kwargs):
         raise ReconciliationPersistenceFailure("synthetic persistence failure")
+
+    if notification_fails:
+        async def notify(payload):
+            raise RuntimeError("synthetic notification failure")
+        orchestrator.on_lifecycle_event = notify
 
     monkeypatch.setattr(RuntimeOrchestrator, "_reconcile_runtime_state", stalled)
     monkeypatch.setattr("alphaforge.runtime.persist_reconciliation_cycle", fail_persistence)
