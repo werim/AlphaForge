@@ -231,6 +231,8 @@ def format_report(pr: dict, run: dict, verdict: dict) -> str:
         "",
         f"**RESULT: {verdict['status']}** — automated CI/source-metadata verification only.",
         f"- PR: #{number}; current head: {sha}",
+        f"- Evaluated base: {pr.get('base', {}).get('ref', 'UNAVAILABLE')};"
+        f" base SHA: {pr.get('base', {}).get('sha', 'UNAVAILABLE')}.",
         f"- CI: https://github.com/{pr['base']['repo']['full_name']}/actions/runs/{run_id}"
         f" ({run.get('event')}, {run.get('conclusion')}, attempt {run.get('run_attempt', 1)})",
         f"- Source binding: {verdict['identity']}; actual tested checkout: {verdict.get('tested_checkout_sha') or 'UNAVAILABLE'}.",
@@ -284,6 +286,13 @@ def publication_source_status(api: GitHub, pr: dict, sha: str, run: dict | None 
         return "STALE_SOURCE_RECHECK_UNAVAILABLE"
     if latest.get("state") != "open" or latest["head"]["sha"] != sha:
         return "STALE_HEAD_NOT_PUBLISHED"
+    base, latest_base = pr.get("base") or {}, latest.get("base") or {}
+    if (any(latest_base.get(key) != base.get(key) for key in ("ref", "sha"))
+            or (latest_base.get("repo") or {}).get("full_name")
+            != (base.get("repo") or {}).get("full_name")):
+        # The base selects required gates and the integration target. A head
+        # match alone cannot preserve the evaluated contract after retargeting.
+        return "STALE_BASE_NOT_PUBLISHED"
     if run is not None:
         keys = ("id", "run_attempt", "status", "conclusion")
         if not current or any(current.get(k) != run.get(k) for k in keys):

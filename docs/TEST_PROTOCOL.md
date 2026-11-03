@@ -51,6 +51,11 @@ to the job summary and preserved in artifact
 `codex-delivery-receipts-<verifier-run-id>-<verifier-attempt>` independently of
 comment publication. Reuse this contract; do not add another CI authority.
 
+PR reports also record the evaluated base ref/SHA. Before publishing, recheck
+that base ref, SHA and repository still match the evaluated PR snapshot, along
+with the existing head/run freshness checks. A changed base invalidates the
+evaluated gate contract and must produce a stale, non-verified receipt.
+
 On a supported completion event or the next task invocation, read the result
 directly; never ask the user to carry green/fail. Take one bounded snapshot of
 the current PR or dev branch and its source-bound Tests run/attempt, then read the matching
