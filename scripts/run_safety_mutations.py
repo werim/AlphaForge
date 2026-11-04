@@ -248,6 +248,15 @@ def mutations() -> list[Mutation]:
                  'if isinstance(dirty,bool) else', 'if True else',
                  "tests/test_live_readiness_agent.py::test_readiness_refuses_unknown_checkout_cleanliness"),
     ])
+    sandbox_test = "tests/test_storage_sandbox_preflight.py"
+    cases.extend([
+        Mutation("sandbox_failure_stops_before_claim_and_fill", "src/alphaforge/storage_volume.py",
+                 'if not sandbox_verified(verification, mount, source_sha):', 'if False:',
+                 sandbox_test + "::test_inner_sandbox_failure_stops_before_claim_or_fill"),
+        Mutation("sandbox_boolean_is_not_verification", "src/alphaforge/storage_volume.py",
+                 'or not sandbox_verified(result.get("sandbox_verification"), mount, source_sha)', 'or False',
+                 sandbox_test + "::test_missing_or_altered_isolation_evidence_cannot_be_promoted[sandbox_verification]"),
+    ])
     cases.extend([
         Mutation("delivery_forbidden_never_claims_published", "scripts/verify_codex_delivery.py",
                  'return "COMMENT_WRITE_FORBIDDEN "', 'return "CREATED "',
