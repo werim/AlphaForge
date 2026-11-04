@@ -571,3 +571,29 @@ def test_historical_replay_source_routes_its_integrity_regressions(module):
     } <= set(plan.selected_tests)
     root = Path(__file__).resolve().parents[1]
     assert all((root / path).is_file() for path in plan.selected_tests)
+
+
+@pytest.mark.parametrize('module', ['backtest_chronology', 'backtest_source_evidence'])
+def test_capital_source_only_changes_route_producer_and_capital_regressions(module):
+    plan = _plan(f'src/alphaforge/{module}.py')
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ('T0', 'T1', 'T2', 'T3')
+    assert {
+        'tests/test_backtest_chronology.py',
+        'tests/test_backtest_source_evidence.py',
+        'tests/test_historical_capital_boundary.py',
+        'tests/test_issue421_decision_invariant.py',
+        'tests/test_issue421_full_chain_replay.py',
+        'tests/test_issue498_cross_component_mutations.py',
+    } <= set(plan.selected_tests)
+    root = Path(__file__).resolve().parents[1]
+    assert all((root / path).is_file() for path in plan.selected_tests)
+
+
+def test_capital_source_routes_are_deterministic_and_deduplicated():
+    files = ['src/alphaforge/backtest_chronology.py',
+             'src/alphaforge/backtest_source_evidence.py',
+             'tests/test_backtest_source_evidence.py']
+    plan = plan_changed_files(files, base_sha='a'*40, head_sha='b'*40)
+    assert plan == plan_changed_files(reversed(files), base_sha='a'*40, head_sha='b'*40)
+    assert plan.selected_tests.count('tests/test_backtest_source_evidence.py') == 1
