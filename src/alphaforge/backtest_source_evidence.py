@@ -380,9 +380,11 @@ def _verify_sql_closure_facts(conn, run_id, source):
                 raise ValueError("source/SQL closure geometry mismatch")
         for key in ("filled_quantity", "initial_risk_usd", "total_cost_usd", "net_r",
                     "realized_evidence_status", "realized_cost_source", "realized_costs_json"):
-            if observation[key] != proof.get(key):
+            # Both facts retain their JSON types; unlike SQLite REAL geometry,
+            # boolean/numeric aliases here are not the same captured evidence.
+            if digest(observation[key]) != digest(proof.get(key)):
                 raise ValueError("source/SQL closure accounting mismatch")
-        if observation["gross_pnl_usd"] != proof.get("gross_pnl"):
+        if digest(observation["gross_pnl_usd"]) != digest(proof.get("gross_pnl")):
             raise ValueError("source/SQL closure gross cash mismatch")
 
 
