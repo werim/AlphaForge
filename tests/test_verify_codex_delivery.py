@@ -514,3 +514,55 @@ def test_head_move_during_comment_lookup_is_rechecked_before_write():
     result=verifier.handle(api,'workflow_dispatch',dict(inputs=dict(pr_number='12')))
     assert api.writes==[]
     assert 'STALE_HEAD_NOT_PUBLISHED' in result[0] and 'CI_EVIDENCE_VERIFIED' not in result[0]
+
+
+def _main_base_pr_api():
+    api = API()
+    api.pr['base']['sha'] = 'b' * 40
+    api.run['event'] = 'pull_request'
+    original_jobs = api.jobs
+
+    def jobs():
+        rows = original_jobs()
+        for step in rows[0]['steps']:
+            if step['name'] == 'Cross-surface invariant gate':
+                step['conclusion'] = 'success'
+        rows[0]['steps'].append({'name': 'System audit fabric gate', 'conclusion': 'success'})
+        return rows
+
+    api.jobs = jobs
+    return api
+
+
+def test_unchanged_pr_base_can_publish_verified_evidence():
+    api = _main_base_pr_api()
+    result = verifier.handle(api, 'workflow_dispatch', {'inputs': {'pr_number': '12'}})
+    assert len(api.writes) == 1
+    assert 'RESULT: CI_EVIDENCE_VERIFIED' in result[0]
+    assert 'Evaluated base: main; base SHA: ' + 'b' * 40 in result[0]
+
+
+@pytest.mark.parametrize('stage', ['log', 'comments'])
+@pytest.mark.parametrize('field,value', [('ref', 'dev'), ('sha', 'c' * 40)])
+def test_pr_base_change_cannot_publish_verified_evidence(stage, field, value):
+    api = _main_base_pr_api()
+    original_log, original_pages = api.log, api.pages
+
+    def log(job_id):
+        result = original_log(job_id)
+        if stage == 'log':
+            api.pr['base'][field] = value
+        return result
+
+    def pages(path, key=None):
+        rows = original_pages(path, key)
+        if stage == 'comments' and path.endswith('/comments'):
+            api.pr['base'][field] = value
+        return rows
+
+    api.log, api.pages = log, pages
+    result = verifier.handle(api, 'workflow_dispatch', {'inputs': {'pr_number': '12'}})
+    assert api.writes == []
+    assert 'RESULT: STALE_EVIDENCE_NOT_VERIFIED' in result[0]
+    assert 'STALE_BASE_NOT_PUBLISHED' in result[0]
+    assert 'CI_EVIDENCE_VERIFIED' not in result[0]
