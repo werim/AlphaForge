@@ -334,3 +334,41 @@ def test_sql_geometry_must_match_observed_primary_closure_before_sealing(tmp_pat
         conn.execute(text("UPDATE decision_evidence SET trigger_price=101 WHERE lifecycle_state_after='POSITION_CLOSED'"))
     with pytest.raises(ValueError, match='closure geometry mismatch'):
         producer.finish()
+
+
+@pytest.mark.parametrize('field,replacement', [
+    ('filled_quantity', True),
+    ('initial_risk_usd', True),
+    ('total_cost_usd', False),
+    ('net_r', 3),
+    ('gross_pnl', 3),
+])
+def test_sql_closure_json_type_drift_rejected_before_sealing(tmp_path, monkeypatch, field, replacement):
+    producer, state, _, _ = trade(tmp_path, monkeypatch, risk_pct=10., cost_multiplier=0.)
+    cash_before = state.current_equity
+    with producer.engine.begin() as conn:
+        row = conn.execute(text("SELECT evidence_id, diagnostics_json FROM decision_evidence "
+                                "WHERE lifecycle_state_after='POSITION_CLOSED'")).one()
+        proof = json.loads(row.diagnostics_json)
+        assert type(proof[field]) is float
+        assert proof[field] == replacement  # Python equality hides the changed JSON fact.
+        assert digest(proof[field]) != digest(replacement)
+        proof[field] = replacement
+        conn.execute(text("UPDATE decision_evidence SET diagnostics_json=:proof WHERE evidence_id=:id"),
+                     {'proof': json.dumps(proof), 'id': row.evidence_id})
+    with pytest.raises(ValueError, match='source/SQL closure'):
+        producer.finish()
+    with producer.engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM backtest_source_events WHERE kind='FINAL'")).scalar_one() == 0
+    assert state.current_equity == cash_before
+
+
+def test_unchanged_sql_closure_json_keeps_zero_cost_real_trade_valid(tmp_path, monkeypatch):
+    producer, state, _, _ = trade(tmp_path, monkeypatch, risk_pct=10., cost_multiplier=0.)
+    result = producer.finish()
+    assert result['status'] == 'INCOMPLETE'  # Existing candle-label evidence limitations remain.
+    assert 'CANDLE_LABEL_EVENT_TIME_ONLY' in result['gaps']
+    assert result['closing_cash_usdt'] == state.current_equity == 1003.
+    proof = packet(producer)
+    validate_source_packet(proof, expected_identity_hash=proof['identity_hash'],
+                           expected_completion_hash=proof['completion_hash'])
