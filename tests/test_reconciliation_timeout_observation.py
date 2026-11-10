@@ -175,3 +175,53 @@ def test_custom_exception_hooks_cannot_break_exception_metadata():
             if name.startswith('__'): raise AssertionError(SECRET)
             return super().__getattribute__(name)
     assert exception_types(Hostile(SECRET)) == ['OTHER']
+
+
+def test_exception_cause_truthiness_cannot_delay_original_provider_error():
+    bool_called, release = threading.Event(), threading.Event()
+    class BlockingCause(Exception):
+        def __bool__(self):
+            bool_called.set()
+            release.wait(1)
+            return True
+    class Provider:
+        def snapshot(self):
+            raise RuntimeError('original provider failure') from BlockingCause(SECRET)
+    async def check():
+        r = ReadonlySnapshotReader()
+        try:
+            with pytest.raises(RuntimeError, match='original provider failure'):
+                await asyncio.wait_for(r.read(Provider()), .15)
+            assert not bool_called.is_set()
+            assert r.diagnostics()['exception_types'] == ['RuntimeError', 'OTHER']
+            assert SECRET not in json.dumps(r.diagnostics())
+        finally:
+            release.set()
+            assert await r.close(.5)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('attribute', ['__cause__', '__context__', '__suppress_context__'])
+def test_exception_chain_metadata_never_evaluates_subclass_descriptors(attribute):
+    from alphaforge.reconciliation_observation import exception_types
+    touched = []
+    def descriptor(self):
+        touched.append(attribute)
+        return False if attribute == '__suppress_context__' else None
+    Hostile = type('Hostile', (RuntimeError,), {attribute: property(descriptor)})
+    assert exception_types(Hostile(SECRET)) == ['OTHER']
+    assert touched == []
+
+
+def test_exception_type_metadata_never_evaluates_metaclass_descriptors():
+    from alphaforge.reconciliation_observation import exception_types
+    touched = []
+    class Meta(type):
+        @property
+        def __name__(cls):
+            touched.append('name')
+            return SECRET
+    class Hostile(RuntimeError, metaclass=Meta):
+        pass
+    assert exception_types(Hostile(SECRET)) == ['OTHER']
+    assert touched == []
