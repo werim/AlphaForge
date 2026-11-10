@@ -43,3 +43,18 @@ def test_context_fallback_and_cycles_retain_existing_policy():
     assert classify_provider_exception(outer) == TRANSIENT_TRANSPORT
     outer.__context__ = outer
     assert classify_provider_exception(outer) == UNKNOWN
+
+
+@pytest.mark.parametrize('status,code', [(401,None), (418,None), (418,-1003), (429,-1003), (500,None)])
+def test_http_exception_and_snapshot_evidence_have_one_classification(status, code):
+    from alphaforge.provider_failures import classify_reconciliation_snapshot
+    exc = HTTPError('https://offline.invalid', status, 'offline', {}, None)
+    exc._alphaforge_binance_code = code
+    source = {'request_attempts':[{'http_status':status,'binance_code':code,'transport_category':'HTTP'}]}
+    assert classify_reconciliation_snapshot(source) == classify_provider_exception(exc)
+
+
+def test_declared_unknown_is_not_upgraded_by_rate_limit_snapshot():
+    from alphaforge.provider_failures import classify_reconciliation_snapshot
+    source = {'failure_class':UNKNOWN,'request_attempts':[{'http_status':418,'binance_code':-1003}]}
+    assert classify_reconciliation_snapshot(source) == UNKNOWN

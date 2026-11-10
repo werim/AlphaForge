@@ -18,6 +18,12 @@ _NETWORK_ERRNOS = {errno.ECONNABORTED, errno.ECONNREFUSED, errno.ECONNRESET,
                    errno.EPIPE}
 
 
+def _classify_http_failure(status: int, binance_code: Any = None) -> str:
+    if status == 429 or (status == 418 and binance_code == -1003):
+        return TRANSIENT_TRANSPORT
+    return TRANSIENT_TRANSPORT if 500 <= status < 600 else PERMANENT_AUTH_OR_PROTOCOL
+
+
 def classify_provider_exception(exc: BaseException) -> str:
     """Only known transport failures receive a recovery grace period."""
     current: BaseException | None = exc
@@ -26,9 +32,7 @@ def classify_provider_exception(exc: BaseException) -> str:
         seen.add(id(current))
         if isinstance(current, error.HTTPError):
             binance_code = getattr(current, "_alphaforge_binance_code", None)
-            if current.code == 429 or (current.code == 418 and binance_code == -1003):
-                return TRANSIENT_TRANSPORT
-            return TRANSIENT_TRANSPORT if 500 <= current.code < 600 else PERMANENT_AUTH_OR_PROTOCOL
+            return _classify_http_failure(current.code, binance_code)
         if isinstance(current, ssl.SSLError):
             return PERMANENT_AUTH_OR_PROTOCOL
         if current.__class__.__name__ in {"MarketDataImmature", "HistoricalDataImmatureError"}:
@@ -65,8 +69,7 @@ def classify_reconciliation_snapshot(source: Mapping[str, Any]) -> str:
         last = attempts[-1]
         status = last.get("http_status")
         if isinstance(status, int):
-            return (TRANSIENT_TRANSPORT if status == 429 or 500 <= status < 600
-                    else PERMANENT_AUTH_OR_PROTOCOL)
+            return _classify_http_failure(status, last.get("binance_code"))
         if last.get("transport_category") in {"TIMEOUT", "TRANSPORT", "URL"}:
             return TRANSIENT_TRANSPORT
         if last.get("transport_category") in {"TLS", "HTTP_PROTOCOL"}:
