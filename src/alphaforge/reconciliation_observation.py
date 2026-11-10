@@ -17,12 +17,13 @@ def exception_types(exc: BaseException) -> list[str]:
     try:
         while exc is not None and len(result) < 4 and id(exc) not in seen:
             seen.add(id(exc))
-            name = type.__getattribute__(type(exc), "__name__")
+            name = type.__dict__["__name__"].__get__(type(exc), type)
             result.append(name if name in _EXCEPTION_TYPES else "OTHER")
-            # Do not execute custom exception attribute hooks on a failure path.
-            cause = BaseException.__getattribute__(exc, "__cause__")
-            suppressed = BaseException.__getattribute__(exc, "__suppress_context__")
-            exc = cause or (None if suppressed else BaseException.__getattribute__(exc, "__context__"))
+            # Read base storage directly: generic __getattribute__ still dispatches
+            # subclass descriptors, and truthiness may execute __bool__.
+            cause = BaseException.__cause__.__get__(exc)
+            suppressed = BaseException.__suppress_context__.__get__(exc)
+            exc = cause if cause is not None else (None if suppressed else BaseException.__context__.__get__(exc))
         return result
     except Exception:
         return ["UNAVAILABLE"]
