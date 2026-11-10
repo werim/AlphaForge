@@ -51,7 +51,8 @@ def classify_provider_exception(exc: BaseException) -> str:
                 current = reason
                 continue
             return TRANSIENT_TRANSPORT
-        current = current.__cause__ or current.__context__
+        cause = BaseException.__cause__.__get__(current)
+        current = cause if cause is not None else BaseException.__context__.__get__(current)
     return UNKNOWN
 
 
