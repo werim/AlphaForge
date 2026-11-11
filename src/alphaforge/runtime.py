@@ -7065,11 +7065,20 @@ class RuntimeOrchestrator:
             nonlocal timeout_phase
             timeout_phase = phase
 
+        reconciliation_started = time.monotonic()
         deadline = asyncio.timeout(self.config.reconciliation_timeout_sec)
         try:
             async with deadline:
                 await self._reconcile_runtime_state(on_phase=record_phase)
         except asyncio.TimeoutError as exc:
+            # Freeze evidence before bounded incident delivery or worker completion
+            # can replace the in-flight endpoint. This never authorizes recovery.
+            read_observation = self._reconciliation_reader.diagnostics()
+            if read_observation.get("started_monotonic", -1) < reconciliation_started:
+                read_observation = {"state": "NOT_STARTED_THIS_CYCLE"}
+            deadline_observation = {"origin": "APPLICATION_DEADLINE" if deadline.expired() else "COMPLETED_TIMEOUT_EXCEPTION",
+                "budget_sec": self.config.reconciliation_timeout_sec,
+                "elapsed_sec": max(0.0, time.monotonic() - reconciliation_started)}
             # Only a completed provider exception proves transport failure.
             timeout_failure_class = (
                 classify_provider_exception(exc)
@@ -7106,7 +7115,12 @@ class RuntimeOrchestrator:
                 try:
                     diagnostics = {"evidence_status": "INCOMPLETE",
                             "failure_class": timeout_failure_class, "errors": ["reconciliation_timeout"],
-                            "timeout_phase": timeout_phase}
+                            "timeout_phase": timeout_phase,
+                            "read_observation": read_observation, "deadline_observation": deadline_observation,
+                            "provenance": {"instance_id": state.instance_id, "startup_id": state.startup_id,
+                                "campaign_id": state.campaign_id, "burnin_run_id": state.burnin_run_id,
+                                "release_id": state.release_id,
+                                "source_config_authority": "burnin_runs.git_commit/config_hash via burnin_run_id"}}
                     if notification_failure is not None:
                         diagnostics["timeout_incident_delivery"] = notification_failure
                         diagnostics["errors"].append("timeout_incident_delivery_failed")

@@ -14,6 +14,9 @@ import socket
 import ssl
 import time
 import unicodedata
+import uuid
+
+from alphaforge.reconciliation_observation import READ_OPERATION, exception_types
 import urllib.parse
 from urllib import error
 from typing import Any, Callable, Mapping
@@ -123,6 +126,7 @@ class BinanceReadonlyReconciliationProvider:
         self._now_ms = now_ms or (lambda: int(datetime.now(UTC).timestamp() * 1000))
         self._transport = transport or BinanceHttpTransport()
         self._http_get_json = http_get_json or self._transport.get_json
+        self._observation: dict[str, Any] = {}
         self._time_offset_ms = 0
         self._last_timestamp_ms = 0
         self._request_evidence: list[dict[str, Any]] = []
@@ -134,7 +138,17 @@ class BinanceReadonlyReconciliationProvider:
     def close(self) -> None:
         self._transport.close()
 
+    def read_diagnostics(self) -> dict[str, Any]:
+        # One provider writer, immutable record replacement: no diagnostic lock
+        # may delay the event loop while the transport is blocked.
+        observation = self._observation
+        now = time.monotonic()
+        return {**observation, "observed_monotonic": now,
+                "requests": [{**row, "elapsed_sec": row.get("elapsed_sec", max(0.0, now - row["started_monotonic"]))} for row in observation.get("requests", ())],
+                "elapsed_sec": max(0.0, now - observation["started_monotonic"])} if observation else {}
+
     def snapshot(self) -> Mapping[str, Any]:
+        self._observation = {"operation_id": READ_OPERATION.get() or uuid.uuid4().hex, "started_monotonic": time.monotonic(), "requests": ()}
         retrieved_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         positions: list[dict[str, Any]] = []
         orders: list[dict[str, Any]] = []
@@ -275,7 +289,8 @@ class BinanceReadonlyReconciliationProvider:
                 "http_request_count": self._http_request_count, "request_count": self._http_request_count,
                 "request_attempts": list(self._request_attempts),
                 "endpoint_results": list(self._request_evidence), "request_evidence": list(self._request_evidence),
-                "orphan_coverage": "GLOBAL_OPEN_ORDERS_AND_GLOBAL_POSITION_RISK"}
+                "orphan_coverage": "GLOBAL_OPEN_ORDERS_AND_GLOBAL_POSITION_RISK",
+                "provider_observation": self.read_diagnostics()}
 
     def _public_get(self, path: str, endpoint: str) -> Any:
         url = f"{self._cfg.base_url.rstrip('/')}{path}"
@@ -418,11 +433,20 @@ class BinanceReadonlyReconciliationProvider:
                    "time_refresh_performed": request_kind == "SERVER_TIME",
                    "environment": urllib.parse.urlsplit(self._cfg.base_url).hostname}
         self._request_attempts.append(attempt)
+        started = time.monotonic()
+        observation = self._observation
+        requests = observation.get("requests", ())
+        safe_endpoint = endpoint if endpoint in {"positionRisk", "openOrders", "userTrades", "exchangeInfo", "serverTime"} else "OTHER"
+        request = {"request_id": self._http_request_count, "endpoint_class": safe_endpoint,
+                   "started_monotonic": started, "transport_timeout_sec": self._cfg.request_timeout_sec,
+                   "state": "IN_FLIGHT", "exception_types": []}
+        self._observation = {**observation, "requests": (*requests, request)[-32:]}
         try:
             payload = self._http_get_json(url, headers, self._cfg.request_timeout_sec)
             attempt["outcome"] = "PASS"
             return payload, attempt
         except error.HTTPError as exc:
+            request = {**request, "exception_types": exception_types(exc)}
             attempt["http_status"] = exc.code
             attempt["transport_category"] = "HTTP"
             try:
@@ -446,9 +470,15 @@ class BinanceReadonlyReconciliationProvider:
             setattr(exc, "_alphaforge_attempt", attempt)
             raise
         except Exception as exc:
+            request = {**request, "exception_types": exception_types(exc)}
             attempt["transport_category"] = self._transport_category(exc)
             setattr(exc, "_alphaforge_attempt", attempt)
             raise
+        finally:
+            request = {**request, "elapsed_sec": max(0.0, time.monotonic() - started),
+                       "state": "COMPLETE" if attempt["outcome"] == "PASS" else "FAILED",
+                       "http_status": attempt["http_status"] if type(attempt["http_status"]) is int else None}
+            self._observation = {**observation, "requests": (*requests, request)[-32:]}
 
     def _rate_limit_cooldown_remaining_sec(self) -> float:
         return max(0.0, self._rate_limit_cooldown_until_monotonic - time.monotonic())
