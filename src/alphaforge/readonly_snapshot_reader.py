@@ -10,6 +10,10 @@ import asyncio
 from concurrent.futures import Future
 import contextvars
 import threading
+import time
+import uuid
+
+from alphaforge.reconciliation_observation import READ_OPERATION, exception_types, worker_stack
 from typing import Any
 
 
@@ -18,6 +22,28 @@ class ReadonlySnapshotReader:
         self._pending: Future[tuple[bool, Any]] | None = None
         self._waiting = False
         self._closed = False
+        self._observation: dict[str, Any] = {}
+        self._thread: threading.Thread | None = None
+        self._provider: Any = None
+
+    def diagnostics(self) -> dict[str, Any]:
+        from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationProvider
+        try:
+            observation = dict(self._observation)
+            thread = self._thread
+            observation.update(worker_alive=bool(thread and thread.is_alive()),
+                result_unaccepted=self.has_unaccepted_read, reader_closed=self.closed)
+            if observation:
+                observation["elapsed_sec"] = max(0.0, time.monotonic() - observation["started_monotonic"])
+            if thread and thread.is_alive():
+                observation["worker_stack"] = worker_stack(thread.ident)
+            # No arbitrary provider hook is invoked on the timeout/event-loop path.
+            if type(self._provider) is BinanceReadonlyReconciliationProvider:
+                provider_observation = BinanceReadonlyReconciliationProvider.read_diagnostics(self._provider)
+                observation["provider"] = provider_observation if provider_observation.get("operation_id") == observation.get("operation_id") else {"state": "NOT_STARTED_THIS_OPERATION"}
+            return observation
+        except Exception:
+            return {"observation_status": "UNAVAILABLE"}
 
     @property
     def closed(self) -> bool:
@@ -35,19 +61,32 @@ class ReadonlySnapshotReader:
         # Any completed abandoned read is discarded, including COMPLETE results.
         self._pending = future = Future()
         context = contextvars.copy_context()
+        self._provider = provider
+        self._observation = {"operation_id": uuid.uuid4().hex, "started_monotonic": time.monotonic(), "state": "STARTING", "exception_types": []}
 
         def fetch() -> None:
+            self._observation = {**self._observation, "state": "RUNNING"}
             try:
-                result = (True, context.run(lambda: dict(provider.snapshot())))
+                def snapshot():
+                    READ_OPERATION.set(self._observation["operation_id"])
+                    return dict(provider.snapshot())
+                result = (True, context.run(snapshot))
             except BaseException as exc:
                 result = (False, exc if isinstance(exc, Exception) else RuntimeError(type(exc).__name__))
-            future.set_result(result)
+            try:
+                self._observation = {**self._observation, "state": "COMPLETE" if result[0] else "FAILED", "exception_types": [] if result[0] else exception_types(result[1]), "completed_monotonic": time.monotonic()}
+            except Exception:
+                self._observation = {**self._observation, "state": "OBSERVATION_UNAVAILABLE"}
+            finally:
+                future.set_result(result)
 
         self._waiting = True
         try:
             try:
-                threading.Thread(target=fetch, name="readonly-reconciliation", daemon=True).start()
+                self._thread = threading.Thread(target=fetch, name="readonly-reconciliation", daemon=True)
+                self._thread.start()
             except Exception:
+                self._observation = {**self._observation, "state": "START_FAILED"}
                 self._pending = None
                 raise
             ok, value = await asyncio.shield(asyncio.wrap_future(future))
