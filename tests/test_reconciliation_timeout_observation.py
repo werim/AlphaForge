@@ -225,3 +225,30 @@ def test_exception_type_metadata_never_evaluates_metaclass_descriptors():
         pass
     assert exception_types(Hostile(SECRET)) == ['OTHER']
     assert touched == []
+
+
+
+def test_worker_budget_exhaustion_uses_runtime_application_deadline(monkeypatch):
+    from types import SimpleNamespace
+    from alphaforge import reconciliation_read_budget as budget
+
+    attempts = []
+    # Simulate expiry inside the copied worker context before the outer timer fires.
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=lambda: float("inf")))
+    p = provider(lambda url, headers, timeout: attempts.append(timeout))
+    o = runtime(p)
+    o.config.reconciliation_timeout_sec = 1.0
+
+    async def check():
+        try:
+            await o._run_reconciliation_once()
+            diagnostics = latest(o)
+            assert diagnostics["deadline_observation"]["origin"] == "APPLICATION_DEADLINE"
+            assert diagnostics["failure_class"] == "UNKNOWN"
+            assert diagnostics["timeout_phase"] == "PROVIDER_READ"
+            assert o._unknown_exchange_state
+            assert attempts == []
+        finally:
+            await o._shutdown_tasks()
+
+    asyncio.run(check())

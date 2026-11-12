@@ -17,6 +17,7 @@ import unicodedata
 import uuid
 
 from alphaforge.reconciliation_observation import READ_OPERATION, exception_types
+from alphaforge.reconciliation_read_budget import ReconciliationReadBudgetExpired, remaining_read_budget
 import urllib.parse
 from urllib import error
 from typing import Any, Callable, Mapping
@@ -82,6 +83,9 @@ class BinanceHttpTransport:
             self._origin = origin
         path = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
         try:
+            self._connection.timeout = timeout_sec
+            if self._connection.sock is not None:
+                self._connection.sock.settimeout(timeout_sec)
             self._connection.request("GET", path, headers=dict(headers))
             response = self._connection.getresponse()
             body = response.read()
@@ -247,6 +251,7 @@ class BinanceReadonlyReconciliationProvider:
                 required_symbols=selected,
                 provider_evidence_status="COMPLETE",
             )
+            remaining_read_budget()
             self._clear_rate_limit_cooldown()
             return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings, endpoint_statuses) | {
                 "orphan_orders": len(orders), "orphan_positions": active, "duplicate_fills": 0,
@@ -254,6 +259,8 @@ class BinanceReadonlyReconciliationProvider:
                 "failed_symbol": None, "unknown_unreconciled_symbols": [], "failure_class": None,
                 "derivatives_contract": derivatives_contract,
             }
+        except ReconciliationReadBudgetExpired:
+            raise
         except Exception as exc:  # fail closed while preserving completed evidence
             if isinstance(exc, ReconciliationExposureError):
                 positions = exc.positions
@@ -412,10 +419,12 @@ class BinanceReadonlyReconciliationProvider:
                 if transient_retries >= self._cfg.transport_retries:
                     self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "FAIL"); raise
             self.close()
+            backoff = random.uniform(0.01, 0.05) * (transient_retries + 1)
+            remaining = remaining_read_budget()
             if retry_attempt is not None:
                 retry_attempt.update({"outcome": "RETRY", "retry_reason": "TRANSIENT_FAILURE"})
             transient_retries += 1
-            time.sleep(random.uniform(0.01, 0.05) * transient_retries)
+            time.sleep(min(backoff, remaining))
 
     def _refresh_server_time(self) -> None:
         url = f"{self._cfg.base_url.rstrip('/')}/fapi/v1/time"
@@ -426,6 +435,7 @@ class BinanceReadonlyReconciliationProvider:
 
     def _http_operation(self, url: str, headers: Mapping[str, str], endpoint: str, symbol: str | None,
                         request_kind: str, attempt_number: int, retry_reason: str | None) -> tuple[Any, dict[str, Any]]:
+        timeout_sec = min(self._cfg.request_timeout_sec, remaining_read_budget())
         self._http_request_count += 1
         attempt = {"sequence": self._http_request_count, "endpoint_class": endpoint, "symbol": symbol,
                    "request_kind": request_kind, "attempt_number": attempt_number, "retry_reason": retry_reason,
@@ -438,13 +448,11 @@ class BinanceReadonlyReconciliationProvider:
         requests = observation.get("requests", ())
         safe_endpoint = endpoint if endpoint in {"positionRisk", "openOrders", "userTrades", "exchangeInfo", "serverTime"} else "OTHER"
         request = {"request_id": self._http_request_count, "endpoint_class": safe_endpoint,
-                   "started_monotonic": started, "transport_timeout_sec": self._cfg.request_timeout_sec,
+                   "started_monotonic": started, "transport_timeout_sec": timeout_sec,
                    "state": "IN_FLIGHT", "exception_types": []}
         self._observation = {**observation, "requests": (*requests, request)[-32:]}
         try:
-            payload = self._http_get_json(url, headers, self._cfg.request_timeout_sec)
-            attempt["outcome"] = "PASS"
-            return payload, attempt
+            payload = self._http_get_json(url, headers, timeout_sec)
         except error.HTTPError as exc:
             request = {**request, "exception_types": exception_types(exc)}
             attempt["http_status"] = exc.code
@@ -468,12 +476,18 @@ class BinanceReadonlyReconciliationProvider:
                     "rate_limit_cooldown_sec": cooldown["cooldown_sec"],
                 })
             setattr(exc, "_alphaforge_attempt", attempt)
+            remaining_read_budget()
             raise
         except Exception as exc:
             request = {**request, "exception_types": exception_types(exc)}
             attempt["transport_category"] = self._transport_category(exc)
             setattr(exc, "_alphaforge_attempt", attempt)
+            remaining_read_budget()
             raise
+        else:
+            remaining_read_budget()
+            attempt["outcome"] = "PASS"
+            return payload, attempt
         finally:
             request = {**request, "elapsed_sec": max(0.0, time.monotonic() - started),
                        "state": "COMPLETE" if attempt["outcome"] == "PASS" else "FAILED",
