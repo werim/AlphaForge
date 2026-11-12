@@ -427,6 +427,69 @@ def test_real_worker_preserves_partial_coverage_when_shadow_table_was_never_crea
             'REAL_WALL_WINDOW_INCOMPLETE', 'REAL_PROVIDER_SOURCE_MISSING'} <= set(result['gaps'])
 
 
+def test_real_worker_drains_sampler_when_cancelled_during_teardown(tmp_path, monkeypatch, cfg):
+    import asyncio
+    import threading
+    from alphaforge import burnin_ops as ops, burnin_campaign as campaigns, storage_policy
+
+    root = tmp_path / 'experiment'
+    root.mkdir()
+    coverage_database(root)
+    plan = {'backend': {'mount': str(tmp_path)}, 'shutdown_grace_seconds': 1}
+    monkeypatch.setattr(m, 'validate_plan', lambda p: cfg)
+    monkeypatch.setattr(ops, '_preflight', lambda *a, **kw: {'status': 'CALIBRATION_READY'})
+    monkeypatch.setattr(ops, '_git_branch', lambda: 'dev')
+    original_check = storage_policy.StorageController.check
+    original_checkpoint = storage_policy.checkpoint
+    original_archive = storage_policy.verified_archive
+    # Restore the global hooks even when running the regression on a broken implementation.
+    monkeypatch.setattr(storage_policy.StorageController, 'check', original_check)
+    monkeypatch.setattr(storage_policy, 'checkpoint', original_checkpoint)
+    monkeypatch.setattr(storage_policy, 'verified_archive', original_archive)
+    release = threading.Event()
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        sampling = asyncio.Event()
+        draining = asyncio.Event()
+        original_gather = asyncio.gather
+
+        def usage(_backend):
+            loop.call_soon_threadsafe(sampling.set)
+            assert release.wait(2)
+            return {'quota_used_bytes': 0, 'host_container_free_bytes': 9999999999}
+
+        async def fail_early(_runner):
+            await sampling.wait()
+            raise RuntimeError('synthetic worker failure')
+
+        def gather(*tasks, **kwargs):
+            draining.set()
+            return original_gather(*tasks, **kwargs)
+
+        monkeypatch.setattr(v, 'usage', usage)
+        monkeypatch.setattr(campaigns.BurnInCampaignRunner, 'run_foreground', fail_early)
+        monkeypatch.setattr(asyncio, 'gather', gather)
+        guard = SimpleNamespace(is_set=lambda: False, set=lambda: None,
+                                worker_thread=SimpleNamespace(is_alive=lambda: True))
+        task = asyncio.create_task(m.real_worker(plan, tmp_path / 'control', guard))
+        try:
+            await asyncio.wait_for(draining.wait(), 2)
+            task.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert storage_policy.StorageController.check is original_check
+    assert storage_policy.checkpoint is original_checkpoint
+    assert storage_policy.verified_archive is original_archive
+
+
 def run_fixture_plan(tmp_path,monkeypatch,cfg):
     plan={'config_env':{'ALPHAFORGE_PAPER_POSITION_MANAGEMENT_SHADOW_ENABLED':'true'},
           'backend':{'mount':str(tmp_path),'cap_bytes':10000000},'source':{'sha':'a'*40},

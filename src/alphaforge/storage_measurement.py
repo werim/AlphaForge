@@ -388,11 +388,22 @@ async def real_worker(plan, control_path: Path, guard):
             stop_sampling.set()
             if not work.done():
                 work.cancel()
-            await asyncio.gather(work, timer, return_exceptions=True)
-            guard.set()
-            controller_class.check = original_check
-            storage.checkpoint, storage.verified_archive = original_checkpoint, original_archive
-            engine.dispose()
+            drain = asyncio.gather(work, timer, return_exceptions=True)
+            cancelled = False
+            try:
+                # Cancellation must not abandon a sample already running in a thread.
+                while not drain.done():
+                    try:
+                        await asyncio.shield(drain)
+                    except asyncio.CancelledError:
+                        cancelled = True
+            finally:
+                guard.set()
+                controller_class.check = original_check
+                storage.checkpoint, storage.verified_archive = original_checkpoint, original_archive
+                engine.dispose()
+            if cancelled:
+                raise asyncio.CancelledError
 
     finally:
         for key,value in previous_environment.items():
