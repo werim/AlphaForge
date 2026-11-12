@@ -187,6 +187,7 @@ class _Response:
 class _Connection:
     def __init__(self, responses, failure=None):
         self.responses = responses; self.failure = failure; self.closed = 0; self.requests = []
+        self.sock = None
     def request(self, method, path, headers):
         self.requests.append(path)
         if self.failure: raise self.failure
@@ -576,3 +577,51 @@ def test_http_attempt_evidence_is_secret_free():
     blob = json.dumps(provider.snapshot()["request_attempts"])
     assert "signature=" not in blob and "api_key" not in blob.lower() and "secret" not in blob.lower()
     assert "?" not in blob and "timestamp" not in blob.lower()
+
+
+
+@pytest.mark.parametrize("first_duration", [0.75, 2.0])
+def test_runtime_budget_bounds_sequential_provider_reads(monkeypatch, first_duration):
+    from types import SimpleNamespace
+    from alphaforge import reconciliation_read_budget as budget
+
+    now = 100.0
+    timeouts = []
+
+    def fake_http(url, headers, timeout):
+        nonlocal now
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            now += first_duration
+        return []
+
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=lambda: now))
+    provider = BinanceReadonlyReconciliationProvider(
+        config=BinanceReadonlyReconciliationConfig(base_url="https://example.invalid", api_key="k", api_secret="s"),
+        http_get_json=fake_http,
+    )
+    with budget.reconciliation_read_deadline(102.0):
+        if first_duration == 2.0:
+            with pytest.raises(budget.ReconciliationReadBudgetExpired):
+                provider.snapshot()
+            assert timeouts == [2.0]
+        else:
+            assert provider.snapshot()["evidence_status"] == "COMPLETE"
+            assert timeouts == [2.0, 1.25]
+
+
+
+def test_transport_updates_timeout_on_reused_socket(monkeypatch):
+    from types import SimpleNamespace
+
+    made = _install_connections(monkeypatch, [[_Response(), _Response()]])
+    transport = BinanceHttpTransport()
+    url = "https://example.invalid/read"
+    transport.get_json(url, {}, 2.0)
+    socket_timeouts = []
+    made[0].sock = SimpleNamespace(settimeout=socket_timeouts.append)
+    transport.get_json(url, {}, 1.25)
+
+    assert len(made) == 1
+    assert made[0].timeout == 1.25
+    assert socket_timeouts == [1.25]
