@@ -2922,7 +2922,20 @@ class RuntimeOrchestrator:
 
     async def _scan_once(self) -> None:
         self._sync_resolved_paper_positions()
-        if await self._check_storage_pressure():
+        storage_check = asyncio.create_task(self._check_storage_pressure())
+        try:
+            storage_blocked = await asyncio.shield(storage_check)
+        except asyncio.CancelledError:
+            # Cancelling the scanner cannot stop its SQLite thread. Let the
+            # check and any recovery write finish before shutdown finalizes.
+            while not storage_check.done():
+                try:
+                    await asyncio.shield(storage_check)
+                except asyncio.CancelledError:
+                    continue
+            storage_check.result()
+            raise
+        if storage_blocked:
             return
         if self._kill_switch_active():
             self._last_scan_gate_blockers = ["KILL_SWITCH_ACTIVE"]

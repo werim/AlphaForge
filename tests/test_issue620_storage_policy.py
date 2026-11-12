@@ -677,3 +677,46 @@ def test_issue622_archival_fails_closed_on_corrupted_compact_universe(db, tmp_pa
 
     with pytest.raises(ValueError, match='UNIVERSE_DOMAIN_OR_REPLAY_INCOMPLETE'):
         verified_archive(db, archive_policy(tmp_path), CID)
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_runtime_shutdown_drains_inflight_storage_controller(db, monkeypatch, blocked):
+    orchestrator = runtime(db)
+    release = threading.Event()
+    finished = threading.Event()
+
+    async def verify():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def check(_controller):
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                assert release.wait(5)
+            finally:
+                finished.set()
+            return {"blocked": True} if blocked else None
+
+        monkeypatch.setattr(StorageController, "check", check)
+        owner = asyncio.create_task(orchestrator._scan_once())
+        orchestrator._tasks = [owner]
+        shutdown = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            shutdown = asyncio.create_task(orchestrator._shutdown_tasks())
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.05)
+            release.set()
+            await asyncio.wait_for(shutdown, timeout=2)
+            assert finished.is_set()
+            orchestrator.market_scanner.assert_not_called()
+            if blocked:
+                snapshot = latest_runtime_state_snapshot(db)
+                assert snapshot["recovery_action_required"] == 1
+                assert orchestrator._storage_report["recovery_state_persisted"] is True
+        finally:
+            release.set()
+            if shutdown is not None:
+                await shutdown
+
+    asyncio.run(verify())
