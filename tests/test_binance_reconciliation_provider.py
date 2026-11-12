@@ -625,3 +625,31 @@ def test_transport_updates_timeout_on_reused_socket(monkeypatch):
     assert len(made) == 1
     assert made[0].timeout == 1.25
     assert socket_timeouts == [1.25]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "rate_limit"])
+def test_transport_failure_at_runtime_deadline_stays_application_expiry(monkeypatch, failure):
+    from types import SimpleNamespace
+    from alphaforge import reconciliation_read_budget as budget
+
+    now = 100.0
+
+    def fake_http(url, headers, timeout):
+        nonlocal now
+        now += timeout
+        if failure == "rate_limit":
+            raise error.HTTPError(url, 429, "rate limited", {"Retry-After": "30"}, None)
+        raise TimeoutError("socket timeout")
+
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=lambda: now))
+    provider = BinanceReadonlyReconciliationProvider(
+        config=BinanceReadonlyReconciliationConfig(
+            base_url="https://example.invalid", api_key="k", api_secret="s", transport_retries=0,
+        ),
+        http_get_json=fake_http,
+    )
+    with budget.reconciliation_read_deadline(102.0):
+        with pytest.raises(budget.ReconciliationReadBudgetExpired):
+            provider.snapshot()
+    if failure == "rate_limit":
+        assert provider.snapshot()["http_request_count"] == 0

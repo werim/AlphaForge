@@ -453,9 +453,6 @@ class BinanceReadonlyReconciliationProvider:
         self._observation = {**observation, "requests": (*requests, request)[-32:]}
         try:
             payload = self._http_get_json(url, headers, timeout_sec)
-            remaining_read_budget()
-            attempt["outcome"] = "PASS"
-            return payload, attempt
         except error.HTTPError as exc:
             request = {**request, "exception_types": exception_types(exc)}
             attempt["http_status"] = exc.code
@@ -479,12 +476,18 @@ class BinanceReadonlyReconciliationProvider:
                     "rate_limit_cooldown_sec": cooldown["cooldown_sec"],
                 })
             setattr(exc, "_alphaforge_attempt", attempt)
+            remaining_read_budget()
             raise
         except Exception as exc:
             request = {**request, "exception_types": exception_types(exc)}
             attempt["transport_category"] = self._transport_category(exc)
             setattr(exc, "_alphaforge_attempt", attempt)
+            remaining_read_budget()
             raise
+        else:
+            remaining_read_budget()
+            attempt["outcome"] = "PASS"
+            return payload, attempt
         finally:
             request = {**request, "elapsed_sec": max(0.0, time.monotonic() - started),
                        "state": "COMPLETE" if attempt["outcome"] == "PASS" else "FAILED",
