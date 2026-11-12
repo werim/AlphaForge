@@ -91,6 +91,37 @@ def test_transient_lock_retries_atomic_cycle_and_keeps_reconciliation_task_alive
     assert runtime._fail_closed_reason is None
 
 
+def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(tmp_path, monkeypatch):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'reconciliation.db'}")
+    runtime = _runtime(engine)
+    reader_type = type(runtime._reconciliation_reader)
+    original_read = reader_type.read
+
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def held_read(reader, provider):
+            entered.set()
+            await release.wait()
+            return await original_read(reader, provider)
+
+        monkeypatch.setattr(reader_type, "read", held_read)
+        task = asyncio.create_task(runtime._run_reconciliation_once())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            assert _rows(engine) == ([], [])
+            assert runtime._evaluate_runtime_risk("BTCUSDT", {}) == "RECONCILIATION_EVIDENCE_PENDING"
+        finally:
+            release.set()
+            await task
+
+    asyncio.run(run())
+    events, states = _rows(engine)
+    assert [row[0] for row in events] == ["CLEAN"]
+    assert [row[0] for row in states] == ["CLEAN"]
+
+
 def test_persistent_lock_exhausts_budget_and_recovers_failure_evidence(tmp_path):
     path = tmp_path / "reconciliation.db"
     engine = init_db(f"sqlite+pysqlite:///{path}")

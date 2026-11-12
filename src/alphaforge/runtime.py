@@ -6896,7 +6896,9 @@ class RuntimeOrchestrator:
     def _evaluate_runtime_risk(self, symbol: str, market_ctx: MutableMapping[str, Any]) -> str | None:
         now = time.time()
         if self._reconciliation_persistence_unhealthy:
-            return "RECONCILIATION_PERSISTENCE_FAILED"
+            if self._pending_reconciliation_persistence_failures:
+                return "RECONCILIATION_PERSISTENCE_FAILED"
+            return self._fail_closed_reason or "RECONCILIATION_EVIDENCE_PENDING"
         if self.metrics.heartbeat_persistence_degraded:
             return "RUNTIME_DB_UNAVAILABLE"
         if self._fail_closed_reason:
