@@ -93,6 +93,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, campaign_uses_dynamic_universe, DYNAMIC_UNIVERSE_SCOPE_MODE, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
+from alphaforge.reconciliation_read_budget import ReconciliationReadBudgetExpired, reconciliation_read_deadline
 from alphaforge.portfolio_risk import allocate_portfolio_candidates, evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
@@ -6899,7 +6900,9 @@ class RuntimeOrchestrator:
     def _evaluate_runtime_risk(self, symbol: str, market_ctx: MutableMapping[str, Any]) -> str | None:
         now = time.time()
         if self._reconciliation_persistence_unhealthy:
-            return "RECONCILIATION_PERSISTENCE_FAILED"
+            if self._pending_reconciliation_persistence_failures:
+                return "RECONCILIATION_PERSISTENCE_FAILED"
+            return self._fail_closed_reason or "RECONCILIATION_EVIDENCE_PENDING"
         if self.metrics.heartbeat_persistence_degraded:
             return "RUNTIME_DB_UNAVAILABLE"
         if self._fail_closed_reason:
@@ -7069,20 +7072,22 @@ class RuntimeOrchestrator:
         deadline = asyncio.timeout(self.config.reconciliation_timeout_sec)
         try:
             async with deadline:
-                await self._reconcile_runtime_state(on_phase=record_phase)
-        except asyncio.TimeoutError as exc:
+                with reconciliation_read_deadline(reconciliation_started + self.config.reconciliation_timeout_sec):
+                    await self._reconcile_runtime_state(on_phase=record_phase)
+        except (asyncio.TimeoutError, ReconciliationReadBudgetExpired) as exc:
+            application_deadline = deadline.expired() or isinstance(exc, ReconciliationReadBudgetExpired)
             # Freeze evidence before bounded incident delivery or worker completion
             # can replace the in-flight endpoint. This never authorizes recovery.
             read_observation = self._reconciliation_reader.diagnostics()
             if read_observation.get("started_monotonic", -1) < reconciliation_started:
                 read_observation = {"state": "NOT_STARTED_THIS_CYCLE"}
-            deadline_observation = {"origin": "APPLICATION_DEADLINE" if deadline.expired() else "COMPLETED_TIMEOUT_EXCEPTION",
+            deadline_observation = {"origin": "APPLICATION_DEADLINE" if application_deadline else "COMPLETED_TIMEOUT_EXCEPTION",
                 "budget_sec": self.config.reconciliation_timeout_sec,
                 "elapsed_sec": max(0.0, time.monotonic() - reconciliation_started)}
             # Only a completed provider exception proves transport failure.
             timeout_failure_class = (
                 classify_provider_exception(exc)
-                if not deadline.expired() and timeout_phase == "PROVIDER_READ"
+                if not application_deadline and timeout_phase == "PROVIDER_READ"
                 else UNKNOWN
             )
             self._unknown_exchange_state = True
@@ -7170,6 +7175,8 @@ class RuntimeOrchestrator:
                     snapshot_source = await self._reconciliation_reader.read(provider)
                     if provider is not (self.live_reconciliation_provider or self.exchange_snapshot_provider):
                         raise RuntimeError("reconciliation_provider_changed_during_read")
+                except ReconciliationReadBudgetExpired:
+                    raise
                 except Exception as exc:
                     if self.config.execution_mode == ExecutionMode.LIVE:
                         raise
