@@ -369,6 +369,7 @@ def test_invalid_shadow_action_shape_is_incomplete(cfg, actions):
 def test_real_worker_preserves_partial_coverage_when_shadow_table_was_never_created(tmp_path, monkeypatch, cfg):
     import asyncio
     import sqlite3
+    import threading
     from alphaforge import burnin_ops as ops, burnin_campaign as campaigns
     from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
     from alphaforge.runtime_heartbeat import save_runtime_heartbeat
@@ -381,8 +382,23 @@ def test_real_worker_preserves_partial_coverage_when_shadow_table_was_never_crea
     monkeypatch.setattr(m, 'validate_plan', lambda p: cfg)
     monkeypatch.setattr(ops, '_preflight', lambda *a, **kw: {'status': 'CALIBRATION_READY'})
     monkeypatch.setattr(ops, '_git_branch', lambda: 'dev')
-    monkeypatch.setattr(v, 'usage', lambda p: {'quota_used_bytes': 0, 'host_container_free_bytes': 9999999999})
+    loop_thread = threading.get_ident()
+    sampling_started = asyncio.Event()
+    runtime_progressed = threading.Event()
+    sample_finished = threading.Event()
+
+    def usage(_backend):
+        if not sample_finished.is_set():
+            assert threading.get_ident() != loop_thread
+            loop.call_soon_threadsafe(sampling_started.set)
+            assert runtime_progressed.wait(2)
+            sample_finished.set()
+        return {'quota_used_bytes': 0, 'host_container_free_bytes': 9999999999}
+
+    monkeypatch.setattr(v, 'usage', usage)
     async def finish_early(runner):
+        await asyncio.wait_for(sampling_started.wait(), 2)
+        runtime_progressed.set()
         with runner.engine.connect() as c:
             run = c.execute(text('SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:cid'),
                             {'cid': runner.campaign_id}).scalar_one()
@@ -395,7 +411,14 @@ def test_real_worker_preserves_partial_coverage_when_shadow_table_was_never_crea
     monkeypatch.setattr(campaigns.BurnInCampaignRunner, 'run_foreground', finish_early)
     guard = SimpleNamespace(is_set=lambda: False, set=lambda: None,
                             worker_thread=SimpleNamespace(is_alive=lambda: True))
-    result = asyncio.run(m.real_worker(plan, tmp_path / 'control', guard))
+    async def run():
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        return await m.real_worker(plan, tmp_path / 'control', guard)
+
+    loop = None
+    result = asyncio.run(run())
+    assert sample_finished.is_set()
     assert result['complete'] is False and result['admission_eligible'] is False
     assert result['coverage']['runtime_instance_id'] == 'synthetic-661'
     assert result['coverage']['shadow_evidence_status'] == 'UNAVAILABLE'

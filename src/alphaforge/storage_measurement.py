@@ -293,8 +293,9 @@ async def real_worker(plan, control_path: Path, guard):
         checkpoints = []
         def sample():
             nonlocal observed_peaks, previous, positive_growth
+            quota_usage = volume.usage(plan["backend"])
             with sample_lock:
-                value = {**footprint(root), **volume.usage(plan["backend"])}
+                value = {**footprint(root), **quota_usage}
                 value["control_files_bytes"] = sum(p.stat().st_size for p in mount.iterdir() if p.is_file())
                 observed_peaks = peaks([observed_peaks, value])
                 positive_growth += max(0, value["db_wal_bytes"] - previous)
@@ -330,22 +331,32 @@ async def real_worker(plan, control_path: Path, guard):
         storage.checkpoint, storage.verified_archive = measured_checkpoint, measured_archive
         controller_class.check = check
         deadline = time.monotonic() + DURATION + 600
+        stop_sampling = asyncio.Event()
         async def stop_window():
-            while time.monotonic() < deadline:
+            while not stop_sampling.is_set() and time.monotonic() < deadline:
                 if guard.is_set() or not guard.worker_thread.is_alive():
                     os._exit(75)
-                sample()
+                # Native APFS inventory blocks in diskutil. Keep the runtime
+                # loop available to accept reconciliation reads and heartbeats.
+                await asyncio.to_thread(sample)
+                if stop_sampling.is_set():
+                    return
                 try:
                     span = await asyncio.to_thread(heartbeat_window, db, campaign.campaign_id, start["burnin_run_id"])
                 except (sqlite3.OperationalError, ValueError):
-                    await asyncio.sleep(1)
-                    continue  # startup incomplete, never counted as healthy coverage
+                    span = 0  # startup incomplete, never counted as healthy coverage
+                if stop_sampling.is_set():
+                    return
                 if span >= DURATION:
                     with engine.begin() as c:
                         pause_campaign(c, campaign.campaign_id)
                     return
-                await asyncio.sleep(1)
-            raise TimeoutError("REAL_WINDOW_DEADLINE")
+                try:
+                    await asyncio.wait_for(stop_sampling.wait(), timeout=1)
+                except TimeoutError:
+                    pass
+            if not stop_sampling.is_set():
+                raise TimeoutError("REAL_WINDOW_DEADLINE")
         work = asyncio.create_task(runner.run_foreground())
         timer = asyncio.create_task(stop_window())
         try:
@@ -355,6 +366,8 @@ async def real_worker(plan, control_path: Path, guard):
                 await asyncio.wait_for(work, plan['shutdown_grace_seconds'])
             else:
                 work.result()
+                stop_sampling.set()
+                await asyncio.shield(timer)
             coverage = scoped_coverage(db, campaign.campaign_id, start["burnin_run_id"])
             sample()
             coverage["controller_checkpoints"] = len(checkpoints)
@@ -372,8 +385,9 @@ async def real_worker(plan, control_path: Path, guard):
                     "representativeness":"OBSERVED_SCOPE_ONLY_REQUIRES_OPERATOR_REVIEW",
                     "runtime_returned": True,"worker_pid":os.getpid(),"guardian_pid":os.getppid()}
         finally:
-            for task in (work, timer):
-                if not task.done(): task.cancel()
+            stop_sampling.set()
+            if not work.done():
+                work.cancel()
             await asyncio.gather(work, timer, return_exceptions=True)
             guard.set()
             controller_class.check = original_check
