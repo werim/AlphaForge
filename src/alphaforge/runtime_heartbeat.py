@@ -177,6 +177,9 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
         "heartbeat_persistence_failure_threshold",
     }
     safe = {key: value for key, value in dict(payload or {}).items() if key in permitted}
+    reconciliation_status = (payload or {}).get("reconciliation_evidence_status")
+    if reconciliation_status in ("PENDING", "PERSISTENCE_FAILED"):
+        safe["reconciliation_evidence_status"] = reconciliation_status
     return json.dumps(safe, separators=(",", ":"), sort_keys=True)
 
 
