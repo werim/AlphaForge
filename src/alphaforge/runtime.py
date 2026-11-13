@@ -903,6 +903,7 @@ class RuntimeOrchestrator:
                 "rejects_persisted": self.metrics.rejects_persisted,
                 "executions": self.metrics.executions,
                 "lifecycle_events": self.metrics.lifecycle_events,
+                "reconciliation_evidence_status": self._reconciliation_evidence_status(),
                 "reconciliation_runs": self.metrics.reconciliation_runs,
                 "reconciliation_fail_closed": self.metrics.reconciliation_fail_closed,
                 "persistence_enabled": self.metrics.persistence_enabled,
@@ -1022,8 +1023,15 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "storage_policy": self._storage_report, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "storage_policy": self._storage_report, "reconciliation_evidence_status": self._reconciliation_evidence_status(), "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
+
+    def _reconciliation_evidence_status(self) -> str | None:
+        if self._pending_reconciliation_persistence_failures:
+            return "PERSISTENCE_FAILED"
+        if self._reconciliation_persistence_unhealthy:
+            return "PENDING"
+        return None
 
     def _execution_reconciliation_blocked(self) -> bool:
         if self.config.execution_mode == ExecutionMode.BACKTEST:
