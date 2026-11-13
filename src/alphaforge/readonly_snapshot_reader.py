@@ -14,6 +14,7 @@ import time
 import uuid
 
 from alphaforge.reconciliation_observation import READ_OPERATION, exception_types, worker_stack
+from alphaforge.reconciliation_read_budget import remaining_read_budget
 from typing import Any
 
 
@@ -94,6 +95,9 @@ class ReadonlySnapshotReader:
             # The transport still owns its lifetime. No subsequent read overlaps it.
             raise
         else:
+            # The waiter can resume after its deadline before asyncio delivers cancellation.
+            # Keep an expired result unaccepted for the timeout evidence and shutdown drain.
+            remaining_read_budget()
             self._pending = None
             if self._closed:
                 raise RuntimeError("reconciliation_reader_closed")
