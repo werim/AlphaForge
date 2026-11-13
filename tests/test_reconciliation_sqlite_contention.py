@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 import time
@@ -112,6 +113,16 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
             await asyncio.wait_for(entered.wait(), 1)
             assert _rows(engine) == ([], [])
             assert runtime._evaluate_runtime_risk("BTCUSDT", {}) == "RECONCILIATION_EVIDENCE_PENDING"
+            runtime._persist_runtime_heartbeat()
+            with engine.connect() as conn:
+                state, payload = conn.exec_driver_sql(
+                    "SELECT runtime_state, payload_json FROM runtime_heartbeats"
+                ).one()
+            assert state == "RECOVERY_REQUIRED"
+            assert json.loads(payload)["reconciliation_evidence_status"] == "PENDING"
+            snapshot = runtime._build_runtime_state_snapshot(status="OPERATING")
+            assert snapshot.runtime_status == "RECOVERY_REQUIRED"
+            assert snapshot.diagnostics_json["reconciliation_evidence_status"] == "PENDING"
         finally:
             release.set()
             await task
