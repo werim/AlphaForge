@@ -136,6 +136,11 @@ _TESTS_BY_INVARIANT: dict[str, tuple[str, ...]] = {
         "tests/test_issue547_qualification_evidence.py",
         "tests/test_issue344_qualification_writer_lifetime.py",
     ),
+    "RECONCILIATION_READ_LIFETIME": (
+        "tests/test_binance_reconciliation_provider.py",
+        "tests/test_issue662_reconciliation_read_lifetime.py",
+        "tests/test_reconciliation_timeout_observation.py",
+    ),
     "RECONCILIATION_INTEGRITY": (
         "tests/test_reconciliation_sqlite_contention.py",
         "tests/test_runtime_live_authorization.py",
@@ -319,6 +324,11 @@ def assess_path(raw_path: str) -> PathAssessment:
             (("live_readiness.py",), ("READINESS_EVIDENCE", "FAIL_CLOSED_PROMOTION"), "readiness authority changed"),
             (("burnin_qualification.py",), ("READINESS_EVIDENCE", "FAIL_CLOSED_PROMOTION"), "qualification authority changed"),
             (("config_registry.py", "config.py"), ("CONFIG_AUTHORITY",), "canonical configuration authority changed"),
+            (
+                ("readonly_snapshot_reader.py", "reconciliation_read_budget.py", "binance_reconciliation_provider.py"),
+                ("RECONCILIATION_READ_LIFETIME", "RECONCILIATION_INTEGRITY", "RESTART_RECOVERY", "UNKNOWN_PRODUCTION_CHANGE"),
+                "read-only reconciliation deadline and provider lifetime changed",
+            ),
             (("reconciliation",), ("RECONCILIATION_INTEGRITY", "RESTART_RECOVERY"), "reconciliation authority changed"),
         )
         for needles, invariants, reason in high_rules:
