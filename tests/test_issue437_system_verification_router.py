@@ -515,3 +515,18 @@ def test_capital_source_routes_are_deterministic_and_deduplicated():
     plan = plan_changed_files(files, base_sha='a'*40, head_sha='b'*40)
     assert plan == plan_changed_files(reversed(files), base_sha='a'*40, head_sha='b'*40)
     assert plan.selected_tests.count('tests/test_backtest_source_evidence.py') == 1
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["readonly_snapshot_reader", "reconciliation_read_budget", "binance_reconciliation_provider"],
+)
+def test_reconciliation_read_source_routes_deadline_and_lifetime_regressions(module):
+    plan = _plan(f"src/alphaforge/{module}.py")
+    assert plan.risk_level == RiskLevel.HIGH
+    assert plan.required_tiers == ("T0", "T1", "T2", "T3")
+    assert {
+        "tests/test_binance_reconciliation_provider.py",
+        "tests/test_issue662_reconciliation_read_lifetime.py",
+        "tests/test_reconciliation_timeout_observation.py",
+    } <= set(plan.selected_tests)
