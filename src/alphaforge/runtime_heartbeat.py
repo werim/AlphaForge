@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import random
+import re
 import time
 from typing import Any, Callable, Mapping, TypeVar
 
@@ -180,6 +181,12 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
     reconciliation_status = (payload or {}).get("reconciliation_evidence_status")
     if reconciliation_status in ("PENDING", "PERSISTENCE_FAILED"):
         safe["reconciliation_evidence_status"] = reconciliation_status
+    phase = (payload or {}).get("reconciliation_phase")
+    if phase in ("STARTING", "PROVIDER_READ", "RECONCILIATION", "PERSISTENCE", "LIFECYCLE_EVENT"):
+        safe["reconciliation_phase"] = phase
+        operation_id = (payload or {}).get("reconciliation_operation_id")
+        if isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            safe["reconciliation_operation_id"] = operation_id
     return json.dumps(safe, separators=(",", ":"), sort_keys=True)
 
 

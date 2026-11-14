@@ -45,6 +45,12 @@ class ReadonlySnapshotReader:
         except Exception:
             return {"observation_status": "UNAVAILABLE"}
 
+    def operation_id_since(self, started_monotonic: float) -> str | None:
+        observation = self._observation
+        if observation.get("started_monotonic", -1) >= started_monotonic:
+            return observation["operation_id"]
+        return None
+
     @property
     def closed(self) -> bool:
         return self._closed

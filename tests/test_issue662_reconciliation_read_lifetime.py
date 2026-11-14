@@ -283,6 +283,42 @@ def test_abandoned_complete_read_cannot_overlap_or_be_reused(abandon):
     asyncio.run(check())
 
 
+def test_cancelled_cycle_does_not_publish_abandoned_operation(monkeypatch):
+    provider = BlockingProvider()
+    orchestrator = runtime(provider)
+    orchestrator.config.reconciliation_timeout_sec = 2
+    reader = orchestrator._reconciliation_reader
+
+    async def check():
+        task = asyncio.create_task(orchestrator._run_reconciliation_once())
+        try:
+            await wait_entered(provider)
+            original = orchestrator._reconciliation_cycle_diagnostics()
+            assert original["reconciliation_phase"] == "PROVIDER_READ"
+            assert original["reconciliation_operation_id"] == reader.diagnostics()["operation_id"]
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert orchestrator._reconciliation_cycle_diagnostics() == {}
+
+            async def observe_then_read(instance, current_provider):
+                assert orchestrator._reconciliation_cycle_diagnostics() == {
+                    "reconciliation_phase": "PROVIDER_READ",
+                }
+                return await original_read(instance, current_provider)
+
+            original_read = type(reader).read
+            monkeypatch.setattr(type(reader), "read", observe_then_read)
+            await orchestrator._run_reconciliation_once()
+            assert provider.calls == 1
+            assert orchestrator._reconciliation_cycle_diagnostics() == {}
+        finally:
+            provider.release.set()
+            assert await reader.close(1)
+
+    asyncio.run(check())
+
+
 def test_concurrent_waiter_is_rejected_without_duplicate_provider_call():
     provider = BlockingProvider()
     reader = ReadonlySnapshotReader()
