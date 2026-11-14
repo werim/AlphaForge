@@ -120,14 +120,18 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
                 ).one()
             assert state == "RECOVERY_REQUIRED"
             assert json.loads(payload)["reconciliation_evidence_status"] == "PENDING"
+            assert json.loads(payload)["reconciliation_phase"] == "PROVIDER_READ"
+            assert "reconciliation_operation_id" not in json.loads(payload)
             snapshot = runtime._build_runtime_state_snapshot(status="OPERATING")
             assert snapshot.runtime_status == "RECOVERY_REQUIRED"
             assert snapshot.diagnostics_json["reconciliation_evidence_status"] == "PENDING"
+            assert snapshot.diagnostics_json["reconciliation_phase"] == "PROVIDER_READ"
         finally:
             release.set()
             await task
 
     asyncio.run(run())
+    assert runtime._reconciliation_cycle_diagnostics() == {}
     events, states = _rows(engine)
     assert [row[0] for row in events] == ["CLEAN"]
     assert [row[0] for row in states] == ["CLEAN"]

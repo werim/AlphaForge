@@ -427,6 +427,7 @@ class RuntimeOrchestrator:
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
+    _active_reconciliation_phase: tuple[float, str] | None = field(default=None, init=False)
     _heartbeat_persistence_failure_streak: int = field(default=0, init=False)
     _heartbeat_persistence_failure_threshold: int = field(default=3, init=False)
     _provider_failure_class: str | None = field(default=None, init=False)
@@ -904,6 +905,7 @@ class RuntimeOrchestrator:
                 "executions": self.metrics.executions,
                 "lifecycle_events": self.metrics.lifecycle_events,
                 "reconciliation_evidence_status": self._reconciliation_evidence_status(),
+                **self._reconciliation_cycle_diagnostics(),
                 "reconciliation_runs": self.metrics.reconciliation_runs,
                 "reconciliation_fail_closed": self.metrics.reconciliation_fail_closed,
                 "persistence_enabled": self.metrics.persistence_enabled,
@@ -1023,8 +1025,19 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "storage_policy": self._storage_report, "reconciliation_evidence_status": self._reconciliation_evidence_status(), "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "storage_policy": self._storage_report, "reconciliation_evidence_status": self._reconciliation_evidence_status(), **self._reconciliation_cycle_diagnostics(), "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "execution_ownership": dict(self._last_execution_ownership), "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
+
+    def _reconciliation_cycle_diagnostics(self) -> dict[str, str]:
+        active = self._active_reconciliation_phase
+        if active is None:
+            return {}
+        started, phase = active
+        evidence = {"reconciliation_phase": phase}
+        operation_id = self._reconciliation_reader.operation_id_since(started)
+        if operation_id is not None:
+            evidence["reconciliation_operation_id"] = operation_id
+        return evidence
 
     def _reconciliation_evidence_status(self) -> str | None:
         if self._pending_reconciliation_persistence_failures:
@@ -7085,13 +7098,18 @@ class RuntimeOrchestrator:
         def record_phase(phase: str) -> None:
             nonlocal timeout_phase
             timeout_phase = phase
+            self._active_reconciliation_phase = (reconciliation_started, phase)
 
         reconciliation_started = time.monotonic()
         deadline = asyncio.timeout(self.config.reconciliation_timeout_sec)
         try:
             async with deadline:
                 with reconciliation_read_deadline(reconciliation_started + self.config.reconciliation_timeout_sec):
-                    await self._reconcile_runtime_state(on_phase=record_phase)
+                    record_phase(timeout_phase)
+                    try:
+                        await self._reconcile_runtime_state(on_phase=record_phase)
+                    finally:
+                        self._active_reconciliation_phase = None
         except (asyncio.TimeoutError, ReconciliationReadBudgetExpired) as exc:
             application_deadline = deadline.expired() or isinstance(exc, ReconciliationReadBudgetExpired)
             # Freeze evidence before bounded incident delivery or worker completion
