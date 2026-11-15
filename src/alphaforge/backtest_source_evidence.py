@@ -435,6 +435,9 @@ def validate_source_packet(packet, *, expected_identity_hash, expected_completio
     if digest(init) != packet["initialization_hash"] or digest(init["source_candles"]) != packet["identity"]["data_hash"]:
         raise ValueError("source initialization/data mismatch")
     events, done = packet["events"], packet["completion"]
+    expected_status = "INTERRUPTED" if done is None else done["status"]
+    if packet["status"] != expected_status or packet["completion_hash"] != expected_completion_hash:
+        raise ValueError("source completion envelope mismatch")
     if len({e["event_key"] for e in events}) != len(events):
         raise ValueError("duplicate source event")
     allowed = {"LIFECYCLE", "CASH_CLOSED"}
