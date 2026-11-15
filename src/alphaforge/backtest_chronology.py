@@ -13,7 +13,7 @@ from pathlib import Path
 import subprocess
 from uuid import NAMESPACE_URL, uuid5
 
-from .backtest_source_evidence import (BOUNDARY_VERSION, BacktestSourceProducer,
+from .backtest_source_evidence import (BOUNDARY_VERSION, LIFECYCLE_EVIDENCE_FIELDS, BacktestSourceProducer,
     SourceIdentity, digest, export_source_evidence)
 from .portfolio_risk import BacktestPortfolioState
 from .realized_accounting import (candle_boundary_costs, filled_position_quantity,
@@ -356,6 +356,8 @@ def replay_boundary_evidence(identity, initialization, events):
                 continue
             fill = _fill(data, bars, order, at, phase)
             p = take(_key(data['run_id'], order, phase), 'LIFECYCLE', at)
+            if p.keys() != set(LIFECYCLE_EVIDENCE_FIELDS):
+                raise ValueError('boundary lifecycle fields mismatch')
             scope = dict(position_id=pid, lifecycle_id=lifecycle, symbol=order['symbol'],
                          side=order['side'], timestamp=at, sl=order['risk_stop'])
             if digest({k: p[k] for k in scope}) != digest(scope):

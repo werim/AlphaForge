@@ -220,6 +220,20 @@ def test_production_cli_reads_frozen_input_and_retains_source_receipt(tmp_path):
     assert len(proof['completion']['closure_population'])==2
 
 
+def test_boundary_replay_rejects_protective_reason_for_scheduled_close(tmp_path):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    proof = run_boundary_backtest(dataset(), tmp_path/'source')
+    events = deepcopy(proof['events'])
+    closed = next(event['payload'] for event in events if event['kind'] == 'LIFECYCLE'
+                  and event['payload']['status_after'] == 'POSITION_CLOSED')
+    assert 'close_reason' not in closed
+    closed['close_reason'] = 'SL_HIT'
+    with pytest.raises(ValueError, match='boundary lifecycle fields mismatch'):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
+
+
 @pytest.mark.parametrize('defect', ['snapshot_cash', 'event_time', 'opening_quantity',
                                   'opening_sequence', 'cash_before', 'closing_sequence',
                                   'lifecycle_time', 'accrued_cost', 'closing_cost'])
