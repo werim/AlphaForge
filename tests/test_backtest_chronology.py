@@ -334,3 +334,53 @@ def test_protective_observation_is_causal_and_has_no_cash_movement(tmp_path, ord
     payload['source_available_ms'] -= 60000
     with pytest.raises(ValueError, match='boundary protective observation mismatch'):
         replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
+
+
+@pytest.mark.parametrize(('case', 'gap'), [
+    ('modeled_close', None),
+    ('entry_candle', 'UNRESOLVED_ENTRY_CANDLE_TOUCH'),
+    ('dual_touch', 'AMBIGUOUS_INTRABAR'),
+    ('missing_fill', 'MISSING_FILL_SOURCE'),
+    ('touch_at_end', 'PROTECTIVE_FILL_EVIDENCE_UNAVAILABLE'),
+])
+def test_protective_close_replays_modeled_fill_and_cost(tmp_path, case, gap):
+    from alphaforge.backtest_chronology import PROTECTIVE_FILL_MODEL, replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    data = dataset()
+    data['intents'] = data['intents'][:1]
+    data['intents'][0].update(
+        exit_ms=None, protective_target=104., protective_fill_model=PROTECTIVE_FILL_MODEL,
+    )
+    candles = data['candles']['BTCUSDT']
+    if case != 'entry_candle':
+        candles[0]['low'] = 99.5
+    if case == 'dual_touch':
+        candles[1]['low'] = 99.
+    if case == 'missing_fill':
+        candles[2]['open'] = None
+    if case == 'touch_at_end':
+        data['end_ms'] = START + 120000
+        data['candles'] = {symbol: bars[:2] for symbol, bars in data['candles'].items()}
+    proof = run_boundary_backtest(data, tmp_path/'source')
+    cash_events = [event for event in proof['events'] if event['kind'] == 'CASH_CLOSED']
+    if gap is not None:
+        assert proof['status'] == 'INCOMPLETE'
+        assert gap in proof['completion']['gaps']
+        assert cash_events == []
+        return
+    assert proof['status'] == 'COMPLETE'
+    [cash] = cash_events
+    assert cash['effective_ms'] == START + 120000
+    assert cash['payload']['net_pnl_usdt'] == pytest.approx(4.795)
+    assert proof['completion']['closing_cash_usdt'] == pytest.approx(1004.795)
+
+    events = deepcopy(proof['events'])
+    observation = next(event['payload'] for event in events if event['kind'] == 'PROTECTIVE_OBSERVATION')
+    closed = next(event['payload'] for event in events if event['kind'] == 'LIFECYCLE'
+                  and event['payload']['status_after'] == 'POSITION_CLOSED')
+    assert observation['trigger_price'] == 104.
+    assert closed['close_price'] == 105.
+    closed['close_price'] = observation['trigger_price']
+    with pytest.raises(ValueError, match='boundary canonical closure mismatch'):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
