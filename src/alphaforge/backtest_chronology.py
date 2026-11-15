@@ -15,6 +15,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .backtest_source_evidence import (BOUNDARY_VERSION, LIFECYCLE_EVIDENCE_FIELDS, BacktestSourceProducer,
     SourceIdentity, digest, export_source_evidence)
+from .execution import protective_candle_touches
 from .portfolio_risk import BacktestPortfolioState
 from .realized_accounting import (candle_boundary_costs, filled_position_quantity,
     finite_cash, marked_portfolio_equity, position_cash_geometry, realized_cash_ledger, sum_cash)
@@ -73,7 +74,7 @@ def validate_input(data):
     if not isinstance(data['intents'], list) or len(data['intents']) > 1000 or len(data['intents'])*((end-start)//interval+1)>100000:
         raise ValueError('invalid/budget-exceeded boundary intents')
     for order in data['intents']:
-        if set(order)-{'fill_fraction'} != {'intent_id','symbol','side','order_type','entry_ms','exit_ms',
+        if set(order)-{'fill_fraction', 'protective_target'} != {'intent_id','symbol','side','order_type','entry_ms','exit_ms',
                           'notional_usdt','risk_stop','close_fraction'}:
             raise ValueError('unsupported intent fields')
         key = order['intent_id']
@@ -92,6 +93,12 @@ def validate_input(data):
             raise ValueError('ambiguous/same-boundary roundtrip unsupported')
         _number(order['notional_usdt'], positive=True)
         _number(order['risk_stop'], positive=True)
+        if 'protective_target' in order:
+            target = _number(order['protective_target'], positive=True)
+            stop = order['risk_stop']
+            if (order['exit_ms'] is not None or not _supported_order(order)
+                    or (target <= stop if order['side'] == 'LONG' else target >= stop)):
+                raise ValueError('invalid protective observation intent')
         _number(order['close_fraction'], positive=True)
         if 'fill_fraction' in order:
             _number(order['fill_fraction'], positive=True)
@@ -139,6 +146,49 @@ def _fill(data, bars, order, at, phase):
     if phase == 'close':
         direction *= -1
     return bar['open'] * (1 + direction*data['policy']['slippage_bps']/10000)
+
+
+def _protective_observations(data, bars, at, inventory):
+    interval = data['interval_ms']
+    for order in sorted(data['intents'], key=lambda item: item['intent_id']):
+        if 'protective_target' not in order or at - interval <= order['entry_ms']:
+            continue
+        _, pid = _ids(data['run_id'], order)
+        opened = inventory.get(pid)
+        if opened is None or opened.get('protective_observation_done'):
+            continue
+        bar = bars[order['symbol']].get(at - interval)
+        stop, target = order['risk_stop'], order['protective_target']
+        short = order['side'] == 'SHORT'
+        entry = opened['trigger_price']
+        valid_range = (bar is not None and all(
+            type(bar[k]) in (int, float) and finite_cash(bar[k]) is not None and bar[k] > 0
+            for k in ('open', 'high', 'low', 'close')
+        ) and bar['low'] <= min(bar['open'], bar['close'])
+            and bar['high'] >= max(bar['open'], bar['close']))
+        reason = None
+        trigger = None
+        if not valid_range:
+            reason = 'PROTECTIVE_CANDLE_UNAVAILABLE'
+        elif not (target < entry < stop if short else stop < entry < target):
+            reason = 'INVALID_PROTECTIVE_BRACKET_GEOMETRY'
+        else:
+            stop_hit, target_hit = protective_candle_touches(
+                short=short, high=bar['high'], low=bar['low'], stop=stop, target=target,
+            )
+            if stop_hit and target_hit:
+                reason = 'AMBIGUOUS_INTRABAR'
+            elif stop_hit or target_hit:
+                reason = 'STOP_TOUCH' if stop_hit else 'TARGET_TOUCH'
+                trigger = stop if stop_hit else target
+        if reason is None:
+            continue
+        opened['protective_observation_done'] = True
+        yield 'protective:' + pid, dict(
+            schema='protective-candle-observation-v1', position_id=pid,
+            reason=reason, candle_open_ms=at - interval, source_available_ms=at,
+            source_hash=digest(bar) if valid_range else None, trigger_price=trigger,
+        )
 
 
 def _snapshot(data, bars, at, inventory, cash):
@@ -198,6 +248,9 @@ def run_boundary_backtest(data, output_dir):
     files = {name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in (
         'backtest_order.py', 'src/alphaforge/backtest_source_evidence.py',
         'src/alphaforge/backtest_chronology.py', 'src/alphaforge/realized_accounting.py', 'src/alphaforge/portfolio_risk.py')}
+    if any('protective_target' in order for order in data['intents']):
+        path = 'src/alphaforge/execution.py'
+        files[path] = hashlib.sha256((ROOT/path).read_bytes()).hexdigest()
     if 'strategy_evidence' in data:
         for name in ('backtest_strategy_adapter','order','ai_brain','multi_timeframe','symbol_selector'):
             path = f'src/alphaforge/{name}.py'
@@ -226,6 +279,8 @@ def run_boundary_backtest(data, output_dir):
                 raise ValueError('boundary portfolio position conservation mismatch')
             snapshot, _ = _snapshot(data, bars, at, inventory, state.current_equity)
             producer._append([(f'snapshot:{at}', 'SNAPSHOT', at, snapshot)])
+            for event_key, observation in _protective_observations(data, bars, at, inventory):
+                producer._append([(event_key, 'PROTECTIVE_OBSERVATION', at, observation)])
             if at == data['end_ms']:
                 break
             for record in _strategy_records(data,at):
@@ -333,6 +388,11 @@ def replay_boundary_evidence(identity, initialization, events):
             raise ValueError('boundary marked-equity conservation mismatch')
         snapshots.append(expected)
         gaps.extend(missing)
+        for event_key, observation in _protective_observations(data, bars, at, inventory):
+            if digest(take(event_key, 'PROTECTIVE_OBSERVATION', at)) != digest(observation):
+                raise ValueError('boundary protective observation mismatch')
+            gaps.append(observation['reason'] if observation['trigger_price'] is None
+                        else 'PROTECTIVE_FILL_EVIDENCE_UNAVAILABLE')
         if at == data['end_ms']:
             break
         for record in _strategy_records(data,at):

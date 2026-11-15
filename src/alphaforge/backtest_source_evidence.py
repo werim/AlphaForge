@@ -446,7 +446,7 @@ def validate_source_packet(packet, *, expected_identity_hash, expected_completio
         raise ValueError("duplicate source event")
     allowed = {"LIFECYCLE", "CASH_CLOSED"}
     if identity.version == BOUNDARY_VERSION:
-        allowed |= {"SNAPSHOT", "COST_ACCRUED", "MODEL_DIAGNOSTIC", "STRATEGY_DECISION"}
+        allowed |= {"SNAPSHOT", "COST_ACCRUED", "MODEL_DIAGNOSTIC", "STRATEGY_DECISION", "PROTECTIVE_OBSERVATION"}
     if any(e["kind"] not in allowed for e in events):
         raise ValueError("unsupported source event kind")
     if [e["sequence"] for e in events] != list(range(1, len(events) + 1)):

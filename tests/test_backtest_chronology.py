@@ -290,3 +290,47 @@ def test_boundary_replay_allows_json_key_reordering_and_observation_changes(tmp_
     assert gaps == []
     assert [v['marked_equity_usdt'] for v in valuations] == [
         v['marked_equity_usdt'] for v in proof['completion']['valuations']]
+
+
+@pytest.mark.parametrize(('order_index', 'reason', 'trigger'), [
+    (0, 'TARGET_TOUCH', 104.),
+    (1, 'TARGET_TOUCH', 196.),
+    (0, 'STOP_TOUCH', 99.),
+    (1, 'STOP_TOUCH', 201.),
+    (0, 'AMBIGUOUS_INTRABAR', None),
+    (0, 'PROTECTIVE_CANDLE_UNAVAILABLE', None),
+])
+def test_protective_observation_is_causal_and_has_no_cash_movement(tmp_path, order_index, reason, trigger):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    data = dataset()
+    order = data['intents'][order_index]
+    order.update(exit_ms=None, protective_target=104. if order_index == 0 else 196.)
+    candles = data['candles'][order['symbol']]
+    # The entry candle touches the stop. Only subsequent completed candles are eligible.
+    if reason == 'PROTECTIVE_CANDLE_UNAVAILABLE':
+        candles.pop(1)
+    elif reason in {'STOP_TOUCH', 'AMBIGUOUS_INTRABAR'}:
+        if order_index == 1:
+            candles[1].update(high=201., low=196.5, close=197.)
+        else:
+            candles[1]['low'] = 99.
+            if reason == 'STOP_TOUCH':
+                candles[1].update(high=103.5, close=103.)
+    proof = run_boundary_backtest(data, tmp_path/'source')
+    events = deepcopy(proof['events'])
+    observations = [event for event in events if event['kind'] == 'PROTECTIVE_OBSERVATION']
+    assert len(observations) == 1
+    event = observations[0]
+    payload = event['payload']
+    assert payload['reason'] == reason
+    assert payload['trigger_price'] == trigger
+    assert payload['candle_open_ms'] == START + 60000
+    assert event['effective_ms'] == payload['source_available_ms'] == START + 120000
+    assert not any(item['kind'] == 'CASH_CLOSED'
+                   and item['payload']['position_id'] == payload['position_id'] for item in events)
+    assert proof['status'] == 'INCOMPLETE'
+    payload['source_available_ms'] -= 60000
+    with pytest.raises(ValueError, match='boundary protective observation mismatch'):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
