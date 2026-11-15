@@ -372,3 +372,20 @@ def test_unchanged_sql_closure_json_keeps_zero_cost_real_trade_valid(tmp_path, m
     proof = packet(producer)
     validate_source_packet(proof, expected_identity_hash=proof['identity_hash'],
                            expected_completion_hash=proof['completion_hash'])
+
+
+@pytest.mark.parametrize(("finished", "field", "value"), [
+    (False, "status", "COMPLETE"),
+    (False, "completion_hash", "f" * 64),
+    (True, "status", "INTERRUPTED"),
+    (True, "completion_hash", "f" * 64),
+])
+def test_source_packet_envelope_matches_pinned_completion(tmp_path, finished, field, value):
+    producer, _, _ = setup_source(tmp_path)
+    if finished:
+        producer.finish()
+    proof = packet(producer)
+    tampered = {**proof, field: value}
+    with pytest.raises(ValueError, match="completion envelope"):
+        validate_source_packet(tampered, expected_identity_hash=proof["identity_hash"],
+                               expected_completion_hash=proof["completion_hash"])
