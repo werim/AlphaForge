@@ -84,6 +84,13 @@ class SourceIdentity:
                 raise ValueError(f"invalid source {name}")
 
 
+LIFECYCLE_EVIDENCE_FIELDS = (
+    "timestamp", "symbol", "side", "position_id", "lifecycle_id", "lifecycle_seq", "status_after",
+    "trigger_price", "sl", "close_price", "filled_quantity", "net_pnl_usdt", "gross_pnl_usd",
+    "initial_risk_usd", "total_cost_usd", "net_r", "realized_evidence_status", "realized_cost_source", "realized_costs_json",
+)
+
+
 class BacktestSourceProducer:
     """Observer attached before BacktestPortfolioState initialization.
 
@@ -176,10 +183,7 @@ class BacktestSourceProducer:
         for row in rows:
             if not row.status_after.startswith("POSITION_"):
                 continue
-            payload = {k: getattr(row, k) for k in (
-                "timestamp", "symbol", "side", "position_id", "lifecycle_id", "lifecycle_seq", "status_after",
-                "trigger_price", "sl", "close_price", "filled_quantity", "net_pnl_usdt", "gross_pnl_usd",
-                "initial_risk_usd", "total_cost_usd", "net_r", "realized_evidence_status", "realized_cost_source", "realized_costs_json")}
+            payload = {key: getattr(row, key) for key in LIFECYCLE_EVIDENCE_FIELDS}
             if row.status_after == "POSITION_OPENED":
                 payload["filled_quantity"] = filled_position_quantity(balance=balance, risk_pct=risk_pct,
                     fill=row.trigger_price, risk_scale=market_ctx.get("risk_scale", 1.0), notional=market_ctx.get("notional"))
@@ -442,7 +446,7 @@ def validate_source_packet(packet, *, expected_identity_hash, expected_completio
         raise ValueError("duplicate source event")
     allowed = {"LIFECYCLE", "CASH_CLOSED"}
     if identity.version == BOUNDARY_VERSION:
-        allowed |= {"SNAPSHOT", "COST_ACCRUED", "MODEL_DIAGNOSTIC", "STRATEGY_DECISION"}
+        allowed |= {"SNAPSHOT", "COST_ACCRUED", "MODEL_DIAGNOSTIC", "STRATEGY_DECISION", "PROTECTIVE_OBSERVATION"}
     if any(e["kind"] not in allowed for e in events):
         raise ValueError("unsupported source event kind")
     if [e["sequence"] for e in events] != list(range(1, len(events) + 1)):

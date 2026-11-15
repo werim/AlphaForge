@@ -220,6 +220,20 @@ def test_production_cli_reads_frozen_input_and_retains_source_receipt(tmp_path):
     assert len(proof['completion']['closure_population'])==2
 
 
+def test_boundary_replay_rejects_protective_reason_for_scheduled_close(tmp_path):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    proof = run_boundary_backtest(dataset(), tmp_path/'source')
+    events = deepcopy(proof['events'])
+    closed = next(event['payload'] for event in events if event['kind'] == 'LIFECYCLE'
+                  and event['payload']['status_after'] == 'POSITION_CLOSED')
+    assert 'close_reason' not in closed
+    closed['close_reason'] = 'SL_HIT'
+    with pytest.raises(ValueError, match='boundary lifecycle fields mismatch'):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
+
+
 @pytest.mark.parametrize('defect', ['snapshot_cash', 'event_time', 'opening_quantity',
                                   'opening_sequence', 'cash_before', 'closing_sequence',
                                   'lifecycle_time', 'accrued_cost', 'closing_cost'])
@@ -276,3 +290,97 @@ def test_boundary_replay_allows_json_key_reordering_and_observation_changes(tmp_
     assert gaps == []
     assert [v['marked_equity_usdt'] for v in valuations] == [
         v['marked_equity_usdt'] for v in proof['completion']['valuations']]
+
+
+@pytest.mark.parametrize(('order_index', 'reason', 'trigger'), [
+    (0, 'TARGET_TOUCH', 104.),
+    (1, 'TARGET_TOUCH', 196.),
+    (0, 'STOP_TOUCH', 99.),
+    (1, 'STOP_TOUCH', 201.),
+    (0, 'AMBIGUOUS_INTRABAR', None),
+    (0, 'PROTECTIVE_CANDLE_UNAVAILABLE', None),
+])
+def test_protective_observation_is_causal_and_has_no_cash_movement(tmp_path, order_index, reason, trigger):
+    from alphaforge.backtest_chronology import replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    data = dataset()
+    order = data['intents'][order_index]
+    order.update(exit_ms=None, protective_target=104. if order_index == 0 else 196.)
+    candles = data['candles'][order['symbol']]
+    # The entry candle touches the stop. Only subsequent completed candles are eligible.
+    if reason == 'PROTECTIVE_CANDLE_UNAVAILABLE':
+        candles.pop(1)
+    elif reason in {'STOP_TOUCH', 'AMBIGUOUS_INTRABAR'}:
+        if order_index == 1:
+            candles[1].update(high=201., low=196.5, close=197.)
+        else:
+            candles[1]['low'] = 99.
+            if reason == 'STOP_TOUCH':
+                candles[1].update(high=103.5, close=103.)
+    proof = run_boundary_backtest(data, tmp_path/'source')
+    events = deepcopy(proof['events'])
+    observations = [event for event in events if event['kind'] == 'PROTECTIVE_OBSERVATION']
+    assert len(observations) == 1
+    event = observations[0]
+    payload = event['payload']
+    assert payload['reason'] == reason
+    assert payload['trigger_price'] == trigger
+    assert payload['candle_open_ms'] == START + 60000
+    assert event['effective_ms'] == payload['source_available_ms'] == START + 120000
+    assert not any(item['kind'] == 'CASH_CLOSED'
+                   and item['payload']['position_id'] == payload['position_id'] for item in events)
+    assert proof['status'] == 'INCOMPLETE'
+    payload['source_available_ms'] -= 60000
+    with pytest.raises(ValueError, match='boundary protective observation mismatch'):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)
+
+
+@pytest.mark.parametrize(('case', 'gap'), [
+    ('modeled_close', None),
+    ('entry_candle', 'UNRESOLVED_ENTRY_CANDLE_TOUCH'),
+    ('dual_touch', 'AMBIGUOUS_INTRABAR'),
+    ('missing_fill', 'MISSING_FILL_SOURCE'),
+    ('touch_at_end', 'PROTECTIVE_FILL_EVIDENCE_UNAVAILABLE'),
+])
+def test_protective_close_replays_modeled_fill_and_cost(tmp_path, case, gap):
+    from alphaforge.backtest_chronology import PROTECTIVE_FILL_MODEL, replay_boundary_evidence
+    from alphaforge.backtest_source_evidence import SourceIdentity
+
+    data = dataset()
+    data['intents'] = data['intents'][:1]
+    data['intents'][0].update(
+        exit_ms=None, protective_target=104., protective_fill_model=PROTECTIVE_FILL_MODEL,
+    )
+    candles = data['candles']['BTCUSDT']
+    if case != 'entry_candle':
+        candles[0]['low'] = 99.5
+    if case == 'dual_touch':
+        candles[1]['low'] = 99.
+    if case == 'missing_fill':
+        candles[2]['open'] = None
+    if case == 'touch_at_end':
+        data['end_ms'] = START + 120000
+        data['candles'] = {symbol: bars[:2] for symbol, bars in data['candles'].items()}
+    proof = run_boundary_backtest(data, tmp_path/'source')
+    cash_events = [event for event in proof['events'] if event['kind'] == 'CASH_CLOSED']
+    if gap is not None:
+        assert proof['status'] == 'INCOMPLETE'
+        assert gap in proof['completion']['gaps']
+        assert cash_events == []
+        return
+    assert proof['status'] == 'COMPLETE'
+    [cash] = cash_events
+    assert cash['effective_ms'] == START + 120000
+    assert cash['payload']['net_pnl_usdt'] == pytest.approx(4.795)
+    assert proof['completion']['closing_cash_usdt'] == pytest.approx(1004.795)
+
+    events = deepcopy(proof['events'])
+    observation = next(event['payload'] for event in events if event['kind'] == 'PROTECTIVE_OBSERVATION')
+    closed = next(event['payload'] for event in events if event['kind'] == 'LIFECYCLE'
+                  and event['payload']['status_after'] == 'POSITION_CLOSED')
+    assert observation['trigger_price'] == 104.
+    assert closed['close_price'] == 105.
+    closed['close_price'] = observation['trigger_price']
+    with pytest.raises(ValueError, match='boundary canonical closure mismatch'):
+        replay_boundary_evidence(SourceIdentity(**proof['identity']), proof['initialization'], events)

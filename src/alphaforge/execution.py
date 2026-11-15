@@ -5,6 +5,15 @@ import json
 import math
 from typing import Any, Mapping
 
+def protective_candle_touches(
+    *, short: bool, high: float, low: float, stop: float, target: float
+) -> tuple[bool, bool]:
+    """Return stop and target touches without inferring their intrabar order."""
+    if short:
+        return high >= stop, low <= target
+    return low <= stop, high >= target
+
+
 EXECUTION_EVIDENCE_COMPLETE_MEASURED = "COMPLETE_MEASURED"
 EXECUTION_EVIDENCE_PARTIAL_ESTIMATED = "PARTIAL_ESTIMATED"
 EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING = "UNAVAILABLE_BLOCKING"
