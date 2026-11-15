@@ -252,3 +252,37 @@ def test_worker_budget_exhaustion_uses_runtime_application_deadline(monkeypatch)
             await o._shutdown_tasks()
 
     asyncio.run(check())
+
+
+def test_completed_snapshot_is_rejected_if_budget_expires_before_acceptance(monkeypatch):
+    from types import SimpleNamespace
+
+    from alphaforge import reconciliation_read_budget as budget
+
+    expired = threading.Event()
+    monkeypatch.setattr(
+        budget, "time",
+        SimpleNamespace(monotonic=lambda: float("inf") if expired.is_set() else 0.0),
+    )
+
+    class Provider:
+        def snapshot(self):
+            expired.set()
+            return {"orders": [], "positions": [], "fills": [], "evidence_status": "COMPLETE"}
+
+    o = runtime(Provider())
+    o.config.reconciliation_timeout_sec = 1.0
+
+    async def check():
+        try:
+            await o._run_reconciliation_once()
+            diagnostics = latest(o)
+            assert diagnostics["deadline_observation"]["origin"] == "APPLICATION_DEADLINE"
+            assert diagnostics["timeout_phase"] == "PROVIDER_READ"
+            assert diagnostics["read_observation"]["state"] == "COMPLETE"
+            assert diagnostics["read_observation"]["result_unaccepted"]
+            assert o._unknown_exchange_state
+        finally:
+            await o._shutdown_tasks()
+
+    asyncio.run(check())
