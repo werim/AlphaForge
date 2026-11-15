@@ -202,6 +202,21 @@ def test_admission_consumes_review_and_rejects_config_filesystem_and_artifact_dr
     with pytest.raises(ValueError):m.admission_evidence(certificate,prospective,tmp_path/'new.db',21600)
 
 
+@pytest.mark.parametrize('count', [0, -1, None, True, 1.0, '1'])
+def test_review_rejects_invalid_terminal_shadow_action_count(tmp_path, monkeypatch, cfg, count):
+    path, result = measurement_fixture(tmp_path, monkeypatch, cfg)
+    actions = result['worker']['coverage']['shadow_actions']
+    actions[next(iter(actions))] = count
+    control = v.ControlFile(path)
+    try:
+        control.put(1, result)
+    finally:
+        control.close()
+
+    with pytest.raises(ValueError, match='MEASUREMENT_INCOMPLETE_FAILED_STALE_OR_NOT_REAL'):
+        m.review(path, 10, 'Fixture operator scope justification only; not a measured rate.')
+
+
 def test_real_calibration_lineage_cannot_qualify_complete_or_resume(tmp_path,cfg):
     from alphaforge.persistence import init_db
     from alphaforge.burnin_campaign import create_campaign,start_or_resume_campaign,qualify_campaign,check_campaign_completion

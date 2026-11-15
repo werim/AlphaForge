@@ -221,7 +221,9 @@ def coverage_gaps(c: dict, runtime, maintenance_count: int):
     if c.get("shadow_evidence_status") != "AVAILABLE":
         gaps.append("SHADOW_EVIDENCE_UNAVAILABLE")
     actions = c.get("shadow_actions")
-    if not isinstance(actions, dict) or not required_actions <= actions.keys():
+    if (not isinstance(actions, dict)
+            or any(type(actions.get(action)) is not int or actions[action] <= 0
+                   for action in required_actions)):
         gaps.append("SHADOW_ACTION_COVERAGE_INCOMPLETE")
     if c.get("unhealthy_heartbeats") != 0:
         gaps.append("UNHEALTHY_RUNTIME_HEARTBEAT")
