@@ -489,9 +489,16 @@ def export_source_evidence(conn, run_id, *, expected_identity=None):
             raise ValueError("source event hash mismatch")
         entry = dict(sequence=e["sequence"], kind=e["kind"], effective_ms=e["effective_ms"],
                      observed_ms=e["observed_ms"], event_key=e["event_key"], payload=payload)
+        if completion_hash is not None:
+            raise ValueError("invalid SQL final source event: row follows completion")
         if e["kind"] == "FINAL":
+            if (e["event_key"] != "FINAL" or e["sequence"] != len(events) + 1
+                    or e["effective_ms"] != identity["end_ms"]):
+                raise ValueError("invalid SQL final source event: key, sequence or boundary mismatch")
             completion, completion_hash = payload, e["payload_hash"]
         else:
+            if e["event_key"] == "FINAL":
+                raise ValueError("invalid SQL final source event: kind mismatch")
             events.append(entry)
     packet = dict(identity=identity, identity_hash=row["identity_hash"], initialization=json.loads(row["initialization_json"]),
                   initialization_hash=row["initialization_hash"], initialization_observed_ms=row["observed_ms"],

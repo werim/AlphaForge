@@ -274,6 +274,35 @@ def test_sealed_sql_population_drift_rejected(tmp_path, monkeypatch):
         packet(producer)
 
 
+@pytest.mark.parametrize('mutation', [
+    "duplicate_final", "wrong_final_key", "wrong_final_time", "wrong_final_sequence", "wrong_final_kind",
+])
+def test_export_rejects_invalid_sql_final_row(tmp_path, mutation):
+    producer, _, _ = setup_source(tmp_path)
+    producer.finish()
+    with producer.engine.begin() as conn:
+        if mutation == "duplicate_final":
+            conn.execute(text("""
+                INSERT INTO backtest_source_events
+                SELECT run_id, sequence+1, 'duplicate', kind, effective_ms,
+                       observed_ms, payload_json, payload_hash
+                FROM backtest_source_events WHERE event_key='FINAL'
+            """))
+        else:
+            # Model stored-row corruption while leaving the completion payload intact.
+            conn.execute(text("DROP TRIGGER backtest_source_events_no_update"))
+            changes = {
+                "wrong_final_key": "event_key='different'",
+                "wrong_final_time": "effective_ms=effective_ms-1",
+                "wrong_final_sequence": "sequence=sequence+1",
+                "wrong_final_kind": "kind='LIFECYCLE'",
+            }
+            conn.execute(text(f"UPDATE backtest_source_events SET {changes[mutation]} WHERE event_key='FINAL'"))
+
+    with pytest.raises(ValueError, match="invalid SQL final source event"):
+        packet(producer)
+
+
 def test_restart_replays_source_once_and_rejects_foreign_initialization(tmp_path):
     producer, _, _ = setup_source(tmp_path)
     repeated, _, _ = setup_source(tmp_path)
