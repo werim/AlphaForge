@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .execution import protective_candle_touches
 from .realized_accounting import position_cash_geometry, realized_cash_ledger
 import json, math, sqlite3, uuid
 from datetime import datetime, timezone, timedelta
@@ -12,8 +13,9 @@ from alphaforge.reject_lifecycle import RECLAIMABLE_REJECT_SQL
 def _dt(v): return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
 def _side(side): return str(side or "LONG").upper()
 def _hit(side, high, low, stop, target):
-    if _side(side) == "SHORT": return (high >= stop, low <= target)
-    return (low <= stop, high >= target)
+    return protective_candle_touches(
+        short=_side(side) == "SHORT", high=high, low=low, stop=stop, target=target,
+    )
 
 
 def timeframe_seconds(value: str | None) -> float | None:

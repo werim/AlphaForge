@@ -15,7 +15,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.realized_accounting import filled_position_quantity, finite_cash, position_cash_geometry, realized_cash_ledger, sum_cash, mean_cash
-from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
+from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input, protective_candle_touches
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.adaptive_learning import classify_expectancy_bucket
 from alphaforge.multi_timeframe import (build_execution_context as build_historical_execution_context,
@@ -1583,13 +1583,12 @@ def simulate_candidate(
         if long_side:
             mfe = max(mfe, c.high - candidate.entry)
             mae = max(mae, candidate.entry - c.low)
-            hit_tp = c.high >= candidate.tp
-            hit_sl = c.low <= candidate.sl
         else:
             mfe = max(mfe, candidate.entry - c.low)
             mae = max(mae, c.high - candidate.entry)
-            hit_tp = c.low <= candidate.tp
-            hit_sl = c.high >= candidate.sl
+        hit_sl, hit_tp = protective_candle_touches(
+            short=not long_side, high=c.high, low=c.low, stop=candidate.sl, target=candidate.tp,
+        )
         # Conservative same-candle rule:
         # if both TP and SL touch inside the same candle, count SL first.
         if hit_sl and hit_tp:
