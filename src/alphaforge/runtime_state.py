@@ -129,6 +129,11 @@ def ensure_runtime_state_schema(engine: Engine) -> None:
             if "cycle_id" not in event_columns:
                 conn.execute(text("ALTER TABLE exchange_reconciliation_events ADD COLUMN cycle_id TEXT"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_exchange_reconciliation_cycle_id ON exchange_reconciliation_events(cycle_id)"))
+            conn.execute(text("""CREATE TABLE IF NOT EXISTS reconciliation_attempt_traces (
+              trace_id TEXT NOT NULL,
+              result_cycle_id TEXT NOT NULL REFERENCES exchange_reconciliation_events(cycle_id),
+              PRIMARY KEY (trace_id, result_cycle_id)
+            ) WITHOUT ROWID"""))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_runtime_state_latest ON runtime_state_snapshots(timestamp DESC, id DESC)"))
             # Existing production databases predate lineage columns.  Additive migration
             # preserves the append-only snapshot history and is safe on SQLite.
@@ -382,6 +387,12 @@ def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: lis
                             "ro": snapshot.exchange_read_only_status,
                             "d": json.dumps(dict(diagnostics), sort_keys=True, default=str), "cycle": cycle_id,
                         })
+                        trace_id = diagnostics.get("reconciliation_trace_id")
+                        if trace_id is not None:
+                            conn.execute(text("""INSERT INTO reconciliation_attempt_traces (trace_id, result_cycle_id)
+                                VALUES (:trace, :cycle)
+                                ON CONFLICT(trace_id, result_cycle_id) DO NOTHING"""),
+                                {"trace": trace_id, "cycle": cycle_id})
                         if result.rowcount:
                             if recovery_transition is not None:
                                 conn.execute(text("INSERT INTO runtime_recovery_events(event_ts,instance_id,startup_id,mode,status,reason,diagnostics_json) VALUES (:ts,:i,:s,:m,'RECOVERED',:reason,:d)"), {

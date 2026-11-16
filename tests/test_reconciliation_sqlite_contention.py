@@ -98,7 +98,7 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
     reader_type = type(runtime._reconciliation_reader)
     original_read = reader_type.read
 
-    async def run():
+    async def run_cycle():
         entered = asyncio.Event()
         release = asyncio.Event()
 
@@ -111,12 +111,11 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
         task = asyncio.create_task(runtime._run_reconciliation_once())
         try:
             await asyncio.wait_for(entered.wait(), 1)
-            assert _rows(engine) == ([], [])
             assert runtime._evaluate_runtime_risk("BTCUSDT", {}) == "RECONCILIATION_EVIDENCE_PENDING"
             runtime._persist_runtime_heartbeat()
             with engine.connect() as conn:
                 state, payload = conn.exec_driver_sql(
-                    "SELECT runtime_state, payload_json FROM runtime_heartbeats"
+                    "SELECT runtime_state, payload_json FROM runtime_heartbeats ORDER BY id DESC LIMIT 1"
                 ).one()
             assert state == "RECOVERY_REQUIRED"
             heartbeat = json.loads(payload)
@@ -132,13 +131,22 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
             release.set()
             await task
 
-        with engine.connect() as conn:
-            diagnostics = conn.exec_driver_sql(
-                "SELECT diagnostics_json FROM exchange_reconciliation_events WHERE status = 'CLEAN'"
-            ).scalar_one()
-        assert json.loads(diagnostics)["reconciliation_trace_id"] == heartbeat["reconciliation_trace_id"]
+        return heartbeat["reconciliation_trace_id"]
 
-    asyncio.run(run())
+    async def run():
+        return await run_cycle(), await run_cycle()
+
+    first, second = asyncio.run(run())
+    assert first != second
+    with engine.connect() as conn:
+        cycle_id, diagnostics = conn.exec_driver_sql(
+            "SELECT cycle_id, diagnostics_json FROM exchange_reconciliation_events WHERE status = 'CLEAN'"
+        ).one()
+        traces = conn.exec_driver_sql(
+            "SELECT trace_id, result_cycle_id FROM reconciliation_attempt_traces"
+        ).all()
+    assert json.loads(diagnostics)["reconciliation_trace_id"] == first
+    assert set(traces) == {(first, cycle_id), (second, cycle_id)}
     assert runtime._reconciliation_cycle_diagnostics() == {}
     events, states = _rows(engine)
     assert [row[0] for row in events] == ["CLEAN"]

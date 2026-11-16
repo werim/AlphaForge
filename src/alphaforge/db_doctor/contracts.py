@@ -43,6 +43,7 @@ TABLE:c("lifecycle","REQUIRED",columns=("id",)+tuple(sorted(WRITER_COLUMNS))),
 "runtime_state_snapshots":c("runtime","REQUIRED",columns=("id","timestamp","instance_id","mode"),owners=("INIT_DB","RUNTIME_BOOTSTRAP"),sources=("src/alphaforge/persistence.py:init_db","src/alphaforge/runtime_state.py:ensure_runtime_state_schema")),
 "runtime_recovery_events":c("runtime",columns=("id","event_ts","instance_id","status"),owners=("INIT_DB","RUNTIME_BOOTSTRAP")),
 "exchange_reconciliation_events":c("runtime",columns=("id","event_ts","instance_id","status"),owners=("INIT_DB","RUNTIME_BOOTSTRAP")),
+"reconciliation_attempt_traces":c("runtime","CONDITIONAL","EVIDENCE_ONLY",("trace_id","result_cycle_id"),("INIT_DB","RUNTIME_BOOTSTRAP"),("src/alphaforge/runtime_state.py:ensure_runtime_state_schema",)),
 "reconciliation_incidents":c("runtime","REQUIRED",columns=("id","incident_type","severity","symbol","lifecycle_ref","remediation_status","operator_acknowledged","fail_closed","forensic_payload","created_at"),owners=("RUNTIME_BOOTSTRAP",),sources=("src/alphaforge/reconciliation.py:ensure_reconciliation_tables",)),
 }
 CONTRACTS["storage_archives"]=c("storage","CONDITIONAL","EVIDENCE_ONLY",("campaign_id","archive_path","checksum","manifest_json","state"),("STORAGE_ARCHIVE_BOOTSTRAP",),("src/alphaforge/storage_policy.py:ensure_archive_schema",))
