@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 import json
 import random
 import re
@@ -25,6 +26,20 @@ SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
 SQLITE_BUSY_RETRY_MAX_SECONDS = 0.50
 
 _T = TypeVar("_T")
+
+
+class ReconciliationBlocker(StrEnum):
+    STORAGE_PRESSURE = "STORAGE_PRESSURE"
+    RECONCILIATION_EVIDENCE_PENDING = "RECONCILIATION_EVIDENCE_PENDING"
+    FAIL_CLOSED = "FAIL_CLOSED"
+    RECOVERY_ACTION_REQUIRED = "RECOVERY_ACTION_REQUIRED"
+    UNKNOWN_EXCHANGE_STATE = "UNKNOWN_EXCHANGE_STATE"
+    RESOLVER_PROVIDER_UNAVAILABLE = "RESOLVER_PROVIDER_UNAVAILABLE"
+    RESOLVER_PROVIDER_RECOVERY_PENDING = "RESOLVER_PROVIDER_RECOVERY_PENDING"
+    EXCHANGE_READ_ONLY_UNAVAILABLE = "EXCHANGE_READ_ONLY_UNAVAILABLE"
+    EXCHANGE_STATE_UNKNOWN = "EXCHANGE_STATE_UNKNOWN"
+    RECONCILIATION_DIRTY = "RECONCILIATION_DIRTY"
+    RECONCILIATION_PERSISTENCE_FAILED = "RECONCILIATION_PERSISTENCE_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,9 +196,15 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
     reconciliation_status = (payload or {}).get("reconciliation_evidence_status")
     if reconciliation_status in ("PENDING", "PERSISTENCE_FAILED"):
         safe["reconciliation_evidence_status"] = reconciliation_status
+    blockers = (payload or {}).get("execution_reconciliation_blockers")
+    if isinstance(blockers, list) and all(isinstance(code, ReconciliationBlocker) for code in blockers):
+        safe["execution_reconciliation_blockers"] = blockers
     phase = (payload or {}).get("reconciliation_phase")
     if phase in ("STARTING", "PROVIDER_READ", "RECONCILIATION", "PERSISTENCE", "LIFECYCLE_EVENT"):
         safe["reconciliation_phase"] = phase
+        trace_id = (payload or {}).get("reconciliation_trace_id")
+        if isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{32}", trace_id):
+            safe["reconciliation_trace_id"] = trace_id
         operation_id = (payload or {}).get("reconciliation_operation_id")
         if isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id):
             safe["reconciliation_operation_id"] = operation_id

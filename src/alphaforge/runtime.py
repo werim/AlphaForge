@@ -60,6 +60,7 @@ from alphaforge.decision_invariant import (
 )
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import (
+    ReconciliationBlocker,
     SQLITE_BUSY_RETRY_ATTEMPTS,
     SQLITE_BUSY_RETRY_BASE_SECONDS,
     is_sqlite_busy_error,
@@ -428,7 +429,7 @@ class RuntimeOrchestrator:
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
-    _active_reconciliation_phase: tuple[float, str] | None = field(default=None, init=False)
+    _active_reconciliation_phase: tuple[float, str, str] | None = field(default=None, init=False)
     _heartbeat_persistence_failure_streak: int = field(default=0, init=False)
     _heartbeat_persistence_failure_threshold: int = field(default=3, init=False)
     _provider_failure_class: str | None = field(default=None, init=False)
@@ -884,7 +885,8 @@ class RuntimeOrchestrator:
             or self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}
         ):
             return
-        if runtime_state == "OPERATING" and self._execution_reconciliation_blocked():
+        execution_blockers = self._execution_reconciliation_blockers()
+        if runtime_state == "OPERATING" and execution_blockers:
             runtime_state = "RECOVERY_REQUIRED"
         if self.config.execution_mode == ExecutionMode.PAPER and self._burnin_run_id:
             self._restore_rejects_persisted()
@@ -907,6 +909,7 @@ class RuntimeOrchestrator:
                 "lifecycle_events": self.metrics.lifecycle_events,
                 "reconciliation_evidence_status": self._reconciliation_evidence_status(),
                 **self._reconciliation_cycle_diagnostics(),
+                "execution_reconciliation_blockers": execution_blockers,
                 "reconciliation_runs": self.metrics.reconciliation_runs,
                 "reconciliation_fail_closed": self.metrics.reconciliation_fail_closed,
                 "persistence_enabled": self.metrics.persistence_enabled,
@@ -1033,8 +1036,8 @@ class RuntimeOrchestrator:
         active = self._active_reconciliation_phase
         if active is None:
             return {}
-        started, phase = active
-        evidence = {"reconciliation_phase": phase}
+        started, phase, trace_id = active
+        evidence = {"reconciliation_phase": phase, "reconciliation_trace_id": trace_id}
         operation_id = self._reconciliation_reader.operation_id_since(started)
         if operation_id is not None:
             evidence["reconciliation_operation_id"] = operation_id
@@ -1047,14 +1050,26 @@ class RuntimeOrchestrator:
             return "PENDING"
         return None
 
-    def _execution_reconciliation_blocked(self) -> bool:
+    def _execution_reconciliation_blockers(self) -> list[ReconciliationBlocker]:
         if self.config.execution_mode == ExecutionMode.BACKTEST:
-            return False
-        return bool(self._storage_pressure or self._reconciliation_persistence_unhealthy or self._fail_closed_reason
-                    or self._recovery_required or self._unknown_exchange_state
-                    or self._resolver_provider_unavailable or self._resolver_provider_recovery_pending
-                    or self._exchange_read_only_status == "UNAVAILABLE"
-                    or self._reconciliation_status in {"EXCHANGE_STATE_UNKNOWN", "DIRTY", "PERSISTENCE_FAILED"})
+            return []
+        conditions = (
+            (ReconciliationBlocker.STORAGE_PRESSURE, self._storage_pressure),
+            (ReconciliationBlocker.RECONCILIATION_EVIDENCE_PENDING, self._reconciliation_persistence_unhealthy),
+            (ReconciliationBlocker.FAIL_CLOSED, self._fail_closed_reason),
+            (ReconciliationBlocker.RECOVERY_ACTION_REQUIRED, self._recovery_required),
+            (ReconciliationBlocker.UNKNOWN_EXCHANGE_STATE, self._unknown_exchange_state),
+            (ReconciliationBlocker.RESOLVER_PROVIDER_UNAVAILABLE, self._resolver_provider_unavailable),
+            (ReconciliationBlocker.RESOLVER_PROVIDER_RECOVERY_PENDING, self._resolver_provider_recovery_pending),
+            (ReconciliationBlocker.EXCHANGE_READ_ONLY_UNAVAILABLE, self._exchange_read_only_status == "UNAVAILABLE"),
+            (ReconciliationBlocker.EXCHANGE_STATE_UNKNOWN, self._reconciliation_status == "EXCHANGE_STATE_UNKNOWN"),
+            (ReconciliationBlocker.RECONCILIATION_DIRTY, self._reconciliation_status == "DIRTY"),
+            (ReconciliationBlocker.RECONCILIATION_PERSISTENCE_FAILED, self._reconciliation_status == "PERSISTENCE_FAILED"),
+        )
+        return [code for code, active in conditions if active]
+
+    def _execution_reconciliation_blocked(self) -> bool:
+        return bool(self._execution_reconciliation_blockers())
 
     def _mark_resolver_provider_failure(self) -> None:
         self._resolver_provider_unavailable = True
@@ -7097,11 +7112,12 @@ class RuntimeOrchestrator:
     async def _run_reconciliation_once(self) -> None:
         self.metrics.reconciliation_runs += 1
         timeout_phase = "STARTING"
+        trace_id = uuid.uuid4().hex
 
         def record_phase(phase: str) -> None:
             nonlocal timeout_phase
             timeout_phase = phase
-            self._active_reconciliation_phase = (reconciliation_started, phase)
+            self._active_reconciliation_phase = (reconciliation_started, phase, trace_id)
 
         reconciliation_started = time.monotonic()
         deadline = asyncio.timeout(self.config.reconciliation_timeout_sec)
@@ -7160,6 +7176,7 @@ class RuntimeOrchestrator:
                     diagnostics = {"evidence_status": "INCOMPLETE",
                             "failure_class": timeout_failure_class, "errors": ["reconciliation_timeout"],
                             "timeout_phase": timeout_phase,
+                            "reconciliation_trace_id": trace_id,
                             "read_observation": read_observation, "deadline_observation": deadline_observation,
                             "provenance": {"instance_id": state.instance_id, "startup_id": state.startup_id,
                                 "campaign_id": state.campaign_id, "burnin_run_id": state.burnin_run_id,
@@ -7299,8 +7316,11 @@ class RuntimeOrchestrator:
             try:
                 if on_phase is not None:
                     on_phase("PERSISTENCE")
+                diagnostics = dict(snapshot_source)
+                if self._active_reconciliation_phase is not None:
+                    diagnostics["reconciliation_trace_id"] = self._active_reconciliation_phase[2]
                 persist_reconciliation_cycle(engine, cycle_id=cycle_id, findings=findings, snapshot=state,
-                                             diagnostics=snapshot_source,
+                                             diagnostics=diagnostics,
                                              pending_failures=self._pending_reconciliation_persistence_failures,
                                              recovery_transition={"cycle_id": cycle_id, "provider_failure_count": self._provider_failure_count,
                                                  "previous_failure_class": self._provider_failure_class}

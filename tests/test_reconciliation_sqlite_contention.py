@@ -119,9 +119,11 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
                     "SELECT runtime_state, payload_json FROM runtime_heartbeats"
                 ).one()
             assert state == "RECOVERY_REQUIRED"
-            assert json.loads(payload)["reconciliation_evidence_status"] == "PENDING"
-            assert json.loads(payload)["reconciliation_phase"] == "PROVIDER_READ"
-            assert "reconciliation_operation_id" not in json.loads(payload)
+            heartbeat = json.loads(payload)
+            assert heartbeat["reconciliation_evidence_status"] == "PENDING"
+            assert heartbeat["reconciliation_phase"] == "PROVIDER_READ"
+            assert heartbeat["execution_reconciliation_blockers"] == ["RECONCILIATION_EVIDENCE_PENDING"]
+            assert "reconciliation_operation_id" not in heartbeat
             snapshot = runtime._build_runtime_state_snapshot(status="OPERATING")
             assert snapshot.runtime_status == "RECOVERY_REQUIRED"
             assert snapshot.diagnostics_json["reconciliation_evidence_status"] == "PENDING"
@@ -129,6 +131,12 @@ def test_pending_reconciliation_blocks_entries_without_reporting_write_failure(t
         finally:
             release.set()
             await task
+
+        with engine.connect() as conn:
+            diagnostics = conn.exec_driver_sql(
+                "SELECT diagnostics_json FROM exchange_reconciliation_events WHERE status = 'CLEAN'"
+            ).scalar_one()
+        assert json.loads(diagnostics)["reconciliation_trace_id"] == heartbeat["reconciliation_trace_id"]
 
     asyncio.run(run())
     assert runtime._reconciliation_cycle_diagnostics() == {}
