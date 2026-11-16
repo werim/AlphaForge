@@ -302,9 +302,10 @@ def test_cancelled_cycle_does_not_publish_abandoned_operation(monkeypatch):
             assert orchestrator._reconciliation_cycle_diagnostics() == {}
 
             async def observe_then_read(instance, current_provider):
-                assert orchestrator._reconciliation_cycle_diagnostics() == {
-                    "reconciliation_phase": "PROVIDER_READ",
-                }
+                current = orchestrator._reconciliation_cycle_diagnostics()
+                assert current["reconciliation_phase"] == "PROVIDER_READ"
+                assert current["reconciliation_trace_id"] != original["reconciliation_trace_id"]
+                assert "reconciliation_operation_id" not in current
                 return await original_read(instance, current_provider)
 
             original_read = type(reader).read
@@ -572,8 +573,13 @@ def test_timeout_incident_failure_cannot_block_committed_pause(monkeypatch, noti
     orchestrator._provider_failure_count = 2
     committed_at_pause = []
 
+    trace_ids = []
+
     async def stalled(self, *, on_phase):
         on_phase("LIFECYCLE_EVENT")
+        self._reconciliation_persistence_unhealthy = True
+        self.metrics.persistence_enabled = True
+        self._persist_runtime_heartbeat()
         await asyncio.Event().wait()
 
     async def notify(payload):
@@ -589,6 +595,14 @@ def test_timeout_incident_failure_cannot_block_committed_pause(monkeypatch, noti
             row = conn.execute(text(
                 "SELECT status, diagnostics_json FROM exchange_reconciliation_events"
             )).one()
+            heartbeat = conn.execute(text(
+                "SELECT runtime_state, payload_json FROM runtime_heartbeats"
+            )).one()
+        assert heartbeat[0] == "RECOVERY_REQUIRED"
+        payload = json.loads(heartbeat[1])
+        assert payload["execution_reconciliation_blockers"] == ["RECONCILIATION_EVIDENCE_PENDING"]
+        assert "reconciliation_operation_id" not in payload
+        trace_ids.append(payload["reconciliation_trace_id"])
         committed_at_pause.append((reason, row[0], json.loads(row[1])))
         self.shutdown()
 
@@ -607,6 +621,8 @@ def test_timeout_incident_failure_cannot_block_committed_pause(monkeypatch, noti
     assert len(committed_at_pause) == 1
     reason, status, details = committed_at_pause[0]
     assert reason == "PROVIDER_UNKNOWN_FAILURE_THRESHOLD"
+    assert details["reconciliation_trace_id"] == trace_ids[0]
+    assert details["deadline_observation"]["origin"] == "APPLICATION_DEADLINE"
     assert status == "EXCHANGE_STATE_UNKNOWN"
     assert details["timeout_phase"] == "LIFECYCLE_EVENT"
     assert details["failure_class"] == "UNKNOWN"
