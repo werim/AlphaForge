@@ -28,6 +28,7 @@ from alphaforge.config import load_config_from_env, load_reconciliation_settings
 from alphaforge.config_registry import managed_config_value
 from alphaforge.config_audit import audit_config
 from alphaforge.env_contract import bootstrap_environment, dotenv_status
+from alphaforge.signed_read_budget import scoped_probe, signed_phase
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
 from alphaforge.runtime_state import build_readonly_reconciliation_probe, CAMPAIGN_RECONCILIATION_MAX_AGE_SECONDS
 from alphaforge.persistence import init_db
@@ -570,7 +571,8 @@ def _preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequ
     provider = reconciliation_provider or _readonly_reconciliation_provider(cfg, reconciliation_tracked_symbols)
     if reconciliation_enabled and credentials_ok:
         try:
-            signed_probe = build_readonly_reconciliation_probe(provider)()
+            with signed_phase("worker_preflight"):
+                signed_probe = build_readonly_reconciliation_probe(provider)()
             probe_ok = signed_probe["evidence_status"] == "COMPLETE" and signed_probe["authenticated"] and signed_probe["input_source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
             add("signed_readonly_reconciliation_available", "PASS" if probe_ok else "FAIL", signed_probe)
         except Exception as exc:
@@ -703,10 +705,10 @@ def _preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequ
                 recovery_engine,
                 mode="PAPER",
                 campaign_id=cid,
-                reconciliation_probe=build_readonly_reconciliation_probe(
+                reconciliation_probe=scoped_probe("worker_recovery", build_readonly_reconciliation_probe(
                     reconciliation_provider
                     or _readonly_reconciliation_provider(cfg, reconciliation_tracked_symbols)
-                ),
+                )),
             )
             # A complete empty account snapshot is the required exchange evidence
             # for clearing an unrelated PAPER predecessor.  Preserve it append-only;

@@ -57,6 +57,9 @@ class BinanceReadonlyReconciliationConfig:
     transport_retries: int = 1
 
 
+from alphaforge.signed_read_budget import SignedReadDenied, configured as signed_budget, debit_signed
+
+
 class BinanceHttpTransport:
     """Small serial keep-alive transport; failed connections are never reused."""
 
@@ -86,6 +89,8 @@ class BinanceHttpTransport:
             self._connection.timeout = timeout_sec
             if self._connection.sock is not None:
                 self._connection.sock.settimeout(timeout_sec)
+            if any(name.lower() == "x-mbx-apikey" for name in headers) or "signature" in urllib.parse.parse_qs(parsed.query):
+                debit_signed("GET", url)
             self._connection.request("GET", path, headers=dict(headers))
             response = self._connection.getresponse()
             body = response.read()
@@ -123,6 +128,8 @@ class BinanceReadonlyReconciliationProvider:
                  now_ms: Callable[[], int] | None = None,
                  http_get_json: Callable[[str, Mapping[str, str], float], Any] | None = None,
                  transport: BinanceHttpTransport | None = None) -> None:
+        if signed_budget() is not None and (http_get_json is not None or transport is not None):
+            raise SignedReadDenied("UNMETERED_RECONCILIATION_TRANSPORT")
         if not config.api_key or not config.api_secret:
             raise ReconciliationAuthError("missing_binance_credentials")
         self._cfg = config
@@ -435,6 +442,12 @@ class BinanceReadonlyReconciliationProvider:
 
     def _http_operation(self, url: str, headers: Mapping[str, str], endpoint: str, symbol: str | None,
                         request_kind: str, attempt_number: int, retry_reason: str | None) -> tuple[Any, dict[str, Any]]:
+        if signed_budget() is not None and (
+            type(self._transport) is not BinanceHttpTransport
+            or getattr(self._http_get_json, "__self__", None) is not self._transport
+            or getattr(self._http_get_json, "__func__", None) is not BinanceHttpTransport.get_json
+        ):
+            raise SignedReadDenied("UNMETERED_RECONCILIATION_TRANSPORT")
         timeout_sec = min(self._cfg.request_timeout_sec, remaining_read_budget())
         self._http_request_count += 1
         attempt = {"sequence": self._http_request_count, "endpoint_class": endpoint, "symbol": symbol,
