@@ -94,6 +94,9 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, campaign_uses_dynamic_universe, DYNAMIC_UNIVERSE_SCOPE_MODE, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
+from alphaforge.signed_read_budget import (
+    close_signed_budget, open_scheduled_signed_phase, scheduled_signed_phase, scoped_probe,
+)
 from alphaforge.reconciliation_read_budget import ReconciliationReadBudgetExpired, reconciliation_read_deadline
 from alphaforge.portfolio_risk import allocate_portfolio_candidates, evaluate_portfolio_risk, snapshot_from_state, scale_candidate_exposure, risk_based_candidate_exposure
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
@@ -1119,7 +1122,7 @@ class RuntimeOrchestrator:
         if engine is None:
             self._recovery_required = True; self._fail_closed_reason = "RUNTIME_DB_UNAVAILABLE"; return
         provider = self.live_reconciliation_provider or self.exchange_snapshot_provider
-        probe = build_readonly_reconciliation_probe(provider)
+        probe = scoped_probe("startup_recovery", build_readonly_reconciliation_probe(provider))
         decision = evaluate_runtime_recovery(engine, mode=self.config.execution_mode.value, campaign_id=os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or None, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or self.config.phase7_burnin_release_id, instance_id=self.runtime_instance_id, startup_id=self.startup_id, reconciliation_probe=probe)
         self._recovery_decision = decision
         latest = decision.get("latest")
@@ -1264,7 +1267,8 @@ class RuntimeOrchestrator:
         if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
             self._attach_phase8_campaign()
             self._start_or_resume_burnin_run()
-            await self._run_reconciliation_once()
+            with scheduled_signed_phase("startup"):
+                await self._run_reconciliation_once()
             if self._fail_closed_reason and not self.config.diagnostic_mode:
                 self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
                 raise RuntimeError(self._fail_closed_reason)
@@ -7102,9 +7106,11 @@ class RuntimeOrchestrator:
     async def _reconciliation_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
-                started = time.time()
-                await self._run_reconciliation_once()
-                elapsed = time.time() - started
+                with scheduled_signed_phase("periodic") as phase:
+                    started = time.monotonic()
+                    await self._run_reconciliation_once()
+                cadence_start = phase.reserved_at if phase.reserved_at is not None else started
+                elapsed = time.monotonic() - cadence_start
                 await asyncio.sleep(max(0.0, self.config.reconciliation_interval_sec - elapsed))
         except asyncio.CancelledError:
             raise
@@ -7228,7 +7234,8 @@ class RuntimeOrchestrator:
                 try:
                     if on_phase is not None:
                         on_phase("PROVIDER_READ")
-                    snapshot_source = await self._reconciliation_reader.read(provider)
+                    with open_scheduled_signed_phase():
+                        snapshot_source = await self._reconciliation_reader.read(provider)
                     if provider is not (self.live_reconciliation_provider or self.exchange_snapshot_provider):
                         raise RuntimeError("reconciliation_provider_changed_during_read")
                 except ReconciliationReadBudgetExpired:
@@ -7381,6 +7388,12 @@ class RuntimeOrchestrator:
             self._provider_failure_count = 0
 
     async def _shutdown_tasks(self) -> None:
+        try:
+            close_signed_budget()
+        finally:
+            await self._drain_shutdown_tasks()
+
+    async def _drain_shutdown_tasks(self) -> None:
         if self._shadow_queue is not None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._shadow_queue.join(), timeout=self.config.agent_graph_stage_timeout_seconds)

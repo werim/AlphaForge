@@ -247,8 +247,12 @@ def heartbeat_window(db, campaign_id, run_id):
     return (datetime.fromisoformat(row[1].replace('Z','+00:00'))-datetime.fromisoformat(row[0].replace('Z','+00:00'))).total_seconds()
 
 
+from alphaforge.signed_read_budget import ENV_KEYS as SIGNED_BUDGET_ENV, configured as signed_budget
+
+
 async def real_worker(plan, control_path: Path, guard):
     """Actual runtime, canonical scanner/providers, writers/resolvers/controller."""
+    signed_budget()
     from sqlalchemy import create_engine
     from alphaforge import burnin_ops as ops
     from alphaforge.burnin_campaign import (create_campaign, start_or_resume_campaign,
@@ -470,7 +474,7 @@ def run(plan_path: Path, digest: str):
         write_json(root / 'plan.json', plan)
         source_root = Path(__file__).resolve().parents[2]
         git_dir = subprocess.check_output(['git','-C',str(source_root),'rev-parse','--absolute-git-dir'], text=True).strip()
-        env = {k: v for k, v in os.environ.items() if k in ('PATH','LANG','LC_ALL','SYSTEMROOT','BINANCE_API_KEY','BINANCE_API_SECRET')}
+        env = {k: v for k, v in os.environ.items() if k in ('PATH','LANG','LC_ALL','SYSTEMROOT','BINANCE_API_KEY','BINANCE_API_SECRET',*SIGNED_BUDGET_ENV)}
         env.update({k: str(v) for k,v in plan['config_env'].items()})
         env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(source_root/'src'), TMPDIR=str(root/'tmp'),
                    GIT_DIR=git_dir, GIT_WORK_TREE=str(source_root), GIT_OPTIONAL_LOCKS='0', ALPHAFORGE_DATABASE_URL=f'sqlite+pysqlite:///{root / "laboratory.db"}',
